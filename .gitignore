@@ -24,6 +24,9 @@ release
 GPT-SoVITS-v2_ProPlus/
 *.zip
 
+# Project-local planning notes (dev only)
+记忆系统plan.md
+
 # Python caches
 __pycache__/
 *.pyc
