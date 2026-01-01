@@ -24,6 +24,12 @@ release
 GPT-SoVITS-v2_ProPlus/
 *.zip
 
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 # Windows oddities
 nul
 
