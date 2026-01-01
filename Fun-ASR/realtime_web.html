@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fun-ASR 实时语音识别</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      color: #fff;
+      padding: 20px;
+    }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+      font-size: 2em;
+      background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      margin-bottom: 18px;
+      flex-wrap: wrap;
+    }
+    select, button {
+      padding: 12px 18px;
+      font-size: 16px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.25s;
+    }
+    select { background: rgba(255,255,255,0.1); color: #fff; min-width: 240px; }
+    select option { background: #1a1a2e; color: #fff; }
+    button {
+      background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+      color: #fff;
+      font-weight: bold;
+    }
+    button:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0,210,255,0.4); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+    button.recording { background: linear-gradient(90deg, #ff416c, #ff4b2b); animation: pulse 1.5s infinite; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255,65,108,0.7); }
+      50% { box-shadow: 0 0 0 15px rgba(255,65,108,0); }
+    }
+    .status {
+      text-align: center;
+      margin-bottom: 18px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.1);
+    }
+    .status.connected { border-left: 4px solid #00ff88; }
+    .status.disconnected { border-left: 4px solid #ff4444; }
+    .status.recording { border-left: 4px solid #ff416c; }
+    .visualizer {
+      height: 60px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 8px;
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      padding: 0 18px;
+    }
+    .bar {
+      width: 4px;
+      background: linear-gradient(180deg, #00d2ff, #3a7bd5);
+      border-radius: 2px;
+      transition: height 0.1s;
+    }
+    .result-box {
+      background: rgba(255,255,255,0.05);
+      border-radius: 12px;
+      padding: 18px;
+      min-height: 300px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .result-box h3 { margin-bottom: 12px; color: #00d2ff; }
+    #result { font-size: 18px; line-height: 1.8; white-space: pre-wrap; word-break: break-all; }
+    .result-item {
+      padding: 8px 12px;
+      margin: 6px 0;
+      background: rgba(0,210,255,0.1);
+      border-radius: 6px;
+      border-left: 3px solid #00d2ff;
+    }
+    .clear-btn { background: rgba(255,255,255,0.1); margin-top: 12px; }
+    .tips { opacity: 0.85; font-size: 12px; text-align: center; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Fun-ASR 实时语音识别</h1>
+
+    <div class="controls">
+      <select id="micSelect">
+        <option value="">选择麦克风...</option>
+      </select>
+      <button id="startBtn">开始录音</button>
+      <button id="stopBtn" disabled>停止录音</button>
+      <button class="clear-btn" id="clearBtn">清空结果</button>
+    </div>
+
+    <div class="visualizer" id="visualizer"></div>
+
+    <div id="status" class="status disconnected">未连接</div>
+    <div class="tips">提示：断线会自动重连；服务端会根据浏览器实际采样率自动重采样到 16k。</div>
+
+    <div class="result-box">
+      <h3>识别结果</h3>
+      <div id="result"></div>
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let mediaStream = null;
+    let audioContext = null;
+    let processor = null;
+    let analyser = null;
+    let isRecording = false;
+    let manualStop = false;
+    let reconnectTimer = null;
+    let pingTimer = null;
+
+    const micSelect = document.getElementById('micSelect');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const status = document.getElementById('status');
+    const result = document.getElementById('result');
+    const visualizer = document.getElementById('visualizer');
+
+    for (let i = 0; i < 50; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.height = '5px';
+      visualizer.appendChild(bar);
+    }
+    const bars = visualizer.querySelectorAll('.bar');
+
+    async function getMicrophones() {
+      try {
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const mics = devices.filter(d => d.kind === 'audioinput');
+
+        micSelect.innerHTML = '<option value="">选择麦克风...</option>';
+        mics.forEach((mic, i) => {
+          const option = document.createElement('option');
+          option.value = mic.deviceId;
+          option.text = mic.label || `麦克风 ${i + 1}`;
+          micSelect.appendChild(option);
+        });
+
+        if (mics.length > 0) micSelect.value = mics[0].deviceId;
+      } catch (e) {
+        console.error('获取麦克风失败:', e);
+        alert('无法获取麦克风权限，请确保已授权。');
+      }
+    }
+
+    function stopPing() {
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
+    }
+
+    function startPing() {
+      stopPing();
+      pingTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+        }
+      }, 15000);
+    }
+
+    function sendConfig() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const sampleRate = audioContext ? audioContext.sampleRate : 16000;
+      ws.send(JSON.stringify({
+        type: 'config',
+        sampleRate,
+        language: '中文',
+        enableAgc: true,
+        debug: false,
+      }));
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectWS();
+      }, 800);
+    }
+
+    function connectWS() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${location.host}/ws`);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        status.textContent = '已连接服务器';
+        status.className = 'status connected';
+        sendConfig();
+        startPing();
+      };
+
+      ws.onmessage = (event) => {
+        let data = null;
+        try { data = JSON.parse(event.data); } catch { return; }
+        if (data.type === 'result' && data.text) {
+          const item = document.createElement('div');
+          item.className = 'result-item';
+          item.textContent = data.text;
+          result.appendChild(item);
+          result.scrollTop = result.scrollHeight;
+        }
+      };
+
+      ws.onclose = () => {
+        stopPing();
+        status.textContent = '连接已断开';
+        status.className = 'status disconnected';
+        if (isRecording && !manualStop) scheduleReconnect();
+      };
+
+      ws.onerror = (e) => {
+        console.error('WebSocket 错误:', e);
+        status.textContent = '连接错误';
+        status.className = 'status disconnected';
+      };
+    }
+
+    async function startRecording() {
+      if (!micSelect.value) {
+        alert('请先选择麦克风。');
+        return;
+      }
+
+      try {
+        manualStop = false;
+
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: micSelect.value,
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+          }
+        });
+
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        const source = audioContext.createMediaStreamSource(mediaStream);
+
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 128;
+        source.connect(analyser);
+
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        connectWS();
+
+        processor.onaudioprocess = (e) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          if (ws.bufferedAmount > 2 * 1024 * 1024) return;
+          const audioData = e.inputBuffer.getChannelData(0);
+          ws.send(audioData.buffer);
+        };
+
+        isRecording = true;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        startBtn.classList.add('recording');
+        status.textContent = '正在录音...';
+        status.className = 'status recording';
+
+        visualize();
+      } catch (e) {
+        console.error('启动录音失败:', e);
+        alert('启动录音失败: ' + (e && e.message ? e.message : e));
+      }
+    }
+
+    function stopRecording() {
+      manualStop = true;
+      isRecording = false;
+      stopPing();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+
+      if (processor) {
+        processor.disconnect();
+        processor = null;
+      }
+      if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+      }
+      if (ws) {
+        try { ws.close(); } catch {}
+        ws = null;
+      }
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      startBtn.classList.remove('recording');
+      status.textContent = '已停止';
+      status.className = 'status disconnected';
+      bars.forEach(bar => bar.style.height = '5px');
+    }
+
+    function visualize() {
+      if (!isRecording || !analyser) return;
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(dataArray);
+      bars.forEach((bar, i) => {
+        const value = dataArray[i] || 0;
+        bar.style.height = Math.max(5, value / 4) + 'px';
+      });
+      requestAnimationFrame(visualize);
+    }
+
+    function clearResult() {
+      result.innerHTML = '';
+    }
+
+    startBtn.onclick = startRecording;
+    stopBtn.onclick = stopRecording;
+    clearBtn.onclick = clearResult;
+    getMicrophones();
+  </script>
+</body>
+</html>
+

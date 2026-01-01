@@ -1,0 +1,4 @@
+torch
+torchaudio
+transformers
+git+https://github.com/modelscope/FunASR
