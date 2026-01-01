@@ -1,0 +1,39 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+dist-electron
+release
+
+# Agent/automation work dirs
+.codex/
+.serena/
+.claude/
+.spec-workflow/
+
+# Large local assets / backups (do not commit)
+GPT-SoVITS-v2_ProPlus/
+*.zip
+
+# Windows oddities
+nul
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

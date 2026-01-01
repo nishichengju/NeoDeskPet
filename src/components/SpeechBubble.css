@@ -1,0 +1,402 @@
+/**
+ * SpeechBubble Styles
+ * Multiple cute bubble styles for the desktop pet
+ */
+
+/* Base bubble styles */
+.speech-bubble {
+  position: absolute;
+  width: 200px;
+  max-width: 200px;
+  z-index: 100;
+  animation: bubble-appear 0.3s ease-out;
+  pointer-events: auto;
+}
+
+.speech-bubble-content {
+  position: relative;
+  padding: 12px 16px;
+  padding-right: 28px;
+  max-height: 140px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.speech-bubble-content::-webkit-scrollbar {
+  display: none;
+}
+
+.speech-bubble-text {
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  word-wrap: break-word;
+  display: inline;
+}
+
+.typing-cursor {
+  display: inline-block;
+  animation: blink 0.8s infinite;
+  font-weight: bold;
+  margin-left: 1px;
+}
+
+.speech-bubble-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  padding: 0;
+}
+
+/* ========== TAIL DIRECTIONS ========== */
+.speech-bubble-tail {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+/* Tail pointing UP */
+.speech-bubble-tail.tail-up {
+  left: 50%;
+  top: -10px;
+  transform: translateX(-50%);
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-bottom: 12px solid #fff;
+}
+
+/* Tail pointing DOWN */
+.speech-bubble-tail.tail-down {
+  left: 50%;
+  bottom: -10px;
+  transform: translateX(-50%);
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 12px solid #fff;
+}
+
+/* Tail pointing LEFT */
+.speech-bubble-tail.tail-left {
+  left: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-right: 12px solid #fff;
+}
+
+/* Tail pointing RIGHT */
+.speech-bubble-tail.tail-right {
+  right: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-left: 12px solid #fff;
+}
+
+/* ========== CUTE STYLE ========== */
+.speech-bubble-style-cute .speech-bubble-content {
+  background: linear-gradient(135deg, #fff0f5 0%, #ffe4ec 100%);
+  border-radius: 18px;
+  border: 2px solid rgba(255, 182, 193, 0.6);
+  box-shadow:
+    0 4px 15px rgba(255, 105, 180, 0.2),
+    0 2px 6px rgba(255, 182, 193, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.speech-bubble-style-cute .speech-bubble-text {
+  color: #d63384;
+}
+
+.speech-bubble-style-cute .typing-cursor {
+  color: #ff69b4;
+}
+
+.speech-bubble-style-cute .speech-bubble-close {
+  background: rgba(255, 182, 193, 0.4);
+  color: #d63384;
+}
+
+.speech-bubble-style-cute .speech-bubble-close:hover {
+  background: rgba(255, 105, 180, 0.5);
+  color: #fff;
+  transform: scale(1.1);
+}
+
+.speech-bubble-style-cute .speech-bubble-tail.tail-up {
+  border-bottom-color: #ffe4ec;
+  filter: drop-shadow(0 -2px 2px rgba(255, 105, 180, 0.15));
+}
+
+.speech-bubble-style-cute .speech-bubble-tail.tail-down {
+  border-top-color: #ffe4ec;
+  filter: drop-shadow(0 2px 2px rgba(255, 105, 180, 0.15));
+}
+
+.speech-bubble-style-cute .speech-bubble-tail.tail-left {
+  border-right-color: #ffe4ec;
+  filter: drop-shadow(-2px 0 2px rgba(255, 105, 180, 0.15));
+}
+
+.speech-bubble-style-cute .speech-bubble-tail.tail-right {
+  border-left-color: #ffe4ec;
+  filter: drop-shadow(2px 0 2px rgba(255, 105, 180, 0.15));
+}
+
+/* Cute decorative hearts */
+.speech-bubble-style-cute .speech-bubble-content::before {
+  content: "♡";
+  position: absolute;
+  top: -8px;
+  left: 12px;
+  font-size: 12px;
+  color: rgba(255, 105, 180, 0.6);
+}
+
+.speech-bubble-style-cute .speech-bubble-content::after {
+  content: "♡";
+  position: absolute;
+  top: -5px;
+  left: 28px;
+  font-size: 8px;
+  color: rgba(255, 182, 193, 0.5);
+}
+
+/* ========== PIXEL STYLE ========== */
+.speech-bubble-style-pixel .speech-bubble-content {
+  background: #ffffff;
+  border-radius: 0;
+  border: 3px solid #333;
+  box-shadow: 4px 4px 0 #333;
+  image-rendering: pixelated;
+}
+
+.speech-bubble-style-pixel .speech-bubble-text {
+  color: #333;
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+}
+
+.speech-bubble-style-pixel .typing-cursor {
+  color: #333;
+}
+
+.speech-bubble-style-pixel .speech-bubble-close {
+  background: #333;
+  color: #fff;
+  border-radius: 0;
+}
+
+.speech-bubble-style-pixel .speech-bubble-close:hover {
+  background: #666;
+}
+
+/* Pixel style tails - use square shape */
+.speech-bubble-style-pixel .speech-bubble-tail.tail-up {
+  top: -12px;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-left: 3px solid #333;
+  border-top: 3px solid #333;
+  transform: translateX(-50%) rotate(45deg);
+  border-bottom: none;
+  border-right: none;
+}
+
+.speech-bubble-style-pixel .speech-bubble-tail.tail-down {
+  bottom: -12px;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-right: 3px solid #333;
+  border-bottom: 3px solid #333;
+  transform: translateX(-50%) rotate(45deg);
+  border-top: none;
+  border-left: none;
+}
+
+.speech-bubble-style-pixel .speech-bubble-tail.tail-left {
+  left: -12px;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-left: 3px solid #333;
+  border-bottom: 3px solid #333;
+  transform: translateY(-50%) rotate(45deg);
+  border-top: none;
+  border-right: none;
+}
+
+.speech-bubble-style-pixel .speech-bubble-tail.tail-right {
+  right: -12px;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-right: 3px solid #333;
+  border-top: 3px solid #333;
+  transform: translateY(-50%) rotate(45deg);
+  border-bottom: none;
+  border-left: none;
+}
+
+.speech-bubble-style-pixel .speech-bubble-content::before,
+.speech-bubble-style-pixel .speech-bubble-content::after {
+  display: none;
+}
+
+/* ========== MINIMAL STYLE ========== */
+.speech-bubble-style-minimal .speech-bubble-content {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.speech-bubble-style-minimal .speech-bubble-text {
+  color: #444;
+  font-size: 13px;
+}
+
+.speech-bubble-style-minimal .typing-cursor {
+  color: #888;
+}
+
+.speech-bubble-style-minimal .speech-bubble-close {
+  background: rgba(0, 0, 0, 0.05);
+  color: #888;
+}
+
+.speech-bubble-style-minimal .speech-bubble-close:hover {
+  background: rgba(0, 0, 0, 0.1);
+  color: #333;
+}
+
+.speech-bubble-style-minimal .speech-bubble-tail.tail-up {
+  border-bottom-color: rgba(255, 255, 255, 0.95);
+}
+
+.speech-bubble-style-minimal .speech-bubble-tail.tail-down {
+  border-top-color: rgba(255, 255, 255, 0.95);
+}
+
+.speech-bubble-style-minimal .speech-bubble-tail.tail-left {
+  border-right-color: rgba(255, 255, 255, 0.95);
+}
+
+.speech-bubble-style-minimal .speech-bubble-tail.tail-right {
+  border-left-color: rgba(255, 255, 255, 0.95);
+}
+
+.speech-bubble-style-minimal .speech-bubble-content::before,
+.speech-bubble-style-minimal .speech-bubble-content::after {
+  display: none;
+}
+
+/* ========== CLOUD STYLE ========== */
+.speech-bubble-style-cloud .speech-bubble-content {
+  background: linear-gradient(180deg, #ffffff 0%, #f0f8ff 100%);
+  border-radius: 25px;
+  border: 2px solid rgba(135, 206, 250, 0.5);
+  box-shadow:
+    0 6px 20px rgba(135, 206, 250, 0.25),
+    inset 0 2px 0 rgba(255, 255, 255, 1);
+}
+
+.speech-bubble-style-cloud .speech-bubble-text {
+  color: #4a90d9;
+}
+
+.speech-bubble-style-cloud .typing-cursor {
+  color: #87ceeb;
+}
+
+.speech-bubble-style-cloud .speech-bubble-close {
+  background: rgba(135, 206, 250, 0.3);
+  color: #4a90d9;
+}
+
+.speech-bubble-style-cloud .speech-bubble-close:hover {
+  background: rgba(135, 206, 250, 0.6);
+  color: #fff;
+  transform: scale(1.1);
+}
+
+.speech-bubble-style-cloud .speech-bubble-tail.tail-up {
+  border-bottom-color: #f0f8ff;
+}
+
+.speech-bubble-style-cloud .speech-bubble-tail.tail-down {
+  border-top-color: #f0f8ff;
+}
+
+.speech-bubble-style-cloud .speech-bubble-tail.tail-left {
+  border-right-color: #f0f8ff;
+}
+
+.speech-bubble-style-cloud .speech-bubble-tail.tail-right {
+  border-left-color: #f0f8ff;
+}
+
+/* Cloud decorative puffs */
+.speech-bubble-style-cloud .speech-bubble-content::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 15px;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(135, 206, 250, 0.3);
+}
+
+.speech-bubble-style-cloud .speech-bubble-content::after {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 30px;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(135, 206, 250, 0.2);
+}
+
+/* ========== ANIMATIONS ========== */
+@keyframes bubble-appear {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.8);
+  }
+  50% {
+    transform: translate(-50%, 0) scale(1.05);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@keyframes blink {
+  0%, 50% {
+    opacity: 1;
+  }
+  51%, 100% {
+    opacity: 0;
+  }
+}

@@ -1,0 +1,1375 @@
+.ndp-pet-root,
+.ndp-chat-root,
+.ndp-settings-root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  color: rgba(255, 255, 255, 0.92);
+  background: transparent;
+  overflow: hidden;
+}
+
+.ndp-pet-root {
+  background: transparent;
+  position: relative;
+}
+
+.ndp-chat-root,
+.ndp-settings-root {
+  background: rgba(20, 20, 24, 0.45);
+  backdrop-filter: blur(14px);
+}
+
+.ndp-chat-root {
+  background: var(--ndp-chat-bg, rgba(20, 20, 24, 0.45));
+}
+
+.ndp-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.ndp-title {
+  font-weight: 600;
+}
+
+.ndp-actions {
+  display: flex;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(255, 255, 255, 0.92);
+  border-radius: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.ndp-btn:hover {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.ndp-pet-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.ndp-live2d-root {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.ndp-live2d-root canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Transparent overlay for mouse events */
+.ndp-live2d-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  cursor: grab;
+  z-index: 10;
+}
+
+.ndp-live2d-overlay:active {
+  cursor: grabbing;
+}
+
+/* Context Menu */
+.ndp-context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 120px;
+  background: rgba(30, 30, 45, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  padding: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-context-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.ndp-context-item:hover {
+  background: rgba(102, 126, 234, 0.3);
+}
+
+.ndp-context-icon {
+  width: 20px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.ndp-context-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 4px 8px;
+}
+
+.ndp-context-item-danger {
+  color: rgba(248, 113, 113, 0.9);
+}
+
+.ndp-context-item-danger:hover {
+  background: rgba(248, 113, 113, 0.2);
+}
+
+.ndp-footer {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.ndp-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.ndp-chat-membar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.78);
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-chat-membar-left,
+.ndp-chat-membar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ndp-chat-mem-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ndp-chat-membar-error {
+  color: rgba(255, 140, 140, 0.95);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-session-name {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 65%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-session-name:hover {
+  color: rgba(255, 255, 255, 0.98);
+}
+
+.ndp-session-arrow {
+  font-weight: 700;
+  opacity: 0.75;
+  transition: transform 0.15s ease;
+}
+
+.ndp-session-arrow.open {
+  transform: rotate(180deg);
+}
+
+.ndp-chat-messages {
+  flex: 1;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.ndp-muted {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.ndp-msg {
+  padding: 10px 12px;
+  border-radius: var(--ndp-bubble-radius, 14px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--ndp-assistant-bubble-bg, rgba(0, 0, 0, 0.25));
+  max-width: 78%;
+  white-space: pre-wrap;
+  line-height: 1.35;
+}
+
+.ndp-msg-user {
+  align-self: flex-end;
+  background: var(--ndp-user-bubble-bg, rgba(80, 140, 255, 0.22));
+}
+
+.ndp-msg-pet {
+  align-self: flex-start;
+}
+
+.ndp-chat-input {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  -webkit-app-region: no-drag;
+}
+
+.ndp-chat-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.ndp-chat-input-row input {
+  flex: 1;
+  border-radius: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  outline: none;
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.ndp-input-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.ndp-input-preview img {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ndp-preview-remove {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ndp-preview-remove:hover {
+  border-color: rgba(248, 113, 113, 0.6);
+  background: rgba(248, 113, 113, 0.15);
+}
+
+/* Chat message rows (avatar + bubble) */
+.ndp-chat-root {
+  position: relative;
+}
+
+.ndp-msg-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.ndp-msg-row-user {
+  justify-content: flex-end;
+}
+
+.ndp-msg-row-pet {
+  justify-content: flex-start;
+}
+
+.ndp-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ndp-avatar span {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.ndp-avatar-clickable {
+  cursor: pointer;
+}
+
+.ndp-avatar-clickable:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.ndp-inline-textarea {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  line-height: 1.35;
+  padding: 0;
+  resize: none;
+  overflow: hidden;
+}
+
+.ndp-msg-image {
+  display: block;
+  width: min(240px, 100%);
+  border-radius: 12px;
+  margin-top: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+
+.ndp-msg-edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Session list */
+.ndp-session-list {
+  position: absolute;
+  top: 56px;
+  left: 12px;
+  right: auto;
+  width: min(420px, calc(100% - 24px));
+  z-index: 40;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(20, 20, 24, 0.96);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-session-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.ndp-session-current {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-session-list-items {
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.ndp-session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 10px;
+  cursor: pointer;
+}
+
+.ndp-session-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ndp-session-item.active {
+  background: rgba(80, 140, 255, 0.16);
+}
+
+.ndp-session-info {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.ndp-session-item-name {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.ndp-session-item-count {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.ndp-session-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.9;
+}
+
+.ndp-session-action {
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  font-size: 14px;
+}
+
+.ndp-session-action:hover {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.ndp-session-action.delete:hover {
+  border-color: rgba(248, 113, 113, 0.6);
+  background: rgba(248, 113, 113, 0.15);
+}
+
+.ndp-session-rename-input {
+  width: 220px;
+  border-radius: 10px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  outline: none;
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* Context menu */
+.ndp-context-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 15, 18, 0.96);
+  border-radius: 12px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+  -webkit-app-region: no-drag;
+}
+
+.ndp-context-menu button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  padding: 10px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.ndp-context-menu button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ndp-context-menu button.delete:hover {
+  background: rgba(248, 113, 113, 0.16);
+  color: rgba(248, 113, 113, 0.95);
+}
+
+/* ========== Settings Window Styles ========== */
+
+.ndp-settings-root {
+  background: rgba(30, 30, 45, 0.98);
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+/* Settings Header */
+.ndp-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.ndp-settings-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.ndp-settings-icon {
+  font-size: 18px;
+}
+
+.ndp-btn-close {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.ndp-btn-close:hover {
+  background: rgba(248, 113, 113, 0.8);
+}
+
+/* Settings Tabs */
+.ndp-settings-tabs {
+  display: flex;
+  padding: 0 18px;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ndp-tab-btn {
+  flex: 1;
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.ndp-tab-btn:hover {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.ndp-tab-btn.active {
+  color: #fff;
+  border-bottom-color: #667eea;
+}
+
+/* Settings Content */
+.ndp-settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-settings-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.ndp-settings-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ndp-settings-content::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.ndp-settings-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.ndp-settings-section h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 16px 0;
+}
+
+.ndp-setting-item {
+  margin-bottom: 18px;
+}
+
+.ndp-setting-item > label {
+  display: block;
+  font-size: 14px;
+  color: #fff;
+  margin-bottom: 8px;
+}
+
+.ndp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ndp-row > .ndp-input,
+.ndp-row > .ndp-select {
+  flex: 1;
+}
+
+.ndp-memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ndp-memory-item {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.ndp-memory-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 8px;
+}
+
+.ndp-memory-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.5;
+}
+
+.ndp-memory-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+/* Checkbox Label */
+.ndp-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #fff;
+}
+
+.ndp-checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #667eea;
+  cursor: pointer;
+}
+
+/* Range Input */
+.ndp-range-input {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ndp-range-input input[type="range"] {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.ndp-range-input input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  cursor: grab;
+  transition: transform 0.2s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.ndp-range-input input[type="range"]::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  transform: scale(1.15);
+}
+
+.ndp-range-input input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+.ndp-range-input input[type="range"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ndp-range-input input[type="range"]:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+}
+
+.ndp-range-input span {
+  min-width: 50px;
+  text-align: right;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* RGBA editor (Chat UI settings) */
+.ndp-rgba-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.ndp-rgba-preview {
+  width: 100%;
+  height: 22px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ndp-rgba-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ndp-rgba-key {
+  width: 16px;
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ndp-rgba-row input[type="range"] {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.ndp-rgba-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  cursor: grab;
+  transition: transform 0.2s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.ndp-rgba-row input[type="range"]::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  transform: scale(1.15);
+}
+
+.ndp-rgba-row input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+.ndp-rgba-input {
+  width: 74px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(255, 255, 255, 0.92);
+  outline: none;
+  font-size: 13px;
+}
+
+.ndp-rgba-input:focus {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+}
+
+/* Background image picker (Chat UI settings) */
+.ndp-bgimg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ndp-bgimg-preview {
+  width: 70px;
+  height: 70px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+}
+
+.ndp-bgimg-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ndp-bgimg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ndp-bgimg-actions input[type="file"] {
+  max-width: 220px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ndp-bgimg-actions input[type="file"]::file-selector-button {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.2);
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  margin-right: 10px;
+}
+
+.ndp-bgimg-actions input[type="file"]::file-selector-button:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.28);
+}
+
+/* Setting Hint */
+.ndp-setting-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 6px 0 0 0;
+}
+
+/* Setting Note */
+.ndp-setting-note {
+  margin-top: 16px;
+  padding: 12px;
+  background: rgba(102, 126, 234, 0.1);
+  border-radius: 8px;
+  border-left: 3px solid #667eea;
+}
+
+.ndp-setting-note p {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* Settings Footer */
+.ndp-settings-footer {
+  padding: 14px 18px;
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  justify-content: flex-end;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-reset-btn {
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ndp-reset-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.ndp-reset-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Select Input */
+.ndp-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.2s ease;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-select:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.ndp-select:focus {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+}
+
+.ndp-select option {
+  background: #1e1e2d;
+  color: #fff;
+}
+
+/* Model Info */
+.ndp-model-info {
+  margin: 12px 0;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ndp-model-path {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0 0 8px 0;
+  word-break: break-all;
+}
+
+.ndp-model-path code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.ndp-model-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ndp-feature-tag {
+  display: inline-block;
+  padding: 4px 10px;
+  background: rgba(102, 126, 234, 0.2);
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  border-radius: 12px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* Test Buttons */
+.ndp-test-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ndp-test-btn {
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ndp-test-btn:hover {
+  background: rgba(102, 126, 234, 0.3);
+  border-color: rgba(102, 126, 234, 0.5);
+}
+
+.ndp-test-btn:active {
+  transform: scale(0.95);
+}
+
+/* Text Input */
+.ndp-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  transition: all 0.2s ease;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-input:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.ndp-input:focus {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+}
+
+.ndp-input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Textarea */
+.ndp-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  transition: all 0.2s ease;
+  resize: vertical;
+  min-height: 80px;
+  font-family: inherit;
+  line-height: 1.5;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-textarea-compact {
+  min-height: 60px;
+}
+
+.ndp-textarea:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.ndp-textarea:focus {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+}
+
+.ndp-textarea::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Chat Window Enhancements */
+.ndp-chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+}
+
+.ndp-chat-hint {
+  font-size: 12px;
+}
+
+.ndp-chat-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(248, 113, 113, 0.15);
+  border-top: 1px solid rgba(248, 113, 113, 0.3);
+  color: rgba(248, 113, 113, 0.9);
+  font-size: 13px;
+}
+
+.ndp-chat-error button {
+  background: none;
+  border: none;
+  color: rgba(248, 113, 113, 0.9);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.ndp-chat-error button:hover {
+  color: #f87171;
+}
+
+/* Loading animation */
+.ndp-msg-loading {
+  opacity: 0.7;
+}
+
+.ndp-loading-dots::after {
+  content: '';
+  animation: dots 1.5s steps(4, end) infinite;
+}
+
+@keyframes dots {
+  0%, 20% { content: ''; }
+  40% { content: '.'; }
+  60% { content: '..'; }
+  80%, 100% { content: '...'; }
+}
+
+/* Disabled button state */
+.ndp-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ndp-chat-input-row input:disabled {
+  opacity: 0.6;
+}
+
+/* ========== Bubble Settings Styles ========== */
+.ndp-style-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ndp-style-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 8px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ndp-style-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.ndp-style-btn.active {
+  border-color: rgba(255, 182, 193, 0.8);
+  background: rgba(255, 182, 193, 0.15);
+}
+
+.ndp-style-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 4px;
+}
+
+.ndp-style-desc {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
+}
+
+/* Position selection grid */
+.ndp-position-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ndp-position-btn {
+  padding: 10px 8px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ndp-position-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.ndp-position-btn.active {
+  border-color: rgba(255, 182, 193, 0.8);
+  background: rgba(255, 182, 193, 0.15);
+  color: #fff;
+}
+
+/* Tail direction grid */
+.ndp-tail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ndp-tail-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 8px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ndp-tail-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.ndp-tail-btn.active {
+  border-color: rgba(255, 182, 193, 0.8);
+  background: rgba(255, 182, 193, 0.15);
+  color: #fff;
+}
+
+.ndp-tail-icon {
+  font-size: 18px;
+  margin-bottom: 2px;
+}
+
+.ndp-tail-label {
+  font-size: 11px;
+}
+
+/* Custom phrases textarea */
+.ndp-phrases-textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  font-family: inherit;
+  margin-top: 8px;
+}
+
+.ndp-phrases-textarea:focus {
+  outline: none;
+  border-color: rgba(255, 182, 193, 0.6);
+}
+
+.ndp-phrases-textarea::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.ndp-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.ndp-checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #ff69b4;
+  cursor: pointer;
+}

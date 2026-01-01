@@ -1,0 +1,67 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "XIAOPmaiddress.moc3",
+		"Textures": [
+			"XIAOPmaiddress.4096/texture_00.png"
+		],
+		"Physics": "XIAOPmaiddress.physics3.json",
+		"DisplayInfo": "XIAOPmaiddress.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "O.O",
+				"File": "EXPS/O.O（发呆）.exp3.json"
+			},
+			{
+				"Name": "手势-双手放下",
+				"File": "EXPS/手势-双手放下.exp3.json"
+			},
+			{
+				"Name": "手势-蛋包饭",
+				"File": "EXPS/手势-蛋包饭.exp3.json"
+			},
+			{
+				"Name": "星星眼",
+				"File": "EXPS/星星眼（兴奋、开心专用）.exp3.json"
+			},
+			{
+				"Name": "流汗",
+				"File": "EXPS/流汗.exp3.json"
+			},
+			{
+				"Name": "爱心眼",
+				"File": "EXPS/爱心眼（发情专用，一般情况禁止使用该表情）.exp3.json"
+			},
+			{
+				"Name": "生气",
+				"File": "EXPS/生气.exp3.json"
+			},
+			{
+				"Name": "脸红",
+				"File": "EXPS/脸红.exp3.json"
+			},
+			{
+				"Name": "脸黑",
+				"File": "EXPS/脸黑.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthForm",
+				"ParamMouthOpenY"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		}
+	]
+}

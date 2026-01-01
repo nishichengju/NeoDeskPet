@@ -1,0 +1,5 @@
+GPT-SoVITS-v2_ProPlus/**
+dist/**
+dist-electron/**
+release/**
+node_modules/**

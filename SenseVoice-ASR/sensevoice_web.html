@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SenseVoiceSmall 实时 ASR DEMO</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(135deg, #0b1020 0%, #141b36 100%);
+        min-height: 100vh;
+        color: #fff;
+        padding: 18px;
+      }
+      .container {
+        max-width: 980px;
+        margin: 0 auto;
+      }
+      h1 {
+        text-align: center;
+        margin: 10px 0 18px;
+        font-size: 22px;
+        background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+      }
+      select,
+      button,
+      label,
+      input {
+        padding: 10px 14px;
+        font-size: 14px;
+        border: none;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        outline: none;
+      }
+      input[type="number"],
+      input[type="text"] {
+        width: 140px;
+      }
+      input[type="range"] {
+        padding: 8px 0;
+      }
+      select {
+        min-width: 220px;
+      }
+      select option {
+        background: #0b1020;
+        color: #fff;
+      }
+      button {
+        cursor: pointer;
+        background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+        font-weight: 700;
+        transition: transform 0.15s, box-shadow 0.15s;
+      }
+      button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 30px rgba(0, 210, 255, 0.18);
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+      button.recording {
+        background: linear-gradient(90deg, #ff416c, #ff4b2b);
+      }
+      .status {
+        margin: 14px auto 12px;
+        max-width: 900px;
+        padding: 10px 12px;
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        border-left: 4px solid rgba(255, 255, 255, 0.25);
+        font-size: 13px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+      .status.ok {
+        border-left-color: #00ff88;
+      }
+      .status.warn {
+        border-left-color: #ffcc00;
+      }
+      .status.err {
+        border-left-color: #ff4444;
+      }
+      .meter {
+        margin: 10px auto 14px;
+        max-width: 900px;
+        height: 8px;
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .meter > div {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+        transition: width 0.08s linear;
+      }
+      .panel {
+        max-width: 900px;
+        margin: 0 auto;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 14px;
+      }
+      .panel h3 {
+        font-size: 14px;
+        opacity: 0.9;
+        margin-bottom: 10px;
+      }
+      #result {
+        font-size: 15px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+        padding: 12px;
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.25);
+        min-height: 160px;
+      }
+      .hint {
+        max-width: 900px;
+        margin: 10px auto 0;
+        opacity: 0.78;
+        font-size: 12px;
+        text-align: center;
+        line-height: 1.4;
+      }
+      .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .switch input {
+        transform: translateY(1px);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .field {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 10px;
+      }
+      .field .label {
+        font-size: 12px;
+        opacity: 0.85;
+        margin-bottom: 8px;
+      }
+      .field .row2 {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .field .row2 input[type="range"] {
+        width: 100%;
+      }
+      .field .row2 input[type="number"] {
+        width: 110px;
+      }
+      @media (max-width: 900px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        input[type="number"],
+        input[type="text"] {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>SenseVoiceSmall 实时语音识别 DEMO（WS + VAD 端点）</h1>
+
+      <div class="row">
+        <select id="micSelect">
+          <option value="">选择麦克风..</option>
+        </select>
+        <button id="refreshMicsBtn" title="重新请求权限并刷新设备列表">刷新麦克风</button>
+        <select id="langSelect" title="language">
+          <option value="auto" selected>自动识别语言 (auto)</option>
+          <option value="zn">中文 (zn)</option>
+          <option value="yue">粤语 (yue)</option>
+          <option value="en">英文 (en)</option>
+          <option value="ja">日文 (ja)</option>
+          <option value="ko">韩文 (ko)</option>
+          <option value="nospeech">无语音 (nospeech)</option>
+        </select>
+        <label class="switch" title="use_itn">
+          <input type="checkbox" id="itnCheck" checked />
+          <span>标点/ITN</span>
+        </label>
+        <button id="toggleBtn">开始监听</button>
+        <button id="clearBtn">清空</button>
+      </div>
+
+      <div id="status" class="status warn">准备中：请允许麦克风权限。</div>
+      <div class="meter"><div id="meterFill"></div></div>
+
+      <div class="panel">
+        <h3>参数（会实时发送到服务端）</h3>
+        <div class="grid">
+          <div class="field">
+            <div class="label">WebSocket 地址</div>
+            <div class="row2">
+              <input id="wsUrl" type="text" value="ws://127.0.0.1:8766/ws" />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">VAD 分块（ms）</div>
+            <div class="row2">
+              <input id="vadChunk" type="range" min="40" max="500" step="10" value="200" />
+              <input id="vadChunkNum" type="number" min="40" max="800" step="10" value="200" />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">尾部静音判停（ms）</div>
+            <div class="row2">
+              <input id="endSilence" type="range" min="200" max="2000" step="20" value="800" />
+              <input id="endSilenceNum" type="number" min="80" max="4000" step="20" value="800" />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">最短语音段（ms）</div>
+            <div class="row2">
+              <input id="minSpeech" type="range" min="0" max="2000" step="20" value="600" />
+              <input id="minSpeechNum" type="number" min="0" max="5000" step="20" value="600" />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">最长语音段（ms）</div>
+            <div class="row2">
+              <input id="maxSpeech" type="range" min="2000" max="30000" step="200" value="15000" />
+              <input id="maxSpeechNum" type="number" min="800" max="60000" step="200" value="15000" />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">起点预留（ms） / 终点补偿（ms）</div>
+            <div class="row2">
+              <input id="preroll" type="number" min="0" max="2000" step="10" value="120" />
+              <input id="postroll" type="number" min="0" max="2000" step="10" value="80" />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">自动增益（AGC）</div>
+            <div class="row2">
+              <label class="switch">
+                <input type="checkbox" id="agcCheck" checked />
+                <span>开启</span>
+              </label>
+              <input id="agcTarget" type="number" min="0.005" max="0.2" step="0.005" value="0.05" />
+              <input id="agcMaxGain" type="number" min="1" max="80" step="1" value="20" />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">调试日志</div>
+            <div class="row2">
+              <label class="switch">
+                <input type="checkbox" id="debugCheck" />
+                <span>开启</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top: 12px">
+        <h3>识别结果（端点结束后返回一条）</h3>
+        <div id="result"></div>
+      </div>
+
+      <div class="hint">
+        服务端：<code>http://127.0.0.1:8766</code>（打开网页后点击“开始监听”即可）
+        <br />
+        提示：参数建议先用默认值；环境噪声大时，提高“最短语音段”，或加大“尾部静音判停”。
+      </div>
+    </div>
+
+    <script>
+      const micSelect = document.getElementById("micSelect");
+      const refreshMicsBtn = document.getElementById("refreshMicsBtn");
+      const langSelect = document.getElementById("langSelect");
+      const itnCheck = document.getElementById("itnCheck");
+      const toggleBtn = document.getElementById("toggleBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const statusEl = document.getElementById("status");
+      const resultEl = document.getElementById("result");
+      const meterFill = document.getElementById("meterFill");
+
+      const wsUrlEl = document.getElementById("wsUrl");
+      const vadChunk = document.getElementById("vadChunk");
+      const vadChunkNum = document.getElementById("vadChunkNum");
+      const endSilence = document.getElementById("endSilence");
+      const endSilenceNum = document.getElementById("endSilenceNum");
+      const minSpeech = document.getElementById("minSpeech");
+      const minSpeechNum = document.getElementById("minSpeechNum");
+      const maxSpeech = document.getElementById("maxSpeech");
+      const maxSpeechNum = document.getElementById("maxSpeechNum");
+      const preroll = document.getElementById("preroll");
+      const postroll = document.getElementById("postroll");
+      const agcCheck = document.getElementById("agcCheck");
+      const agcTarget = document.getElementById("agcTarget");
+      const agcMaxGain = document.getElementById("agcMaxGain");
+      const debugCheck = document.getElementById("debugCheck");
+
+      let mediaStream = null;
+      let audioContext = null;
+      let processor = null;
+      let analyser = null;
+      let isRunning = false;
+      let lastLevel = 0;
+      let ws = null;
+      let recordSampleRate = 48000;
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = `status ${cls || ""}`.trim();
+      }
+
+      function appendResult(text) {
+        const ts = new Date().toLocaleTimeString();
+        const line = `[${ts}] ${text}`.trim();
+        resultEl.textContent = (resultEl.textContent ? resultEl.textContent + "\n" : "") + line;
+        resultEl.scrollTop = resultEl.scrollHeight;
+      }
+
+      function syncPair(rangeEl, numEl) {
+        rangeEl.addEventListener("input", () => (numEl.value = rangeEl.value));
+        numEl.addEventListener("input", () => (rangeEl.value = numEl.value || rangeEl.value));
+      }
+      syncPair(vadChunk, vadChunkNum);
+      syncPair(endSilence, endSilenceNum);
+      syncPair(minSpeech, minSpeechNum);
+      syncPair(maxSpeech, maxSpeechNum);
+
+      async function getMicrophones() {
+        try {
+          await navigator.mediaDevices.getUserMedia({ audio: true });
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const mics = devices.filter((d) => d.kind === "audioinput");
+          micSelect.innerHTML = '<option value="">选择麦克风..</option>';
+          mics.forEach((mic, i) => {
+            const option = document.createElement("option");
+            option.value = mic.deviceId;
+            option.text = mic.label || `麦克风${i + 1}`;
+            micSelect.appendChild(option);
+          });
+          if (mics.length > 0) micSelect.value = mics[0].deviceId;
+          setStatus('就绪：选择麦克风后点击“开始监听”。', "ok");
+        } catch (e) {
+          console.error(e);
+          setStatus("无法获取麦克风权限，请检查浏览器授权。", "err");
+        }
+      }
+
+      function visualize() {
+        if (!isRunning || !analyser) return;
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        const level = sum / (data.length * 255);
+        lastLevel = 0.9 * lastLevel + 0.1 * level;
+        meterFill.style.width = Math.min(100, Math.round(lastLevel * 140)) + "%";
+        requestAnimationFrame(visualize);
+      }
+
+      function buildConfig() {
+        return {
+          type: "config",
+          sampleRate: recordSampleRate,
+          language: langSelect.value,
+          useItn: !!itnCheck.checked,
+          vadChunkMs: parseInt(vadChunkNum.value || "200", 10),
+          maxEndSilenceMs: parseInt(endSilenceNum.value || "800", 10),
+          minSpeechMs: parseInt(minSpeechNum.value || "600", 10),
+          maxSpeechMs: parseInt(maxSpeechNum.value || "15000", 10),
+          prerollMs: parseInt(preroll.value || "120", 10),
+          postrollMs: parseInt(postroll.value || "80", 10),
+          enableAgc: !!agcCheck.checked,
+          agcTargetRms: parseFloat(agcTarget.value || "0.05"),
+          agcMaxGain: parseFloat(agcMaxGain.value || "20"),
+          debug: !!debugCheck.checked,
+        };
+      }
+
+      function connectWs() {
+        const url = wsUrlEl.value.trim();
+        ws = new WebSocket(url);
+        ws.binaryType = "arraybuffer";
+        ws.onopen = () => {
+          setStatus(`已连接：${url}\n正在监听麦克风...`, "ok");
+          ws.send(JSON.stringify(buildConfig()));
+        };
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "result") {
+              appendResult(msg.text || "");
+              return;
+            }
+            if (msg.type === "debug") {
+              if (debugCheck.checked) setStatus(String(msg.message || "debug"), "warn");
+              return;
+            }
+            if (msg.type === "ready") return;
+          } catch (_e) {
+            // ignore
+          }
+        };
+        ws.onerror = () => setStatus("WebSocket 连接失败，请检查服务端是否启动。", "err");
+        ws.onclose = () => setStatus("连接已断开。", "warn");
+      }
+
+      function sendConfigIfRunning() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify(buildConfig()));
+      }
+
+      ["change", "input"].forEach((evt) => {
+        [langSelect, itnCheck, vadChunkNum, endSilenceNum, minSpeechNum, maxSpeechNum, preroll, postroll, agcCheck, agcTarget, agcMaxGain, debugCheck].forEach((el) => {
+          el.addEventListener(evt, () => sendConfigIfRunning());
+        });
+      });
+
+      async function start() {
+        if (!micSelect.value) {
+          alert("请先选择麦克风。");
+          return;
+        }
+        isRunning = true;
+        toggleBtn.textContent = "停止监听";
+        toggleBtn.classList.add("recording");
+
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: micSelect.value,
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        });
+
+        // 使用系统默认采样率：音质更稳定；服务端会按 VAD 分块做批量重采样，避免每个 chunk 重采样导致 CPU 飙升
+        audioContext = new AudioContext();
+        recordSampleRate = audioContext.sampleRate || 48000;
+        const source = audioContext.createMediaStreamSource(mediaStream);
+
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+
+        // ScriptProcessor: 兼容性最好；未来可替换 AudioWorklet 进一步降低延迟
+        // 更大的 buffer 能显著降低回调频率，从而降低浏览器/WS 开销
+        const bufferSize = 4096;
+        processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        connectWs();
+        visualize();
+
+        processor.onaudioprocess = (e) => {
+          if (!isRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
+          const input = e.inputBuffer.getChannelData(0);
+          const copy = new Float32Array(input.length);
+          copy.set(input);
+          ws.send(copy.buffer);
+        };
+      }
+
+      function stop() {
+        isRunning = false;
+        toggleBtn.textContent = "开始监听";
+        toggleBtn.classList.remove("recording");
+
+        try {
+          if (processor) processor.disconnect();
+          if (analyser) analyser.disconnect();
+          if (audioContext) audioContext.close();
+        } catch (_e) {}
+        processor = null;
+        analyser = null;
+        audioContext = null;
+
+        try {
+          if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+        } catch (_e) {}
+        mediaStream = null;
+
+        try {
+          if (ws) ws.close();
+        } catch (_e) {}
+        ws = null;
+      }
+
+      toggleBtn.addEventListener("click", async () => {
+        if (!isRunning) {
+          try {
+            await start();
+          } catch (e) {
+            console.error(e);
+            setStatus("启动失败：请检查麦克风权限/服务端状态。", "err");
+            stop();
+          }
+          return;
+        }
+        stop();
+      });
+
+      clearBtn.addEventListener("click", () => {
+        resultEl.textContent = "";
+      });
+
+      getMicrophones();
+
+      refreshMicsBtn.addEventListener("click", () => {
+        if (isRunning) {
+          alert("请先停止监听，再刷新设备列表。");
+          return;
+        }
+        getMicrophones();
+      });
+
+      if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === "function") {
+        navigator.mediaDevices.addEventListener("devicechange", () => {
+          if (!isRunning) getMicrophones();
+        });
+      }
+    </script>
+  </body>
+</html>
