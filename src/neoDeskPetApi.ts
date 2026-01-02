@@ -7,6 +7,9 @@ import type {
   ChatUiSettings,
   ChatSession,
   ChatSessionSummary,
+  TaskCreateArgs,
+  TaskListResult,
+  TaskRecord,
   MemoryRetrieveArgs,
   MemoryRetrieveResult,
   MemorySettings,
@@ -35,6 +38,8 @@ import type {
   ScannedModel,
   TtsSettings,
   AsrSettings,
+  TaskPanelSettings,
+  OrchestratorSettings,
 } from '../electron/types'
 import type { TtsOptions } from '../electron/ttsOptions'
 
@@ -54,6 +59,7 @@ export type TtsSegmentStartedListener = (payload: TtsSegmentStartedPayload) => v
 export type TtsUtteranceEndedListener = (payload: TtsUtteranceEndedPayload) => void
 export type TtsUtteranceFailedListener = (payload: TtsUtteranceFailedPayload) => void
 export type TtsStopAllListener = () => void
+export type TasksChangedListener = (payload: TaskListResult) => void
 
 export type NeoDeskPetApi = {
   getSettings(): Promise<AppSettings>
@@ -69,6 +75,10 @@ export type NeoDeskPetApi = {
   setAISettings(aiSettings: Partial<AISettings>): Promise<AppSettings>
   // Bubble settings
   setBubbleSettings(bubbleSettings: Partial<BubbleSettings>): Promise<AppSettings>
+  // Task panel settings (M2)
+  setTaskPanelSettings(patch: Partial<TaskPanelSettings>): Promise<AppSettings>
+  // Orchestrator settings (M4)
+  setOrchestratorSettings(patch: Partial<OrchestratorSettings>): Promise<AppSettings>
   // Chat profile
   setChatProfile(chatProfile: Partial<ChatProfile>): Promise<AppSettings>
   // Chat UI appearance
@@ -102,6 +112,15 @@ export type NeoDeskPetApi = {
       >
     >,
   ): Promise<ChatSession>
+
+  // Tasks / Orchestrator (M1)
+  listTasks(): Promise<TaskListResult>
+  getTask(id: string): Promise<TaskRecord | null>
+  createTask(args: TaskCreateArgs): Promise<TaskRecord>
+  pauseTask(id: string): Promise<TaskRecord | null>
+  resumeTask(id: string): Promise<TaskRecord | null>
+  cancelTask(id: string): Promise<TaskRecord | null>
+  onTasksChanged(listener: TasksChangedListener): () => void
 
   // Long-term memory / personas
   listPersonas(): Promise<PersonaSummary[]>
@@ -149,6 +168,7 @@ export type NeoDeskPetApi = {
   startDrag(): void
   stopDrag(): void
   showContextMenu(): void
+  setPetOverlayHover(hovering: boolean): void
   setIgnoreMouseEvents(ignore: boolean, forward: boolean): void
   onSettingsChanged(listener: SettingsChangeListener): () => void
   // Bubble message

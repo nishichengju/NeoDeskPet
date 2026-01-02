@@ -21,6 +21,16 @@ export type BubbleSettings = {
   clickPhrases: string[] // 点击桌宠的随机话术
 }
 
+export type TaskPanelSettings = {
+  positionX: number // 0-100，从左侧起的百分比
+  positionY: number // 0-100，从顶部起的百分比
+}
+
+export type OrchestratorSettings = {
+  plannerEnabled: boolean // 是否启用“对话→任务规划器（LLM Planner）”
+  plannerMode: 'auto' | 'always' // auto=仅在检测到“想做事”时触发；always=每条消息都走 planner 再决定
+}
+
 export type WindowBounds = {
   x?: number
   y?: number
@@ -144,6 +154,8 @@ export type AppSettings = {
   live2dModelId: string
   live2dModelFile: string
   bubble: BubbleSettings
+  taskPanel: TaskPanelSettings
+  orchestrator: OrchestratorSettings
   ai: AISettings
   chatProfile: ChatProfile
   chatUi: ChatUiSettings
@@ -444,4 +456,52 @@ export type MemoryRetrieveResult = {
       error?: string
     }
   }
+}
+
+// =========================
+// Task / Orchestrator (M1)
+// =========================
+
+export type TaskQueue = 'browser' | 'file' | 'cli' | 'chat' | 'learning' | 'play' | 'other'
+export type TaskStatus = 'pending' | 'running' | 'paused' | 'failed' | 'done' | 'canceled'
+
+export type TaskStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+
+export type TaskStepRecord = {
+  id: string
+  title: string
+  status: TaskStepStatus
+  tool?: string
+  input?: string
+  output?: string
+  error?: string
+  startedAt?: number
+  endedAt?: number
+}
+
+export type TaskRecord = {
+  id: string
+  queue: TaskQueue
+  title: string
+  why: string
+  status: TaskStatus
+  createdAt: number
+  updatedAt: number
+  startedAt?: number
+  endedAt?: number
+  steps: TaskStepRecord[]
+  currentStepIndex: number
+  toolsUsed: string[]
+  lastError?: string
+}
+
+export type TaskListResult = {
+  items: TaskRecord[]
+}
+
+export type TaskCreateArgs = {
+  queue?: TaskQueue
+  title: string
+  why?: string
+  steps?: Array<Pick<TaskStepRecord, 'title' | 'tool' | 'input'>>
 }

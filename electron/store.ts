@@ -4,6 +4,8 @@ import type {
   AppSettings,
   AsrSettings,
   BubbleSettings,
+  OrchestratorSettings,
+  TaskPanelSettings,
   ChatProfile,
   ChatUiSettings,
   MemoryConsoleSettings,
@@ -44,6 +46,17 @@ const defaultBubbleSettings: BubbleSettings = {
     '嘿嘿~',
     '主人最棒了！',
   ],
+}
+
+const defaultTaskPanelSettings: TaskPanelSettings = {
+  positionX: 50, // 居中
+  positionY: 78, // 靠近底部
+}
+
+const defaultOrchestratorSettings: OrchestratorSettings = {
+  // 默认关闭：避免每条聊天都多一次 LLM 调用；需要时再打开
+  plannerEnabled: false,
+  plannerMode: 'auto',
 }
 
 const defaultChatProfile: ChatProfile = {
@@ -164,6 +177,10 @@ const defaultSettings: AppSettings = {
   live2dModelFile: '/live2d/Haru/Haru.model3.json',
   // Speech bubble settings
   bubble: defaultBubbleSettings,
+  // Pet task panel settings (M2)
+  taskPanel: defaultTaskPanelSettings,
+  // Orchestrator settings (M4)
+  orchestrator: defaultOrchestratorSettings,
   // AI settings
   ai: defaultAISettings,
   // Chat profile
@@ -180,6 +197,8 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   const merged: AppSettings = { ...defaultSettings, ...(value ?? {}) } as AppSettings
 
   merged.bubble = { ...defaultBubbleSettings, ...((value?.bubble ?? {}) as Partial<BubbleSettings>) }
+  merged.taskPanel = { ...defaultTaskPanelSettings, ...((value?.taskPanel ?? {}) as Partial<TaskPanelSettings>) }
+  merged.orchestrator = { ...defaultOrchestratorSettings, ...((value?.orchestrator ?? {}) as Partial<OrchestratorSettings>) }
   merged.ai = { ...defaultAISettings, ...((value?.ai ?? {}) as Partial<AISettings>) }
   merged.chatProfile = { ...defaultChatProfile, ...((value?.chatProfile ?? {}) as Partial<ChatProfile>) }
   merged.chatUi = { ...defaultChatUi, ...((value?.chatUi ?? {}) as Partial<ChatUiSettings>) }

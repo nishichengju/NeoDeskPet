@@ -6,6 +6,7 @@ import { createTray } from './tray'
 import { WindowManager } from './windowManager'
 import { scanLive2dModels } from './modelScanner'
 import { listTtsOptions } from './ttsOptions'
+import { TaskService } from './taskService'
 import {
   addChatMessage,
   clearChatSession,
@@ -25,6 +26,8 @@ import type {
   AISettings,
   AsrSettings,
   BubbleSettings,
+  OrchestratorSettings,
+  TaskPanelSettings,
   ChatMessageRecord,
   ChatProfile,
   ChatUiSettings,
@@ -53,6 +56,9 @@ import type {
   MemoryVersionRecord,
   Persona,
   PersonaSummary,
+  TaskCreateArgs,
+  TaskListResult,
+  TaskRecord,
   TtsSettings,
 } from './types'
 import { MemoryService } from './memoryService'
@@ -78,12 +84,21 @@ const windowManager = new WindowManager({
 })
 
 let memoryService: MemoryService | null = null
+let taskService: TaskService | null = null
 
 function broadcastSettingsChanged() {
   const settings = getSettings()
   for (const win of windowManager.getAllWindows()) {
     if (win.isDestroyed()) continue
     win.webContents.send('settings:changed', settings)
+  }
+}
+
+function broadcastTasksChanged() {
+  const payload: TaskListResult = taskService?.listTasks() ?? { items: [] }
+  for (const win of windowManager.getAllWindows()) {
+    if (win.isDestroyed()) continue
+    win.webContents.send('task:changed', payload)
   }
 }
 
@@ -150,6 +165,20 @@ function registerIpc() {
   ipcMain.handle('settings:setBubbleSettings', (_event, bubbleSettings: Partial<BubbleSettings>) => {
     const current = getSettings()
     setSettings({ bubble: { ...current.bubble, ...bubbleSettings } })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
+  ipcMain.handle('settings:setTaskPanelSettings', (_event, patch: Partial<TaskPanelSettings>) => {
+    const current = getSettings()
+    setSettings({ taskPanel: { ...current.taskPanel, ...patch } })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
+  ipcMain.handle('settings:setOrchestratorSettings', (_event, patch: Partial<OrchestratorSettings>) => {
+    const current = getSettings()
+    setSettings({ orchestrator: { ...current.orchestrator, ...patch } })
     broadcastSettingsChanged()
     return getSettings()
   })
@@ -245,6 +274,17 @@ function registerIpc() {
   ipcMain.handle('chat:setAutoExtractMeta', (_event, sessionId: string, patch: unknown) =>
     setChatSessionAutoExtractMeta(sessionId, patch),
   )
+
+  // Tasks / Orchestrator (M1)
+  ipcMain.handle('task:list', (): TaskListResult => taskService?.listTasks() ?? { items: [] })
+  ipcMain.handle('task:get', (_event, id: string): TaskRecord | null => taskService?.getTask(id) ?? null)
+  ipcMain.handle('task:create', (_event, args: TaskCreateArgs): TaskRecord => {
+    if (!taskService) throw new Error('Task service not ready')
+    return taskService.createTask(args)
+  })
+  ipcMain.handle('task:pause', (_event, id: string): TaskRecord | null => taskService?.pauseTask(id) ?? null)
+  ipcMain.handle('task:resume', (_event, id: string): TaskRecord | null => taskService?.resumeTask(id) ?? null)
+  ipcMain.handle('task:cancel', (_event, id: string): TaskRecord | null => taskService?.cancelTask(id) ?? null)
 
   // Long-term memory / personas
   ipcMain.handle('memory:listPersonas', (): PersonaSummary[] => memoryService?.listPersonas() ?? [])
@@ -437,23 +477,41 @@ function registerIpc() {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (win && !win.isDestroyed()) {
       const petWin = windowManager.getPetWindow()
-      if (petWin && petWin.id === win.id) {
+      const isPetWindow = Boolean(petWin && petWin.id === win.id)
+      if (isPetWindow) {
         windowManager.setPetDragging(true)
       }
 
       // Get current mouse position relative to window
-      const mousePos = screen.getCursorScreenPoint()
+      const startMousePos = screen.getCursorScreenPoint()
       const winBounds = win.getBounds()
 
-      // Calculate offset from window origin
-      const offsetX = mousePos.x - winBounds.x
-      const offsetY = mousePos.y - winBounds.y
+      // 记录初始 offset：拖拽时保持“按住点”不偏移，避免出现模型/面板相对位置漂移
+      const dragOffsetX = startMousePos.x - winBounds.x
+      const dragOffsetY = startMousePos.y - winBounds.y
+
+      // 避免点击/微抖触发拖拽（否则会出现“按住一下就偏移”的错觉）
+      const activateThresholdSq = 10 * 10
+      let draggingActivated = false
+      let lastPos = winBounds
 
       // Track mouse movement
       const onMouseMove = () => {
         if (win.isDestroyed()) return
         const newMousePos = screen.getCursorScreenPoint()
-        win.setPosition(newMousePos.x - offsetX, newMousePos.y - offsetY)
+
+        if (!draggingActivated) {
+          const dx = newMousePos.x - startMousePos.x
+          const dy = newMousePos.y - startMousePos.y
+          if (dx * dx + dy * dy < activateThresholdSq) return
+          draggingActivated = true
+        }
+
+        const nextX = newMousePos.x - dragOffsetX
+        const nextY = newMousePos.y - dragOffsetY
+        if (nextX === lastPos.x && nextY === lastPos.y) return
+        win.setPosition(nextX, nextY)
+        lastPos = { ...lastPos, x: nextX, y: nextY }
       }
 
       // Use a polling approach for smooth dragging
@@ -547,6 +605,15 @@ function registerIpc() {
     menu.popup({ window: win })
   })
 
+  // Pet overlay hover: when a UI overlay (e.g. task panel) needs mouse interaction in click-through mode
+  ipcMain.on('pet:setOverlayHover', (event, hovering: boolean) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const petWin = windowManager.getPetWindow()
+    if (!win || !petWin) return
+    if (win.id !== petWin.id) return
+    windowManager.setPetOverlayHover(Boolean(hovering))
+  })
+
   // Dynamic mouse events ignore for transparent click-through
   ipcMain.on('window:setIgnoreMouseEvents', (event, ignore: boolean, forward: boolean) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -575,6 +642,13 @@ app.whenReady().then(() => {
   } catch (err) {
     console.error('[Memory] Failed to initialize memory service:', err)
     memoryService = null
+  }
+
+  try {
+    taskService = new TaskService({ onChanged: broadcastTasksChanged, userDataDir: app.getPath('userData') })
+  } catch (err) {
+    console.error('[Task] Failed to initialize task service:', err)
+    taskService = null
   }
 
   const runMemoryMaintenance = () => {

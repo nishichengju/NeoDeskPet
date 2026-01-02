@@ -11,6 +11,11 @@ import type {
   ScannedModel,
   AsrSettings,
   TtsSettings,
+  TaskCreateArgs,
+  TaskListResult,
+  TaskRecord,
+  TaskPanelSettings,
+  OrchestratorSettings,
   MemoryRetrieveArgs,
   MemoryRetrieveResult,
   MemoryConsoleSettings,
@@ -55,6 +60,7 @@ export type TtsSegmentStartedListener = (payload: TtsSegmentStartedPayload) => v
 export type TtsUtteranceEndedListener = (payload: TtsUtteranceEndedPayload) => void
 export type TtsUtteranceFailedListener = (payload: TtsUtteranceFailedPayload) => void
 export type TtsStopAllListener = () => void
+export type TasksChangedListener = (payload: TaskListResult) => void
 
 contextBridge.exposeInMainWorld('neoDeskPet', {
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
@@ -77,6 +83,14 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   // Bubble settings
   setBubbleSettings: (bubbleSettings: Partial<BubbleSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setBubbleSettings', bubbleSettings),
+
+  // Task panel settings (M2)
+  setTaskPanelSettings: (patch: Partial<TaskPanelSettings>): Promise<AppSettings> =>
+    ipcRenderer.invoke('settings:setTaskPanelSettings', patch),
+
+  // Orchestrator settings (M4)
+  setOrchestratorSettings: (patch: Partial<OrchestratorSettings>): Promise<AppSettings> =>
+    ipcRenderer.invoke('settings:setOrchestratorSettings', patch),
 
   // Chat profile
   setChatProfile: (chatProfile: Partial<ChatProfile>): Promise<AppSettings> =>
@@ -126,6 +140,19 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
       >
     >,
   ): Promise<ChatSession> => ipcRenderer.invoke('chat:setAutoExtractMeta', sessionId, patch),
+
+  // Tasks / Orchestrator (M1)
+  listTasks: (): Promise<TaskListResult> => ipcRenderer.invoke('task:list'),
+  getTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:get', id),
+  createTask: (args: TaskCreateArgs): Promise<TaskRecord> => ipcRenderer.invoke('task:create', args),
+  pauseTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:pause', id),
+  resumeTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:resume', id),
+  cancelTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:cancel', id),
+  onTasksChanged: (listener: TasksChangedListener): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: TaskListResult) => listener(payload)
+    ipcRenderer.on('task:changed', handler)
+    return () => ipcRenderer.off('task:changed', handler)
+  },
 
   // Long-term memory / personas
   listPersonas: (): Promise<PersonaSummary[]> => ipcRenderer.invoke('memory:listPersonas'),
@@ -197,6 +224,7 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
 
   // Context menu
   showContextMenu: (): void => ipcRenderer.send('pet:showContextMenu'),
+  setPetOverlayHover: (hovering: boolean): void => ipcRenderer.send('pet:setOverlayHover', hovering),
 
   // Mouse forward for transparent click-through
   setIgnoreMouseEvents: (ignore: boolean, forward: boolean): void =>

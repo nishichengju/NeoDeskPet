@@ -67,6 +67,7 @@ export class WindowManager {
 
   private petClickThroughTimer: NodeJS.Timeout | null = null
   private petDragging = false
+  private petOverlayHover = false
   private petIgnoreMouseEvents: boolean | null = null
 
   constructor(deps: CreateWindowDeps) {
@@ -118,6 +119,15 @@ export class WindowManager {
     this.loadWindow(win, 'pet')
     this.petWindow = win
 
+    // 启动时确保窗口尺寸与 petScale 一致，避免“重新构建/重启后模型看起来变大”
+    // 以 petScale 作为权威来源（base=350x450）
+    const expectedW = Math.round(350 * (settings.petScale || 1))
+    const expectedH = Math.round(450 * (settings.petScale || 1))
+    const currentBounds = win.getBounds()
+    if (Math.abs(currentBounds.width - expectedW) > 2 || Math.abs(currentBounds.height - expectedH) > 2) {
+      this.resizePetWindowForScale(settings.petScale || 1)
+    }
+
     this.applyPetClickThrough(settings.clickThrough)
 
     win.on('closed', () => {
@@ -127,6 +137,7 @@ export class WindowManager {
         this.petClickThroughTimer = null
       }
       this.petDragging = false
+      this.petOverlayHover = false
       this.petIgnoreMouseEvents = null
     })
 
@@ -250,6 +261,11 @@ export class WindowManager {
     this.updatePetIgnoreMouseEvents()
   }
 
+  setPetOverlayHover(hovering: boolean): void {
+    this.petOverlayHover = hovering
+    this.updatePetIgnoreMouseEvents()
+  }
+
   private applyPetClickThrough(enabled: boolean): void {
     const pet = this.getPetWindow()
     if (!pet) return
@@ -281,6 +297,14 @@ export class WindowManager {
     if (!pet) return
 
     if (!settings.clickThrough) {
+      if (this.petIgnoreMouseEvents !== false) {
+        this.petIgnoreMouseEvents = false
+        pet.setIgnoreMouseEvents(false)
+      }
+      return
+    }
+
+    if (this.petOverlayHover) {
       if (this.petIgnoreMouseEvents !== false) {
         this.petIgnoreMouseEvents = false
         pet.setIgnoreMouseEvents(false)

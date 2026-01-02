@@ -14,6 +14,155 @@
   position: relative;
 }
 
+/* Pet mini task panel (M2) */
+.ndp-task-panel {
+  position: absolute;
+  width: min(360px, calc(100% - 24px));
+  max-height: 55vh;
+  overflow: auto;
+  background: rgba(20, 20, 24, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  padding: 10px;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  z-index: 50;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-task-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ndp-task-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.ndp-task-panel-count {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ndp-task-card {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 12px;
+  padding: 8px 10px;
+  margin-top: 8px;
+}
+
+.ndp-task-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-task-title-text {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-task-progress {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ndp-task-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.9);
+  text-transform: uppercase;
+}
+
+.ndp-task-badge-running {
+  background: rgba(34, 197, 94, 0.18);
+}
+
+.ndp-task-badge-paused {
+  background: rgba(234, 179, 8, 0.18);
+}
+
+.ndp-task-badge-pending {
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.ndp-task-badge-failed {
+  background: rgba(248, 113, 113, 0.18);
+}
+
+.ndp-task-badge-done {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.ndp-task-badge-canceled {
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.ndp-task-card-sub {
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-task-card-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.ndp-task-card-error {
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(255, 140, 140, 0.95);
+}
+
+.ndp-task-card-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ndp-task-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(255, 255, 255, 0.92);
+  border-radius: 10px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ndp-task-btn:hover {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.ndp-task-btn-danger {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: rgba(248, 113, 113, 0.95);
+}
+
+.ndp-task-btn-danger:hover {
+  background: rgba(248, 113, 113, 0.12);
+}
+
 .ndp-chat-root,
 .ndp-settings-root {
   background: rgba(20, 20, 24, 0.45);
@@ -202,6 +351,14 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.ndp-chat-mem-select {
+  width: auto;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.22);
 }
 
 .ndp-chat-membar-error {

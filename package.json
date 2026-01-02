@@ -7,12 +7,15 @@
     "dev": "set ELECTRON_RUN_AS_NODE=&& vite",
     "dev:reset": "powershell -ExecutionPolicy Bypass -File scripts/dev-reset.ps1",
     "build": "tsc && vite build && electron-builder",
+    "postinstall": "electron-builder install-app-deps",
+    "rebuild:native": "electron-builder install-app-deps",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
   "dependencies": {
     "better-sqlite3": "^12.5.0",
     "electron-store": "^10.0.0",
+    "playwright-core": "^1.50.1",
     "pixi-live2d-display": "0.4.0",
     "pixi.js": "6.5.10",
     "react": "^18.2.0",

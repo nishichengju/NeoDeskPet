@@ -8,6 +8,8 @@ import type {
   MemoryRetrieveResult,
   Persona,
   PersonaSummary,
+  TaskCreateArgs,
+  TaskRecord,
   TailDirection,
 } from '../electron/types'
 import { getApi } from './neoDeskPetApi'
@@ -93,6 +95,208 @@ function clampIntValue(v: unknown, fallback: number, min: number, max: number): 
   return Math.max(min, Math.min(max, Math.trunc(n)))
 }
 
+const TASK_PLANNER_TOOLS = [
+  'browser.fetch',
+  'browser.playwright',
+  'file.write',
+  'cli.exec',
+  'llm.summarize',
+  'llm.chat',
+  'delay.sleep',
+] as const
+
+type PlannerDecision =
+  | { type: 'create_task'; assistantReply: string; task: TaskCreateArgs }
+  | { type: 'need_info'; assistantReply: string; questions?: string[] }
+  | { type: 'chat'; assistantReply: string }
+
+function looksLikeToolTaskRequest(text: string): boolean {
+  const t = String(text ?? '').trim()
+  if (!t) return false
+  if (/https?:\/\/\S+/i.test(t)) return true
+
+  const taskKeywords = [
+    '帮我',
+    '抓取',
+    '爬取',
+    '截图',
+    '打开',
+    '访问',
+    '浏览器',
+    'b站',
+    'B站',
+    'bilibili',
+    '下载',
+    '保存',
+    '写入',
+    '生成文件',
+    '整理',
+    '归档',
+    '执行',
+    '运行',
+    '命令',
+    'powershell',
+    'cmd',
+    '终端',
+    '总结网页',
+    '总结这个网站',
+  ]
+  return taskKeywords.some((k) => t.includes(k))
+}
+
+function extractFirstJsonObject(text: string): string | null {
+  const raw = String(text ?? '').trim()
+  if (!raw) return null
+
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  const candidate = (fenced?.[1] ?? raw).trim()
+
+  const start = candidate.indexOf('{')
+  const end = candidate.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  return candidate.slice(start, end + 1)
+}
+
+function normalizePlannerTask(raw: unknown): TaskCreateArgs | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const obj = raw as Record<string, unknown>
+  const title = typeof obj.title === 'string' ? obj.title.trim() : ''
+  if (!title) return null
+
+  const queue = typeof obj.queue === 'string' ? obj.queue.trim() : undefined
+  const why = typeof obj.why === 'string' ? obj.why.trim() : undefined
+
+  const stepsRaw = Array.isArray(obj.steps) ? (obj.steps as unknown[]) : []
+  const steps = stepsRaw.slice(0, 20).map((step) => {
+    const s = step && typeof step === 'object' && !Array.isArray(step) ? (step as Record<string, unknown>) : {}
+    const tool = typeof s.tool === 'string' ? s.tool.trim() : undefined
+    const title = typeof s.title === 'string' ? s.title.trim() : tool ? tool : '步骤'
+
+    let input: string | undefined
+    if (typeof s.input === 'string') input = s.input
+    else if (s.input && (typeof s.input === 'object' || Array.isArray(s.input))) {
+      try {
+        input = JSON.stringify(s.input)
+      } catch {
+        input = undefined
+      }
+    }
+
+    return { title, tool, input }
+  })
+
+  return { queue: queue as TaskCreateArgs['queue'], title, why, steps }
+}
+
+function parsePlannerDecision(text: string): PlannerDecision | null {
+  const jsonStr = extractFirstJsonObject(text)
+  if (!jsonStr) return null
+
+  let obj: unknown
+  try {
+    obj = JSON.parse(jsonStr) as unknown
+  } catch {
+    return null
+  }
+
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
+  const root = obj as Record<string, unknown>
+  const type = typeof root.type === 'string' ? root.type.trim() : ''
+  const assistantReply = typeof root.assistantReply === 'string' ? root.assistantReply.trim() : ''
+
+  if (type === 'need_info') {
+    const qRaw = Array.isArray(root.questions) ? (root.questions as unknown[]) : []
+    const questions = qRaw.filter((x) => typeof x === 'string').map((x) => String(x).trim()).filter(Boolean)
+    return {
+      type: 'need_info',
+      assistantReply: assistantReply || (questions[0] ? questions.join('\n') : '我还需要你补充一些信息。'),
+      questions: questions.length ? questions : undefined,
+    }
+  }
+
+  if (type === 'create_task') {
+    const task = normalizePlannerTask(root.task)
+    if (!task) return null
+    return {
+      type: 'create_task',
+      assistantReply: assistantReply || `好的，我会开始执行：${task.title}`,
+      task,
+    }
+  }
+
+  if (type === 'chat') {
+    return { type: 'chat', assistantReply: assistantReply || '' }
+  }
+
+  return null
+}
+
+function buildPlannerSystemPrompt(): string {
+  const lines: string[] = []
+  lines.push('你是 NeoDeskPet 的“任务规划器（Planner）”。你的工作是：根据用户的自然语言请求，决定是否要创建“可执行任务（Task）”，并输出严格 JSON。')
+  lines.push('')
+  lines.push('你只能输出一个 JSON 对象，禁止输出 Markdown、代码块、解释文字。')
+  lines.push('')
+  lines.push('优化目标：优先选择“延迟最低且成功率高”的方案；只有在必要时才用更重的工具。')
+  lines.push('')
+  lines.push('你有三种输出类型：')
+  lines.push('1) create_task：当用户想让桌宠做事（抓取网页/截图/运行命令/写文件/总结等）时。')
+  lines.push('2) need_info：当信息不足以执行时（例如“抓取B站”但没有 URL/关键词/目标）。你要用一句话追问。')
+  lines.push('3) chat：普通闲聊/不需要工具时。')
+  lines.push('')
+  lines.push('输出 JSON 结构：')
+  lines.push('- create_task:')
+  lines.push(
+    '  {"type":"create_task","assistantReply":"...","task":{"queue":"browser|file|cli|chat|learning|play|other","title":"...","why":"...","steps":[{"title":"...","tool":"...","input":"..."}]}}',
+  )
+  lines.push('- need_info:')
+  lines.push('  {"type":"need_info","assistantReply":"...","questions":["..."]}')
+  lines.push('- chat:')
+  lines.push('  {"type":"chat","assistantReply":"..."}')
+  lines.push('')
+  lines.push(`工具列表（step.tool 只能从这里选）：${TASK_PLANNER_TOOLS.join(', ')}`)
+  lines.push('')
+  lines.push('各工具输入约定（step.input 必须是字符串；如果是 JSON，请把 JSON stringify 成字符串）：')
+  lines.push('- browser.fetch：{"url":"https://...","maxChars":5000,"timeoutMs":15000,"stripHtml":false}')
+  lines.push(
+    '- browser.playwright：{"url":"https://...","headless":true,"channel":"msedge","profile":"default","screenshot":{"path":"task-output/xxx.png","fullPage":false},"extract":{"selector":"body","format":"innerText|text|html","maxChars":1200,"optional":true},"actions":[{"type":"waitMs","ms":1200},{"type":"click","selector":"..."},{"type":"fill","selector":"...","text":"..."},{"type":"press","selector":"...","key":"Enter"},{"type":"waitForLoad","state":"networkidle"}]}（省略 extract 表示不提取页面文本；只“打开网页”不要加 extract）',
+  )
+  lines.push('- file.write：{"path":"task-output/xxx.txt"} 或 {"filename":"xxx.txt","content":"...","append":false,"encoding":"utf8"}')
+  lines.push('- cli.exec："dir"（字符串命令）或 {"cmd":"powershell","args":["-NoProfile","-Command","..."]}')
+  lines.push('- llm.summarize / llm.chat：{"prompt":"...","system":"(可选)","maxTokens":1200}')
+  lines.push('- delay.sleep：{"ms":200}')
+  lines.push('')
+  lines.push('策略：')
+  lines.push('- 能直接执行就 create_task；缺信息就 need_info；都不是就 chat。')
+  lines.push('- 如果用户是在询问“你能做什么/有哪些工具/工具列表/能力说明”，一律输出 chat：列出可用工具与典型用法示例，不要创建任务、更不要实际执行。')
+  lines.push('- 抓取/总结网页：优先 browser.fetch（更快）；遇到动态/需要登录/需要点击交互，才用 browser.playwright。')
+  lines.push('- 仅“打开某网站”：用 browser.playwright，默认不做 extract；如果用户需要页面内容/摘要，才加 extract。')
+  lines.push('- 默认避免高风险动作（删除/覆盖重要文件、支付、发送敏感信息）。遇到此类请求优先 need_info 让用户确认。')
+  lines.push('- assistantReply 用中文，语气友好自然，简短说明你要做什么/需要什么，并尽量点出将使用的 tool。')
+  return lines.join('\n')
+}
+
+function formatTaskFinalMessage(task: TaskRecord): string {
+  const label = task.status === 'done' ? '任务完成' : task.status === 'failed' ? '任务失败' : '任务结束'
+  const lines: string[] = [`[${label}] ${task.title}`]
+
+  if (task.status === 'failed') {
+    const err = (task.lastError ?? '').trim()
+    if (err) lines.push(`原因：${err}`)
+  }
+
+  const lastStepWithOutput = [...(task.steps ?? [])].reverse().find((s) => (s.output ?? '').trim().length > 0)
+  const out = (lastStepWithOutput?.output ?? '').trim()
+  if (out) {
+    const preview = out.length > 900 ? `${out.slice(0, 900)}…` : out
+    lines.push('结果：')
+    lines.push(preview)
+  }
+
+  lines.push('（可在桌宠任务面板查看详情）')
+  return lines.join('\n')
+}
+
 function PetWindow() {
   const api = useMemo(() => getApi(), [])
   const isDragging = useRef(false)
@@ -110,6 +314,7 @@ function PetWindow() {
     | { text: string; startAt: number | null; mode: 'typing' | 'append'; autoHideDelay?: number }
     | null
   >(null)
+  const [tasks, setTasks] = useState<TaskRecord[]>([])
 
   // Default click phrases (used if settings not loaded yet)
   const defaultPhrases = [
@@ -124,6 +329,27 @@ function PetWindow() {
     if (!api) return
     api.getSettings().then(setSettings).catch((err) => console.error(err))
     return api.onSettingsChanged(setSettings)
+  }, [api])
+
+  // Listen for task list updates (M2 mini panel)
+  useEffect(() => {
+    if (!api) return
+
+    let disposed = false
+    api
+      .listTasks()
+      .then((res) => {
+        if (disposed) return
+        setTasks(res.items ?? [])
+      })
+      .catch((err) => console.error(err))
+
+    const off = api.onTasksChanged((payload) => setTasks(payload.items ?? []))
+    return () => {
+      disposed = true
+      api.setPetOverlayHover(false)
+      off()
+    }
   }, [api])
 
   useEffect(() => {
@@ -335,6 +561,9 @@ function PetWindow() {
   const petScale = settings?.petScale ?? 1.0
   const petOpacity = settings?.petOpacity ?? 1.0
   const bubbleSettings = settings?.bubble
+  const taskPanelX = settings?.taskPanel?.positionX ?? 50
+  const taskPanelY = settings?.taskPanel?.positionY ?? 78
+  const visibleTasks = tasks.filter((t) => t.status !== 'done' && t.status !== 'canceled')
 
   // Get model URL directly from settings
   const modelJsonUrl = settings?.live2dModelFile ?? '/live2d/Haru/Haru.model3.json'
@@ -434,6 +663,79 @@ function PetWindow() {
           onClose={handleBubbleClose}
         />
       )}
+      {visibleTasks.length > 0 && (
+        <div
+          className="ndp-task-panel"
+          style={{ left: `${taskPanelX}%`, top: `${taskPanelY}%`, transform: 'translate(-50%, 0)' }}
+          onMouseEnter={() => api?.setPetOverlayHover(true)}
+          onMouseLeave={() => api?.setPetOverlayHover(false)}
+          onMouseDown={(e) => e.stopPropagation()}
+          onMouseUp={(e) => e.stopPropagation()}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+          }}
+        >
+          <div className="ndp-task-panel-header">
+            <div className="ndp-task-panel-title">任务进行中</div>
+            <div className="ndp-task-panel-count">{Math.min(visibleTasks.length, 3)}/{visibleTasks.length}</div>
+          </div>
+          {visibleTasks.slice(0, 3).map((task) => {
+            const currentStep = task.steps?.[Math.max(0, Math.min(task.currentStepIndex, task.steps.length - 1))]
+            const lastStep = task.currentStepIndex > 0 ? task.steps?.[task.currentStepIndex - 1] : null
+            const outputPreview = (lastStep?.output || '').trim()
+            const progressText =
+              task.steps?.length > 0
+                ? `${Math.min(task.currentStepIndex + 1, task.steps.length)}/${task.steps.length}`
+                : ''
+
+            return (
+              <div key={task.id} className="ndp-task-card">
+                <div className="ndp-task-card-title">
+                  <span className={`ndp-task-badge ndp-task-badge-${task.status}`}>{task.status}</span>
+                  <span className="ndp-task-title-text">{task.title}</span>
+                  {progressText && <span className="ndp-task-progress">{progressText}</span>}
+                </div>
+                {task.why && <div className="ndp-task-card-sub">{task.why}</div>}
+                {currentStep?.title && <div className="ndp-task-card-sub">当前：{currentStep.title}</div>}
+                {currentStep?.tool && <div className="ndp-task-card-sub">当前工具：{currentStep.tool}</div>}
+                {task.toolsUsed?.length > 0 && (
+                  <div className="ndp-task-card-sub">工具：{task.toolsUsed.join('、')}</div>
+                )}
+                {outputPreview && <div className="ndp-task-card-sub ndp-task-card-mono">输出：{outputPreview}</div>}
+                {task.lastError && <div className="ndp-task-card-error">失败：{task.lastError}</div>}
+                <div className="ndp-task-card-actions">
+                  {task.status === 'running' && (
+                    <button
+                      className="ndp-task-btn"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => void api?.pauseTask(task.id).catch((err) => console.error(err))}
+                    >
+                      暂停
+                    </button>
+                  )}
+                  {task.status === 'paused' && (
+                    <button
+                      className="ndp-task-btn"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => void api?.resumeTask(task.id).catch((err) => console.error(err))}
+                    >
+                      继续
+                    </button>
+                  )}
+                  <button
+                    className="ndp-task-btn ndp-task-btn-danger"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={() => void api?.cancelTask(task.id).catch((err) => console.error(err))}
+                  >
+                    终止
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -490,6 +792,9 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const asrSendingRef = useRef(false)
   const asrSendQueueRef = useRef<string[]>([])
   const aiAbortRef = useRef<AbortController | null>(null)
+  const plannerPendingRef = useRef(false)
+  const taskOriginSessionRef = useRef<Map<string, string>>(new Map())
+  const taskFinalAnnouncedRef = useRef<Set<string>>(new Set())
 
   const getActivePersonaId = useCallback((): string => {
     const pid = settingsRef.current?.activePersonaId
@@ -899,10 +1204,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     [sessions, currentSessionId],
   )
 
+  useEffect(() => {
+    plannerPendingRef.current = false
+  }, [currentSessionId])
+
   const memEnabled = settings?.memory?.enabled ?? true
   const autoExtractEnabled = settings?.memory?.autoExtractEnabled ?? false
   const captureEnabled = currentPersona?.captureEnabled ?? true
   const retrieveEnabled = currentPersona?.retrieveEnabled ?? true
+  const plannerEnabled = settings?.orchestrator?.plannerEnabled ?? false
+  const plannerMode = settings?.orchestrator?.plannerMode ?? 'auto'
 
   const effectiveCountUi = useMemo(() => collapseAssistantRuns(messages).length, [messages])
   const cursorUi = clampIntValue(currentSession?.autoExtractCursor ?? 0, 0, 0, 1_000_000)
@@ -1000,12 +1311,71 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     [api],
   )
 
+  const toggleTaskPlannerEnabled = useCallback(
+    async (enabled: boolean) => {
+      if (!api) return
+      try {
+        await api.setOrchestratorSettings({ plannerEnabled: enabled })
+        if (!enabled) plannerPendingRef.current = false
+      } catch (err) {
+        console.error(err)
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [api],
+  )
+
+  const setTaskPlannerMode = useCallback(
+    async (mode: 'auto' | 'always') => {
+      if (!api) return
+      try {
+        await api.setOrchestratorSettings({ plannerMode: mode })
+      } catch (err) {
+        console.error(err)
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [api],
+  )
+
   const newMessageId = useCallback(() => {
     if ('crypto' in globalThis && typeof globalThis.crypto.randomUUID === 'function') {
       return globalThis.crypto.randomUUID()
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
   }, [])
+
+  // 任务完成/失败后，把结果回写到对应会话里（仅对 planner 创建的任务生效）
+  useEffect(() => {
+    if (!api) return
+
+    const off = api.onTasksChanged((payload) => {
+      for (const t of payload.items ?? []) {
+        const sessionId = taskOriginSessionRef.current.get(t.id)
+        if (!sessionId) continue
+        if (taskFinalAnnouncedRef.current.has(t.id)) continue
+        if (t.status !== 'done' && t.status !== 'failed' && t.status !== 'canceled') continue
+
+        taskFinalAnnouncedRef.current.add(t.id)
+        taskOriginSessionRef.current.delete(t.id)
+
+        const content = formatTaskFinalMessage(t)
+        const msg: ChatMessageRecord = { id: newMessageId(), role: 'assistant', content, createdAt: Date.now() }
+
+        if (sessionId === currentSessionId) {
+          setMessages((prev) => [...prev, msg])
+        }
+        api.addChatMessage(sessionId, msg).catch(() => undefined)
+
+        // 低打扰：只在失败时冒泡提示
+        if (t.status === 'failed' && sessionId === currentSessionId && content) {
+          api.sendBubbleMessage(content)
+        }
+      }
+    })
+
+    return () => off()
+  }, [api, currentSessionId, newMessageId])
 
   const closeOverlays = useCallback(() => {
     setContextMenu(null)
@@ -1247,6 +1617,109 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         return { role: 'user', content: plain }
       })
 
+      await api.addChatMessage(currentSessionId, userMessage)
+
+      // M4：对话 → 任务规划器（LLM Planner）→ TaskService
+      const orch = settingsRef.current?.orchestrator
+      const plannerEnabledNow = orch?.plannerEnabled ?? false
+      const plannerModeNow = orch?.plannerMode ?? 'auto'
+      const pendingBefore = plannerPendingRef.current
+      const shouldTryPlanner =
+        plannerEnabledNow &&
+        (plannerModeNow === 'always' || pendingBefore || looksLikeToolTaskRequest(text))
+
+      if (shouldTryPlanner && (text ?? '').trim().length > 0) {
+        try {
+          const plannerHistory: ChatMessage[] = sliceTail(nextMessages, 12).map((m) => ({
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: m.content,
+          }))
+
+          const planRes = await aiService.chat(
+            [{ role: 'system', content: buildPlannerSystemPrompt() }, ...plannerHistory],
+            { signal: abort.signal },
+          )
+
+          if (planRes.error) {
+            if (planRes.error === ABORTED_ERROR) return
+          } else {
+            const decision = parsePlannerDecision(planRes.content)
+
+            if (decision?.type === 'need_info') {
+              plannerPendingRef.current = true
+              const assistantMessage: ChatMessageRecord = {
+                id: newMessageId(),
+                role: 'assistant',
+                content: decision.assistantReply,
+                createdAt: Date.now(),
+              }
+              setMessages((prev) => [...prev, assistantMessage])
+              await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
+              if (assistantMessage.content) api.sendBubbleMessage(assistantMessage.content)
+              void runAutoExtractIfNeeded(currentSessionId)
+              return
+            }
+
+            if (decision?.type === 'create_task') {
+              const runnable = (decision.task.steps ?? []).some(
+                (s) => typeof s.tool === 'string' && TASK_PLANNER_TOOLS.includes(s.tool as (typeof TASK_PLANNER_TOOLS)[number]),
+              )
+              if (!runnable) throw new Error('规划器未生成可执行步骤（没有可用 tool）')
+
+              const inferQueue = (): TaskCreateArgs['queue'] => {
+                if (decision.task.queue) return decision.task.queue
+                const tools = (decision.task.steps ?? []).map((s) => (typeof s.tool === 'string' ? s.tool : ''))
+                if (tools.some((t) => t.startsWith('browser.'))) return 'browser'
+                if (tools.some((t) => t.startsWith('cli.'))) return 'cli'
+                if (tools.some((t) => t.startsWith('file.'))) return 'file'
+                if (tools.some((t) => t.startsWith('llm.'))) return 'chat'
+                return 'other'
+              }
+
+              const taskArgs: TaskCreateArgs = { ...decision.task, queue: inferQueue() }
+              const created = await api.createTask(taskArgs)
+              taskOriginSessionRef.current.set(created.id, currentSessionId)
+              taskFinalAnnouncedRef.current.delete(created.id)
+
+              plannerPendingRef.current = false
+              const replyBase = decision.assistantReply || `好的，我开始执行：${created.title}`
+              const reply = replyBase.replace(/{{\s*task\.id\s*}}/g, created.id).trim() || `已创建任务：${created.title}`
+              const assistantMessage: ChatMessageRecord = {
+                id: newMessageId(),
+                role: 'assistant',
+                content: reply,
+                createdAt: Date.now(),
+              }
+              setMessages((prev) => [...prev, assistantMessage])
+              await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
+              if (assistantMessage.content) api.sendBubbleMessage(assistantMessage.content)
+              void runAutoExtractIfNeeded(currentSessionId)
+              return
+            }
+
+            if (decision?.type === 'chat') {
+              plannerPendingRef.current = false
+              const shouldUsePlannerChatReply = plannerModeNow === 'always' || pendingBefore
+              if (shouldUsePlannerChatReply && decision.assistantReply) {
+                const assistantMessage: ChatMessageRecord = {
+                  id: newMessageId(),
+                  role: 'assistant',
+                  content: decision.assistantReply,
+                  createdAt: Date.now(),
+                }
+                setMessages((prev) => [...prev, assistantMessage])
+                await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
+                if (assistantMessage.content) api.sendBubbleMessage(assistantMessage.content)
+                void runAutoExtractIfNeeded(currentSessionId)
+                return
+              }
+            }
+          }
+        } catch (err) {
+          console.error('[Planner] failed:', err)
+        }
+      }
+
       let systemAddon = ''
       setLastRetrieveDebug(null)
       try {
@@ -1269,8 +1742,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         systemAddon = ''
         setLastRetrieveDebug(null)
       }
-
-      await api.addChatMessage(currentSessionId, userMessage)
 
       {
         const trimmed = trimChatHistoryToMaxContext(chatHistory, systemAddon)
@@ -2655,6 +3126,24 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
             />
             自动提炼
           </label>
+          <label className="ndp-chat-mem-toggle" title="工具：把“想做事”的话交给规划器生成任务（可在桌宠任务面板查看进度）">
+            <input
+              type="checkbox"
+              checked={plannerEnabled}
+              onChange={(e) => void toggleTaskPlannerEnabled(e.target.checked)}
+            />
+            工具
+          </label>
+          <select
+            className="ndp-select ndp-chat-mem-select"
+            value={plannerMode}
+            onChange={(e) => void setTaskPlannerMode(e.target.value as 'auto' | 'always')}
+            disabled={!plannerEnabled}
+            title="auto=仅在像“想做事”的话时触发；always=每条消息都先过规划器"
+          >
+            <option value="auto">auto</option>
+            <option value="always">always</option>
+          </select>
         </div>
         <div className="ndp-chat-membar-right">
           <span title="有效消息=合并连续助手消息后的条数">有效 {effectiveCountUi}</span>
@@ -2948,7 +3437,9 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
 
 function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
   const { api, settings } = props
-  const [activeTab, setActiveTab] = useState<'live2d' | 'bubble' | 'ai' | 'persona' | 'chat' | 'tts' | 'asr'>('live2d')
+  const [activeTab, setActiveTab] = useState<
+    'live2d' | 'bubble' | 'taskPanel' | 'ai' | 'persona' | 'chat' | 'tts' | 'asr'
+  >('live2d')
   const [availableModels, setAvailableModels] = useState<Live2DModelInfo[]>([])
   const [isLoadingModels, setIsLoadingModels] = useState(true)
   const lastModelScanAtRef = useRef(0)
@@ -3042,6 +3533,12 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
           气泡设置
         </button>
         <button
+          className={`ndp-tab-btn ${activeTab === 'taskPanel' ? 'active' : ''}`}
+          onClick={() => setActiveTab('taskPanel')}
+        >
+          任务面板
+        </button>
+        <button
           className={`ndp-tab-btn ${activeTab === 'ai' ? 'active' : ''}`}
           onClick={() => setActiveTab('ai')}
         >
@@ -3088,6 +3585,7 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
           />
         )}
         {activeTab === 'bubble' && <BubbleSettingsTab api={api} bubbleSettings={bubbleSettings} />}
+        {activeTab === 'taskPanel' && <TaskPanelSettingsTab api={api} taskPanelSettings={settings?.taskPanel} />}
         {activeTab === 'ai' && <AISettingsTab api={api} aiSettings={aiSettings} />}
         {activeTab === 'persona' && <PersonaSettingsTab api={api} settings={settings} />}
         {activeTab === 'chat' && <ChatUiSettingsTab api={api} chatUi={chatUi} />}
@@ -4200,6 +4698,54 @@ function BubbleSettingsTab(props: {
           onBlur={handlePhrasesSave}
         />
         <p className="ndp-setting-hint">每行一句，点击桌宠时随机显示（共 {clickPhrases.length} 句）</p>
+      </div>
+    </div>
+  )
+}
+
+function TaskPanelSettingsTab(props: {
+  api: ReturnType<typeof getApi>
+  taskPanelSettings: AppSettings['taskPanel'] | undefined
+}) {
+  const { api, taskPanelSettings } = props
+  const positionX = taskPanelSettings?.positionX ?? 50
+  const positionY = taskPanelSettings?.positionY ?? 78
+
+  return (
+    <div className="ndp-settings-section">
+      <h3>任务面板</h3>
+      <p className="ndp-setting-hint">仅在有任务进行中时出现，用于查看进度与暂停/终止。</p>
+
+      <div className="ndp-setting-item">
+        <label>水平位置 (X)</label>
+        <div className="ndp-range-input">
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="2"
+            value={positionX}
+            onChange={(e) => api?.setTaskPanelSettings({ positionX: parseInt(e.target.value) })}
+          />
+          <span>{positionX}%</span>
+        </div>
+        <p className="ndp-setting-hint">0% 为最左边，100% 为最右边</p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>垂直位置 (Y)</label>
+        <div className="ndp-range-input">
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="2"
+            value={positionY}
+            onChange={(e) => api?.setTaskPanelSettings({ positionY: parseInt(e.target.value) })}
+          />
+          <span>{positionY}%</span>
+        </div>
+        <p className="ndp-setting-hint">0% 为最上边，100% 为最下边</p>
       </div>
     </div>
   )
