@@ -21,6 +21,7 @@ import {
   setChatMessages,
   setCurrentChatSession,
   updateChatMessage,
+  updateChatMessageRecord,
 } from './chatStore'
 import type {
   AISettings,
@@ -28,9 +29,13 @@ import type {
   BubbleSettings,
   OrchestratorSettings,
   TaskPanelSettings,
+  ToolSettings,
+  McpSettings,
+  McpStateSnapshot,
   ChatMessageRecord,
   ChatProfile,
   ChatUiSettings,
+  ContextUsageSnapshot,
   MemoryDeleteArgs,
   MemoryDeleteByFilterArgs,
   MemoryDeleteManyArgs,
@@ -62,6 +67,7 @@ import type {
   TtsSettings,
 } from './types'
 import { MemoryService } from './memoryService'
+import { McpManager } from './mcpManager'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -83,8 +89,53 @@ const windowManager = new WindowManager({
   mainDistDir: MAIN_DIST,
 })
 
+let registeredAsrHotkey: string | null = null
+let pendingAsrTranscript: string[] = []
+let lastContextUsage: ContextUsageSnapshot | null = null
+
+function syncAsrHotkey() {
+  if (!app.isReady()) return
+
+  const unregister = () => {
+    if (!registeredAsrHotkey) return
+    try {
+      globalShortcut.unregister(registeredAsrHotkey)
+    } catch {
+      /* ignore */
+    }
+    registeredAsrHotkey = null
+  }
+
+  unregister()
+
+  const settings = getSettings()
+  const asr = settings.asr
+  if (!asr?.enabled) return
+  if (asr.mode !== 'hotkey') return
+
+  const hotkey = typeof asr.hotkey === 'string' ? asr.hotkey.trim() : ''
+  if (!hotkey) return
+
+  try {
+    const ok = globalShortcut.register(hotkey, () => {
+      const petWin = windowManager.getPetWindow()
+      if (petWin && !petWin.isDestroyed()) {
+        petWin.webContents.send('asr:hotkeyToggle')
+      }
+    })
+    if (!ok) {
+      console.warn(`[ASR] Failed to register hotkey: ${hotkey}`)
+      return
+    }
+    registeredAsrHotkey = hotkey
+  } catch (err) {
+    console.warn(`[ASR] Failed to register hotkey: ${hotkey}`, err)
+  }
+}
+
 let memoryService: MemoryService | null = null
 let taskService: TaskService | null = null
+let mcpManager: McpManager | null = null
 
 function broadcastSettingsChanged() {
   const settings = getSettings()
@@ -99,6 +150,14 @@ function broadcastTasksChanged() {
   for (const win of windowManager.getAllWindows()) {
     if (win.isDestroyed()) continue
     win.webContents.send('task:changed', payload)
+  }
+}
+
+function broadcastMcpChanged(payload?: McpStateSnapshot) {
+  const snap = payload ?? mcpManager?.getSnapshot() ?? { enabled: false, servers: [], updatedAt: Date.now() }
+  for (const win of windowManager.getAllWindows()) {
+    if (win.isDestroyed()) continue
+    win.webContents.send('mcp:changed', snap)
   }
 }
 
@@ -183,6 +242,44 @@ function registerIpc() {
     return getSettings()
   })
 
+  // Tool settings (M3.5) - global/group/single tool toggles
+  ipcMain.handle('settings:setToolSettings', (_event, patch: Partial<ToolSettings>) => {
+    const current = getSettings()
+    const currTools = current.tools
+
+    const next: ToolSettings = {
+      ...currTools,
+      ...patch,
+      groups: typeof patch.groups === 'object' && patch.groups ? (patch.groups as Record<string, boolean>) : currTools.groups,
+      tools: typeof patch.tools === 'object' && patch.tools ? (patch.tools as Record<string, boolean>) : currTools.tools,
+    }
+
+    setSettings({ tools: next })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
+  // MCP settings (M3.5 Step2)
+  ipcMain.handle('settings:setMcpSettings', (_event, patch: Partial<McpSettings>) => {
+    const current = getSettings()
+    const curr = current.mcp
+
+    const next: McpSettings = {
+      ...curr,
+      ...patch,
+      servers: Array.isArray(patch.servers) ? patch.servers : curr.servers,
+    }
+
+    setSettings({ mcp: next })
+    broadcastSettingsChanged()
+    void mcpManager?.sync(getSettings().mcp)
+    return getSettings()
+  })
+
+  ipcMain.handle('mcp:getState', () => {
+    return mcpManager?.getSnapshot() ?? { enabled: false, servers: [], updatedAt: Date.now() }
+  })
+
   ipcMain.handle('settings:setChatProfile', (_event, chatProfile: Partial<ChatProfile>) => {
     const current = getSettings()
     setSettings({ chatProfile: { ...current.chatProfile, ...chatProfile } })
@@ -197,6 +294,21 @@ function registerIpc() {
     return getSettings()
   })
 
+  // Context usage snapshot (chat -> main -> pet/chat)
+  ipcMain.on('contextUsage:set', (_event, snapshot: ContextUsageSnapshot | null) => {
+    lastContextUsage = snapshot && typeof snapshot === 'object' ? snapshot : null
+    const payload = lastContextUsage
+    for (const win of windowManager.getAllWindows()) {
+      try {
+        win.webContents.send('contextUsage:changed', payload)
+      } catch {
+        /* ignore */
+      }
+    }
+  })
+
+  ipcMain.handle('contextUsage:get', () => lastContextUsage)
+
   ipcMain.handle('settings:setTtsSettings', (_event, tts: Partial<TtsSettings>) => {
     const current = getSettings()
     setSettings({ tts: { ...current.tts, ...tts } })
@@ -208,6 +320,7 @@ function registerIpc() {
     const current = getSettings()
     setSettings({ asr: { ...current.asr, ...asr } })
     broadcastSettingsChanged()
+    syncAsrHotkey()
     return getSettings()
   })
 
@@ -232,13 +345,41 @@ function registerIpc() {
     try {
       const memEnabled = getSettings().memory.enabled
       if (!memEnabled) return session
+      if (message.role !== 'assistant') return session
       const personaId = session.personaId || 'default'
+
+      let includeUser = true
+      try {
+        const persona = memoryService?.getPersona(personaId)
+        if (persona) includeUser = persona.captureUser
+      } catch {
+        includeUser = true
+      }
+
+      let userContent = ''
+      if (includeUser) {
+        const idx = session.messages.findIndex((m) => m.id === message.id)
+        for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
+          const m = session.messages[i]
+          if (m.role === 'user') {
+            userContent = m.content
+            break
+          }
+        }
+      }
+
+      const parts: string[] = []
+      if (userContent.trim()) parts.push(`用户：${userContent}`)
+      if (message.content.trim()) parts.push(`助手：${message.content}`)
+      const turnContent = parts.join('\n').trim()
+      if (!turnContent) return session
+
       memoryService?.ingestChatMessage({
         personaId,
         sessionId,
         messageId: message.id,
         role: message.role,
-        content: message.content,
+        content: turnContent,
         createdAt: message.createdAt,
       })
     } catch (_) {
@@ -253,13 +394,90 @@ function registerIpc() {
       if (!memEnabled) return session
       const msg = session.messages.find((m) => m.id === messageId)
       if (!msg) return session
+      if (msg.role !== 'assistant') return session
       const personaId = session.personaId || 'default'
+
+      let includeUser = true
+      try {
+        const persona = memoryService?.getPersona(personaId)
+        if (persona) includeUser = persona.captureUser
+      } catch {
+        includeUser = true
+      }
+
+      let userContent = ''
+      if (includeUser) {
+        const idx = session.messages.findIndex((m) => m.id === msg.id)
+        for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
+          const m = session.messages[i]
+          if (m.role === 'user') {
+            userContent = m.content
+            break
+          }
+        }
+      }
+
+      const parts: string[] = []
+      if (userContent.trim()) parts.push(`用户：${userContent}`)
+      if (msg.content.trim()) parts.push(`助手：${msg.content}`)
+      const turnContent = parts.join('\n').trim()
+      if (!turnContent) return session
+
       memoryService?.ingestChatMessage({
         personaId,
         sessionId,
         messageId: msg.id,
         role: msg.role,
-        content: msg.content,
+        content: turnContent,
+        createdAt: msg.createdAt,
+      })
+    } catch (_) {
+      /* ignore */
+    }
+    return session
+  })
+  ipcMain.handle('chat:updateMessageRecord', (_event, sessionId: string, messageId: string, patch: unknown) => {
+    const session = updateChatMessageRecord(sessionId, messageId, patch)
+    try {
+      const memEnabled = getSettings().memory.enabled
+      if (!memEnabled) return session
+      const msg = session.messages.find((m) => m.id === messageId)
+      if (!msg) return session
+      if (msg.role !== 'assistant') return session
+      const personaId = session.personaId || 'default'
+
+      let includeUser = true
+      try {
+        const persona = memoryService?.getPersona(personaId)
+        if (persona) includeUser = persona.captureUser
+      } catch {
+        includeUser = true
+      }
+
+      let userContent = ''
+      if (includeUser) {
+        const idx = session.messages.findIndex((m) => m.id === msg.id)
+        for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
+          const m = session.messages[i]
+          if (m.role === 'user') {
+            userContent = m.content
+            break
+          }
+        }
+      }
+
+      const parts: string[] = []
+      if (userContent.trim()) parts.push(`用户：${userContent}`)
+      if (msg.content.trim()) parts.push(`助手：${msg.content}`)
+      const turnContent = parts.join('\n').trim()
+      if (!turnContent) return session
+
+      memoryService?.ingestChatMessage({
+        personaId,
+        sessionId,
+        messageId: msg.id,
+        role: msg.role,
+        content: turnContent,
         createdAt: msg.createdAt,
       })
     } catch (_) {
@@ -285,6 +503,7 @@ function registerIpc() {
   ipcMain.handle('task:pause', (_event, id: string): TaskRecord | null => taskService?.pauseTask(id) ?? null)
   ipcMain.handle('task:resume', (_event, id: string): TaskRecord | null => taskService?.resumeTask(id) ?? null)
   ipcMain.handle('task:cancel', (_event, id: string): TaskRecord | null => taskService?.cancelTask(id) ?? null)
+  ipcMain.handle('task:dismiss', (_event, id: string): { ok: true } | null => taskService?.dismissTask(id) ?? null)
 
   // Long-term memory / personas
   ipcMain.handle('memory:listPersonas', (): PersonaSummary[] => memoryService?.listPersonas() ?? [])
@@ -380,6 +599,168 @@ function registerIpc() {
     return listTtsOptions(process.env.APP_ROOT ?? process.cwd())
   })
 
+  // TTS HTTP proxy (avoid renderer CORS/preflight issues)
+  const validateTtsUrl = (rawUrl: string): URL => {
+    const url = new URL(rawUrl)
+    const ttsBase = (getSettings().tts?.baseUrl ?? '').trim().replace(/\/+$/, '')
+    if (!ttsBase) throw new Error('TTS baseUrl 未配置')
+    const base = new URL(ttsBase)
+    if (url.origin !== base.origin) {
+      throw new Error(`TTS 请求仅允许访问 tts.baseUrl 同源：${base.origin}`)
+    }
+    const allowPaths = new Set(['/tts', '/set_gpt_weights', '/set_sovits_weights'])
+    if (!allowPaths.has(url.pathname)) {
+      throw new Error(`TTS 请求路径不允许：${url.pathname}`)
+    }
+    return url
+  }
+
+  ipcMain.handle('tts:httpGetJson', async (_event, rawUrl: string) => {
+    const url = validateTtsUrl(rawUrl)
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error('TTS HTTP timeout')), 60000)
+    try {
+      const res = await fetch(url.toString(), { cache: 'no-store', signal: ac.signal })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const msg = (data as { message?: string })?.message
+        return { ok: false, status: res.status, statusText: res.statusText, json: data, error: msg || `HTTP ${res.status}` }
+      }
+      return { ok: true, status: res.status, statusText: res.statusText, json: data }
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+
+  ipcMain.handle(
+    'tts:httpRequestArrayBuffer',
+    async (_event, payload: { url: string; method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; timeoutMs?: number }) => {
+      const url = validateTtsUrl(payload.url)
+      const method = (payload.method ?? 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET'
+      const timeoutMs = Math.max(1000, Math.min(180000, payload.timeoutMs ?? 120000))
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(new Error('TTS HTTP timeout')), timeoutMs)
+      try {
+        const res = await fetch(url.toString(), {
+          method,
+          headers: payload.headers ?? undefined,
+          body: method === 'POST' ? payload.body ?? '' : undefined,
+          signal: ac.signal,
+        })
+        const buf = await res.arrayBuffer()
+        const contentType = res.headers.get('content-type') ?? ''
+        if (!res.ok) {
+          return {
+            ok: false,
+            status: res.status,
+            statusText: res.statusText,
+            contentType,
+            arrayBuffer: buf,
+            error: `HTTP ${res.status}: ${res.statusText}`,
+          }
+        }
+        return { ok: true, status: res.status, statusText: res.statusText, contentType, arrayBuffer: buf }
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+  )
+
+  // TTS HTTP streaming proxy: 主进程拉取 /tts 的流式音频，把 bytes chunk 转发给 renderer
+  const ttsHttpStreams = new Map<string, AbortController>()
+  const makeStreamId = (): string => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+
+  ipcMain.handle(
+    'tts:httpStreamStart',
+    async (
+      event,
+      payload: { url: string; method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; timeoutMs?: number },
+    ) => {
+      const url = validateTtsUrl(payload.url)
+      const method = (payload.method ?? 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET'
+      const timeoutMs = Math.max(1000, Math.min(180000, payload.timeoutMs ?? 120000))
+
+      const streamId = makeStreamId()
+      const ac = new AbortController()
+      ttsHttpStreams.set(streamId, ac)
+
+      const sender = event.sender
+      const safeSend = (channel: string, data: unknown) => {
+        try {
+          if (!sender || sender.isDestroyed()) return
+          sender.send(channel, data)
+        } catch (_) {
+          /* ignore */
+        }
+      }
+
+      void (async () => {
+        const timer = setTimeout(() => ac.abort(new Error('TTS HTTP timeout')), timeoutMs)
+        try {
+          const res = await fetch(url.toString(), {
+            method,
+            headers: payload.headers ?? undefined,
+            body: method === 'POST' ? payload.body ?? '' : undefined,
+            signal: ac.signal,
+          })
+
+          if (!res.ok) {
+            const buf = await res.arrayBuffer().catch(() => new ArrayBuffer(0))
+            safeSend('tts:httpStreamError', {
+              streamId,
+              status: res.status,
+              statusText: res.statusText,
+              contentType: res.headers.get('content-type') ?? '',
+              arrayBuffer: buf,
+              error: `HTTP ${res.status}: ${res.statusText}`,
+            })
+            safeSend('tts:httpStreamDone', { streamId })
+            return
+          }
+
+          if (!res.body) {
+            safeSend('tts:httpStreamError', { streamId, error: 'TTS 流式响应为空（response.body 不存在）' })
+            safeSend('tts:httpStreamDone', { streamId })
+            return
+          }
+
+          const reader = res.body.getReader()
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            if (!value) continue
+            // Electron IPC 支持直接传 Uint8Array/Buffer
+            safeSend('tts:httpStreamChunk', { streamId, chunk: value })
+          }
+
+          safeSend('tts:httpStreamDone', { streamId })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          safeSend('tts:httpStreamError', { streamId, error: msg })
+          safeSend('tts:httpStreamDone', { streamId })
+        } finally {
+          clearTimeout(timer)
+          ttsHttpStreams.delete(streamId)
+        }
+      })()
+
+      return { streamId }
+    },
+  )
+
+  ipcMain.handle('tts:httpStreamCancel', (_event, streamId: string) => {
+    const ac = ttsHttpStreams.get(streamId)
+    if (ac) {
+      try {
+        ac.abort(new Error('TTS stream canceled'))
+      } catch (_) {
+        /* ignore */
+      }
+      ttsHttpStreams.delete(streamId)
+    }
+    return { ok: true }
+  })
+
   // Live2D expression/motion triggers - broadcast to pet window
   ipcMain.on('live2d:triggerExpression', (_event, expressionName: string) => {
     const petWin = windowManager.getPetWindow()
@@ -401,6 +782,35 @@ function registerIpc() {
     if (petWin && !petWin.isDestroyed()) {
       petWin.webContents.send('bubble:message', message)
     }
+  })
+
+  // ASR transcript: forward from pet window to chat window (manual mode填入输入框)
+  ipcMain.on('asr:reportTranscript', (_event, text: string) => {
+    const cleaned = String(text ?? '').trim()
+    if (!cleaned) return
+
+    const settings = getSettings()
+    const asr = settings.asr
+    const autoSend = Boolean(asr?.enabled && asr?.autoSend)
+
+    let chatWin = windowManager.getChatWindow()
+    if (autoSend && !chatWin) {
+      chatWin = windowManager.ensureChatWindow({ show: false, focus: false })
+    }
+
+    const canSendNow = Boolean(chatWin && !chatWin.isDestroyed() && !chatWin.webContents.isLoading())
+    if (canSendNow) {
+      chatWin?.webContents.send('asr:transcript', cleaned)
+      return
+    }
+
+    pendingAsrTranscript.push(cleaned)
+  })
+
+  ipcMain.handle('asr:takeTranscript', () => {
+    const text = pendingAsrTranscript.join(' ').trim()
+    pendingAsrTranscript = []
+    return text
   })
 
   // TTS segmented sync: forward utterance segments to pet window
@@ -485,6 +895,9 @@ function registerIpc() {
       // Get current mouse position relative to window
       const startMousePos = screen.getCursorScreenPoint()
       const winBounds = win.getBounds()
+      const lockSize = isPetWindow
+      const fixedWidth = winBounds.width
+      const fixedHeight = winBounds.height
 
       // 记录初始 offset：拖拽时保持“按住点”不偏移，避免出现模型/面板相对位置漂移
       const dragOffsetX = startMousePos.x - winBounds.x
@@ -494,6 +907,28 @@ function registerIpc() {
       const activateThresholdSq = 10 * 10
       let draggingActivated = false
       let lastPos = winBounds
+      let enforcingSize = false
+
+      // Windows 在跨屏/缩放比切换时可能会对窗口触发 DPI resize，导致 renderer 里百分比定位的 overlay 逐步“往右下漂移”。
+      // 这里在拖拽期间锁定窗口尺寸，只允许改变 x/y；从源头消灭尺寸抖动带来的视觉漂移/模型缩放跳变。
+      const enforceFixedSize = () => {
+        if (!lockSize) return
+        if (enforcingSize) return
+        if (win.isDestroyed()) return
+
+        enforcingSize = true
+        try {
+          const b = win.getBounds()
+          if (b.width === fixedWidth && b.height === fixedHeight) return
+          win.setBounds({ x: b.x, y: b.y, width: fixedWidth, height: fixedHeight }, false)
+          lastPos = { ...lastPos, x: b.x, y: b.y, width: fixedWidth, height: fixedHeight }
+        } finally {
+          enforcingSize = false
+        }
+      }
+
+      const onResizeDuringDrag = () => enforceFixedSize()
+      if (lockSize) win.on('resize', onResizeDuringDrag)
 
       // Track mouse movement
       const onMouseMove = () => {
@@ -510,16 +945,39 @@ function registerIpc() {
         const nextX = newMousePos.x - dragOffsetX
         const nextY = newMousePos.y - dragOffsetY
         if (nextX === lastPos.x && nextY === lastPos.y) return
-        win.setPosition(nextX, nextY)
+        if (lockSize) {
+          if (!enforcingSize) {
+            enforcingSize = true
+            try {
+              win.setBounds({ x: nextX, y: nextY, width: fixedWidth, height: fixedHeight }, false)
+            } finally {
+              enforcingSize = false
+            }
+          }
+        } else {
+          win.setPosition(nextX, nextY)
+        }
         lastPos = { ...lastPos, x: nextX, y: nextY }
       }
 
       // Use a polling approach for smooth dragging
+      let fallbackTimer: ReturnType<typeof setTimeout> | null = null
       const interval = setInterval(onMouseMove, 16) // ~60fps
 
       // Stop dragging on mouse up
       const stopDrag = () => {
         clearInterval(interval)
+        if (fallbackTimer) clearTimeout(fallbackTimer)
+        fallbackTimer = null
+        if (lockSize) {
+          enforceFixedSize()
+          // 拖拽结束后有时会延迟触发一次 DPI resize，这里保留短暂兜底，避免松手后尺寸突然变化
+          setTimeout(() => {
+            if (win.isDestroyed()) return
+            enforceFixedSize()
+            win.removeListener('resize', onResizeDuringDrag)
+          }, 500)
+        }
         const petWin = windowManager.getPetWindow()
         if (petWin && petWin.id === win.id) {
           windowManager.setPetDragging(false)
@@ -530,8 +988,12 @@ function registerIpc() {
       ipcMain.once('window:stopDrag', stopDrag)
 
       // Also stop after a timeout as fallback
-      setTimeout(() => {
+      fallbackTimer = setTimeout(() => {
         clearInterval(interval)
+        if (lockSize) {
+          win.removeListener('resize', onResizeDuringDrag)
+          enforceFixedSize()
+        }
         ipcMain.removeListener('window:stopDrag', stopDrag)
         const petWin = windowManager.getPetWindow()
         if (petWin && petWin.id === win.id) {
@@ -634,6 +1096,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  void mcpManager?.sync({ enabled: false, servers: [] })
 })
 
 app.whenReady().then(() => {
@@ -645,7 +1108,20 @@ app.whenReady().then(() => {
   }
 
   try {
-    taskService = new TaskService({ onChanged: broadcastTasksChanged, userDataDir: app.getPath('userData') })
+    mcpManager = new McpManager()
+    mcpManager.onChanged((snap) => broadcastMcpChanged(snap))
+    void mcpManager.sync(getSettings().mcp)
+  } catch (err) {
+    console.error('[MCP] Failed to initialize MCP manager:', err)
+    mcpManager = null
+  }
+
+  try {
+    taskService = new TaskService({
+      onChanged: broadcastTasksChanged,
+      userDataDir: app.getPath('userData'),
+      mcpManager,
+    })
   } catch (err) {
     console.error('[Task] Failed to initialize task service:', err)
     taskService = null
@@ -761,5 +1237,6 @@ app.whenReady().then(() => {
     broadcastSettingsChanged()
   })
 
+  syncAsrHotkey()
   broadcastSettingsChanged()
 })

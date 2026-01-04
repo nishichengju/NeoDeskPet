@@ -6,6 +6,9 @@ import type {
   BubbleSettings,
   OrchestratorSettings,
   TaskPanelSettings,
+  ToolSettings,
+  McpSettings,
+  McpServerConfig,
   ChatProfile,
   ChatUiSettings,
   MemoryConsoleSettings,
@@ -21,10 +24,24 @@ const defaultAISettings: AISettings = {
   temperature: 0.7,
   maxTokens: 64000,
   maxContextTokens: 128000,
-  systemPrompt: '你是一个可爱的桌面宠物助手，请用友好、活泼的语气回复用户。',
+  systemPrompt: '',
   enableVision: false,
   enableChatStreaming: false,
 }
+
+const legacyDefaultSystemPrompt = '你是一个可爱的桌面宠物助手，请用友好、活泼的语气回复用户。'
+const legacyDefaultClickPhrases = [
+  '主人好呀~',
+  '有什么事吗？',
+  '嗯？怎么了~',
+  '今天也要加油哦！',
+  '想我了吗？',
+  '主人在干嘛呢？',
+  '需要帮忙吗？',
+  '摸摸~',
+  '嘿嘿~',
+  '主人最棒了！',
+]
 
 const defaultBubbleSettings: BubbleSettings = {
   style: 'cute',
@@ -34,18 +51,10 @@ const defaultBubbleSettings: BubbleSettings = {
   showOnClick: true,
   showOnChat: true,
   autoHideDelay: 5000, // 5 seconds
-  clickPhrases: [
-    '主人好呀~',
-    '有什么事吗？',
-    '嗯？怎么了~',
-    '今天也要加油哦！',
-    '想我了吗？',
-    '主人在干嘛呢？',
-    '需要帮忙吗？',
-    '摸摸~',
-    '嘿嘿~',
-    '主人最棒了！',
-  ],
+  clickPhrases: [],
+  contextOrbEnabled: false,
+  contextOrbX: 12,
+  contextOrbY: 16,
 }
 
 const defaultTaskPanelSettings: TaskPanelSettings = {
@@ -57,6 +66,61 @@ const defaultOrchestratorSettings: OrchestratorSettings = {
   // 默认关闭：避免每条聊天都多一次 LLM 调用；需要时再打开
   plannerEnabled: false,
   plannerMode: 'auto',
+  toolCallingEnabled: false,
+  toolCallingMode: 'text',
+
+  toolUseCustomAi: false,
+  toolAiApiKey: '',
+  toolAiBaseUrl: '',
+  toolAiModel: '',
+  toolAiTemperature: 0.2,
+  toolAiMaxTokens: 900,
+  toolAiTimeoutMs: 60000,
+}
+
+const defaultToolSettings: ToolSettings = {
+  enabled: true,
+  groups: {},
+  tools: {},
+}
+
+const defaultMcpSettings: McpSettings = {
+  enabled: false,
+  servers: [],
+}
+
+function normalizeMcpServerId(value: unknown, fallback: string): string {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '')
+  return cleaned || fallback
+}
+
+function normalizeMcpServerConfig(value: unknown, index: number): McpServerConfig | null {
+  if (!value || typeof value !== 'object') return null
+  const v = value as Partial<McpServerConfig> & Record<string, unknown>
+  const fallbackId = `server${index + 1}`
+
+  const id = normalizeMcpServerId(v.id, fallbackId)
+  const enabled = v.enabled !== false
+  const label = typeof v.label === 'string' ? v.label.trim() : undefined
+  const transport = v.transport === 'stdio' ? 'stdio' : 'stdio'
+  const command = typeof v.command === 'string' ? v.command.trim() : ''
+  const args = Array.isArray(v.args)
+    ? v.args
+        .filter((x) => typeof x === 'string')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 80)
+    : []
+  const cwd = typeof v.cwd === 'string' ? v.cwd.trim() : undefined
+
+  const envObj = typeof v.env === 'object' && v.env ? (v.env as Record<string, unknown>) : {}
+  const env: Record<string, string> = {}
+  for (const [k, val] of Object.entries(envObj)) {
+    if (typeof val === 'string') env[k] = val
+  }
+
+  return { id, enabled, label, transport, command, args, cwd, env: Object.keys(env).length ? env : undefined }
 }
 
 const defaultChatProfile: ChatProfile = {
@@ -73,6 +137,9 @@ const defaultChatUi: ChatUiSettings = {
   bubbleRadius: 14,
   backgroundImage: '',
   backgroundImageOpacity: 0.6,
+  contextOrbEnabled: false,
+  contextOrbX: 6,
+  contextOrbY: 14,
 }
 
 const defaultMemorySettings = {
@@ -144,9 +211,15 @@ const defaultAsrSettings: AsrSettings = {
   enabled: false,
   wsUrl: 'ws://127.0.0.1:8766/ws',
   micDeviceId: '',
+  // Electron/Chromium 下 AudioWorklet 在部分机器上会导致采集 PCM 异常，从而触发 SenseVoice 的“🎼等富文本标记”误判；
+  // 先默认使用 ScriptProcessor（更稳定），如需更低延迟可在设置里切回 worklet。
+  captureBackend: 'script',
   language: 'auto',
   useItn: true,
   autoSend: false,
+  mode: 'continuous',
+  hotkey: 'F8',
+  showSubtitle: true,
   // 默认 200ms：识别更稳；想降低 CPU 再调大
   vadChunkMs: 200,
   maxEndSilenceMs: 800,
@@ -181,6 +254,10 @@ const defaultSettings: AppSettings = {
   taskPanel: defaultTaskPanelSettings,
   // Orchestrator settings (M4)
   orchestrator: defaultOrchestratorSettings,
+  // Tool center / toggles (M3.5)
+  tools: defaultToolSettings,
+  // MCP settings (M3.5 Step2)
+  mcp: defaultMcpSettings,
   // AI settings
   ai: defaultAISettings,
   // Chat profile
@@ -199,7 +276,54 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   merged.bubble = { ...defaultBubbleSettings, ...((value?.bubble ?? {}) as Partial<BubbleSettings>) }
   merged.taskPanel = { ...defaultTaskPanelSettings, ...((value?.taskPanel ?? {}) as Partial<TaskPanelSettings>) }
   merged.orchestrator = { ...defaultOrchestratorSettings, ...((value?.orchestrator ?? {}) as Partial<OrchestratorSettings>) }
+  merged.tools = {
+    ...defaultToolSettings,
+    ...((value?.tools ?? {}) as Partial<ToolSettings>),
+    groups: {
+      ...defaultToolSettings.groups,
+      ...(((value?.tools as Partial<ToolSettings> | undefined)?.groups ?? {}) as Record<string, boolean>),
+    },
+    tools: {
+      ...defaultToolSettings.tools,
+      ...(((value?.tools as Partial<ToolSettings> | undefined)?.tools ?? {}) as Record<string, boolean>),
+    },
+  }
+
+  const mcpRaw = (value?.mcp ?? {}) as Partial<McpSettings>
+  const serversRaw = Array.isArray(mcpRaw.servers) ? mcpRaw.servers : defaultMcpSettings.servers
+  const normalizedServers = (Array.isArray(serversRaw) ? serversRaw : [])
+    .map((s, idx) => normalizeMcpServerConfig(s, idx))
+    .filter(Boolean) as McpServerConfig[]
+
+  // 去重：同名 id 自动加后缀
+  const seen = new Set<string>()
+  for (const s of normalizedServers) {
+    let nextId = s.id
+    let n = 2
+    while (seen.has(nextId)) {
+      nextId = `${s.id}_${n}`
+      n += 1
+    }
+    if (nextId !== s.id) s.id = nextId
+    seen.add(s.id)
+  }
+
+  merged.mcp = {
+    ...defaultMcpSettings,
+    ...mcpRaw,
+    enabled: mcpRaw.enabled !== false,
+    servers: normalizedServers,
+  }
+
   merged.ai = { ...defaultAISettings, ...((value?.ai ?? {}) as Partial<AISettings>) }
+  if (merged.ai.systemPrompt === legacyDefaultSystemPrompt) merged.ai.systemPrompt = ''
+  if (
+    Array.isArray(merged.bubble.clickPhrases) &&
+    merged.bubble.clickPhrases.length === legacyDefaultClickPhrases.length &&
+    merged.bubble.clickPhrases.every((v, i) => v === legacyDefaultClickPhrases[i])
+  ) {
+    merged.bubble.clickPhrases = []
+  }
   merged.chatProfile = { ...defaultChatProfile, ...((value?.chatProfile ?? {}) as Partial<ChatProfile>) }
   merged.chatUi = { ...defaultChatUi, ...((value?.chatUi ?? {}) as Partial<ChatUiSettings>) }
   merged.memory = { ...defaultMemorySettings, ...((value?.memory ?? {}) as Partial<typeof defaultMemorySettings>) }

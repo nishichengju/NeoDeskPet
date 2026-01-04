@@ -16,6 +16,10 @@ import type {
   TaskRecord,
   TaskPanelSettings,
   OrchestratorSettings,
+  ToolSettings,
+  McpSettings,
+  McpStateSnapshot,
+  ContextUsageSnapshot,
   MemoryRetrieveArgs,
   MemoryRetrieveResult,
   MemoryConsoleSettings,
@@ -49,7 +53,7 @@ export type Live2DExpressionListener = (expressionName: string) => void
 export type Live2DMotionListener = (motionGroup: string, index: number) => void
 export type BubbleMessageListener = (message: string) => void
 
-export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[] }
+export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[]; fullText?: string }
 export type TtsSegmentStartedPayload = { utteranceId: string; segmentIndex: number; text: string }
 export type TtsUtteranceEndedPayload = { utteranceId: string }
 export type TtsUtteranceFailedPayload = { utteranceId: string; error: string }
@@ -92,6 +96,27 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   setOrchestratorSettings: (patch: Partial<OrchestratorSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setOrchestratorSettings', patch),
 
+  // Tool center / toggles (M3.5)
+  setToolSettings: (patch: Partial<ToolSettings>): Promise<AppSettings> => ipcRenderer.invoke('settings:setToolSettings', patch),
+
+  // MCP settings/state (M3.5 Step2)
+  setMcpSettings: (patch: Partial<McpSettings>): Promise<AppSettings> => ipcRenderer.invoke('settings:setMcpSettings', patch),
+  getMcpState: (): Promise<McpStateSnapshot> => ipcRenderer.invoke('mcp:getState'),
+  onMcpChanged: (listener: (snapshot: McpStateSnapshot) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, snapshot: McpStateSnapshot) => listener(snapshot)
+    ipcRenderer.on('mcp:changed', handler)
+    return () => ipcRenderer.off('mcp:changed', handler)
+  },
+
+  // Context usage snapshot (chat -> main -> pet/chat)
+  setContextUsage: (snapshot: ContextUsageSnapshot | null): void => ipcRenderer.send('contextUsage:set', snapshot),
+  getContextUsage: (): Promise<ContextUsageSnapshot | null> => ipcRenderer.invoke('contextUsage:get'),
+  onContextUsageChanged: (listener: (snapshot: ContextUsageSnapshot | null) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, snapshot: ContextUsageSnapshot | null) => listener(snapshot)
+    ipcRenderer.on('contextUsage:changed', handler)
+    return () => ipcRenderer.off('contextUsage:changed', handler)
+  },
+
   // Chat profile
   setChatProfile: (chatProfile: Partial<ChatProfile>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setChatProfile', chatProfile),
@@ -103,9 +128,40 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   // TTS settings
   setTtsSettings: (tts: Partial<TtsSettings>): Promise<AppSettings> => ipcRenderer.invoke('settings:setTtsSettings', tts),
   listTtsOptions: (): Promise<TtsOptions> => ipcRenderer.invoke('tts:listOptions'),
+  // TTS HTTP proxy (avoid renderer CORS/preflight issues)
+  ttsHttpGetJson: (url: string): Promise<{ ok: boolean; status: number; statusText: string; json: unknown; error?: string }> =>
+    ipcRenderer.invoke('tts:httpGetJson', url),
+  ttsHttpRequestArrayBuffer: (payload: {
+    url: string
+    method?: 'GET' | 'POST'
+    headers?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+  }): Promise<{ ok: boolean; status: number; statusText: string; contentType: string; arrayBuffer: ArrayBuffer; error?: string }> =>
+    ipcRenderer.invoke('tts:httpRequestArrayBuffer', payload),
+  ttsHttpStreamStart: (payload: {
+    url: string
+    method?: 'GET' | 'POST'
+    headers?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+  }): Promise<{ streamId: string }> => ipcRenderer.invoke('tts:httpStreamStart', payload),
+  ttsHttpStreamCancel: (streamId: string): Promise<{ ok: true }> => ipcRenderer.invoke('tts:httpStreamCancel', streamId),
 
   // ASR settings
   setAsrSettings: (asr: Partial<AsrSettings>): Promise<AppSettings> => ipcRenderer.invoke('settings:setAsrSettings', asr),
+  onAsrHotkeyToggle: (listener: () => void): (() => void) => {
+    const handler = () => listener()
+    ipcRenderer.on('asr:hotkeyToggle', handler)
+    return () => ipcRenderer.off('asr:hotkeyToggle', handler)
+  },
+  reportAsrTranscript: (text: string): void => ipcRenderer.send('asr:reportTranscript', text),
+  takeAsrTranscript: (): Promise<string> => ipcRenderer.invoke('asr:takeTranscript'),
+  onAsrTranscript: (listener: (text: string) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, text: string) => listener(text)
+    ipcRenderer.on('asr:transcript', handler)
+    return () => ipcRenderer.off('asr:transcript', handler)
+  },
 
   // Model scanner - scan live2d directory for available models
   scanModels: (): Promise<ScannedModel[]> => ipcRenderer.invoke('models:scan'),
@@ -127,6 +183,8 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     ipcRenderer.invoke('chat:addMessage', sessionId, message),
   updateChatMessage: (sessionId: string, messageId: string, content: string): Promise<ChatSession> =>
     ipcRenderer.invoke('chat:updateMessage', sessionId, messageId, content),
+  updateChatMessageRecord: (sessionId: string, messageId: string, patch: Partial<ChatMessageRecord>): Promise<ChatSession> =>
+    ipcRenderer.invoke('chat:updateMessageRecord', sessionId, messageId, patch),
   deleteChatMessage: (sessionId: string, messageId: string): Promise<ChatSession> =>
     ipcRenderer.invoke('chat:deleteMessage', sessionId, messageId),
   setChatAutoExtractCursor: (sessionId: string, cursor: number): Promise<ChatSession> =>
@@ -148,6 +206,7 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   pauseTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:pause', id),
   resumeTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:resume', id),
   cancelTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:cancel', id),
+  dismissTask: (id: string): Promise<{ ok: true } | null> => ipcRenderer.invoke('task:dismiss', id),
   onTasksChanged: (listener: TasksChangedListener): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: TaskListResult) => listener(payload)
     ipcRenderer.on('task:changed', handler)
@@ -286,6 +345,26 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     const handler = () => listener()
     ipcRenderer.on('tts:stopAll', handler)
     return () => ipcRenderer.off('tts:stopAll', handler)
+  },
+  onTtsHttpStreamChunk: (listener: (payload: { streamId: string; chunk: Uint8Array }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { streamId: string; chunk: Uint8Array }) => listener(payload)
+    ipcRenderer.on('tts:httpStreamChunk', handler)
+    return () => ipcRenderer.off('tts:httpStreamChunk', handler)
+  },
+  onTtsHttpStreamDone: (listener: (payload: { streamId: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { streamId: string }) => listener(payload)
+    ipcRenderer.on('tts:httpStreamDone', handler)
+    return () => ipcRenderer.off('tts:httpStreamDone', handler)
+  },
+  onTtsHttpStreamError: (
+    listener: (payload: { streamId: string; error?: string; status?: number; statusText?: string; contentType?: string; arrayBuffer?: ArrayBuffer }) => void,
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: { streamId: string; error?: string; status?: number; statusText?: string; contentType?: string; arrayBuffer?: ArrayBuffer },
+    ) => listener(payload)
+    ipcRenderer.on('tts:httpStreamError', handler)
+    return () => ipcRenderer.off('tts:httpStreamError', handler)
   },
 })
 

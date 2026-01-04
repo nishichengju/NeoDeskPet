@@ -13,13 +13,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
     "better-sqlite3": "^12.5.0",
     "electron-store": "^10.0.0",
-    "playwright-core": "^1.50.1",
     "pixi-live2d-display": "0.4.0",
     "pixi.js": "6.5.10",
+    "playwright-core": "^1.50.1",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "zod": "^4.3.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

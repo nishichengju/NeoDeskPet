@@ -298,6 +298,39 @@ export function updateChatMessage(sessionId: string, messageId: string, content:
   return getChatSession(sessionId)
 }
 
+export function updateChatMessageRecord(sessionId: string, messageId: string, patch: unknown): ChatSession {
+  if (!patch || typeof patch !== 'object') return getChatSession(sessionId)
+
+  const p = patch as Partial<ChatMessageRecord> & Record<string, unknown>
+  const cleaned: Partial<ChatMessageRecord> = {}
+
+  if ('content' in p) {
+    if (typeof p.content === 'string') cleaned.content = p.content
+  }
+  if ('image' in p) {
+    if (typeof p.image === 'string') cleaned.image = p.image
+    else if (p.image == null) cleaned.image = undefined
+  }
+  if ('taskId' in p) {
+    if (typeof p.taskId === 'string') cleaned.taskId = p.taskId
+    else if (p.taskId == null) cleaned.taskId = undefined
+  }
+  if ('blocks' in p) {
+    if (Array.isArray(p.blocks)) cleaned.blocks = p.blocks as unknown as ChatMessageRecord['blocks']
+    else if (p.blocks == null) cleaned.blocks = undefined
+  }
+
+  writeState((draft) => {
+    const idx = draft.sessions.findIndex((s) => s.id === sessionId)
+    if (idx === -1) return
+
+    const session = draft.sessions[idx]
+    const nextMessages = session.messages.map((m) => (m.id === messageId ? { ...m, ...cleaned, updatedAt: now() } : m))
+    draft.sessions[idx] = { ...session, messages: nextMessages, updatedAt: now() }
+  })
+  return getChatSession(sessionId)
+}
+
 export function deleteChatMessage(sessionId: string, messageId: string): ChatSession {
   writeState((draft) => {
     const idx = draft.sessions.findIndex((s) => s.id === sessionId)

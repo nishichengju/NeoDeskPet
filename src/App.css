@@ -1,7 +1,8 @@
 .ndp-pet-root,
 .ndp-chat-root,
 .ndp-settings-root {
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   color: rgba(255, 255, 255, 0.92);
@@ -12,6 +13,34 @@
 .ndp-pet-root {
   background: transparent;
   position: relative;
+}
+
+.ndp-asr-subtitle {
+  position: absolute;
+  left: 10px;
+  top: 56%;
+  transform: translateY(-50%);
+  max-width: 46%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+  backdrop-filter: blur(12px);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ndp-asr-subtitle-recording {
+  border-color: rgba(34, 197, 94, 0.55);
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.2), 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 /* Pet mini task panel (M2) */
@@ -171,6 +200,14 @@
 
 .ndp-chat-root {
   background: var(--ndp-chat-bg, rgba(20, 20, 24, 0.45));
+  position: relative;
+}
+
+.ndp-setting-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .ndp-titlebar {
@@ -565,6 +602,329 @@
   margin-top: 10px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   cursor: pointer;
+}
+
+.ndp-tooluse {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+.ndp-tooluse-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ndp-tooluse-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ndp-tooluse-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 8px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(10px);
+}
+
+.ndp-tooluse-pill-running {
+  background: rgba(34, 197, 94, 0.18);
+}
+
+.ndp-tooluse-pill-paused {
+  background: rgba(234, 179, 8, 0.18);
+}
+
+.ndp-tooluse-pill-pending {
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.ndp-tooluse-pill-done {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.ndp-tooluse-pill-failed {
+  background: rgba(248, 113, 113, 0.18);
+}
+
+.ndp-tooluse-pill-canceled {
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.ndp-tooluse-body {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.ndp-tooluse-run + .ndp-tooluse-run {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.ndp-tooluse-run-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-tooluse-run-status {
+  font-size: 10px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.85);
+  text-transform: uppercase;
+}
+
+.ndp-tooluse-run-status-running {
+  background: rgba(34, 197, 94, 0.18);
+}
+
+.ndp-tooluse-run-status-done {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.ndp-tooluse-run-status-error {
+  background: rgba(248, 113, 113, 0.18);
+}
+
+.ndp-tooluse-run-status-connected {
+  background: rgba(34, 197, 94, 0.18);
+}
+
+.ndp-tooluse-run-status-connecting {
+  background: rgba(234, 179, 8, 0.18);
+}
+
+.ndp-tooluse-run-status-disconnected {
+  background: rgba(148, 163, 184, 0.14);
+}
+
+.ndp-tooluse-run-status-pending {
+  background: rgba(148, 163, 184, 0.14);
+}
+
+.ndp-tooluse-run-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.ndp-tooluse-run-io {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.78);
+  word-break: break-word;
+}
+
+.ndp-tooluse-run-error {
+  color: rgba(248, 113, 113, 0.9);
+}
+
+.ndp-btn-mini {
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+/* Tools Center (M3.5) */
+.ndp-toolcenter-subtabs {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0 14px;
+}
+
+.ndp-toolcenter-subtabs .ndp-btn.active {
+  border-color: rgba(102, 126, 234, 0.55);
+  background: rgba(102, 126, 234, 0.22);
+}
+
+.ndp-toolcenter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ndp-toolcenter-group {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.16);
+  padding: 10px;
+}
+
+.ndp-toolcenter-group-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ndp-toolcenter-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ndp-toolcenter-group-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ndp-toolcenter-group-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.ndp-toolcenter-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-toolcenter-group-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ndp-toolcenter-tool {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.12);
+  padding: 10px;
+}
+
+.ndp-toolcenter-tool-disabled {
+  opacity: 0.7;
+}
+
+.ndp-toolcenter-tool-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ndp-toolcenter-tool-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ndp-toolcenter-tool-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ndp-toolcenter-tool-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.ndp-toolcenter-tool-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-toolcenter-tool-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ndp-toolcenter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.ndp-toolcenter-toggle input {
+  accent-color: #667eea;
+}
+
+.ndp-toolcenter-desc {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.86);
+  line-height: 1.4;
+}
+
+.ndp-toolcenter-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.ndp-toolcenter-last {
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+  padding-top: 10px;
+}
+
+.ndp-toolcenter-sub {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.ndp-toolcenter-sub-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.ndp-toolcenter-sub-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ndp-toolcenter-pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 10px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.ndp-toolcenter-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ndp-toolcenter-example-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 6px;
 }
 
 .ndp-msg-edit-actions {

@@ -5,6 +5,7 @@ import { defaultModelJsonUrl } from './live2dModels'
 import { getApi } from '../neoDeskPetApi'
 
 type Props = {
+  windowDragging?: boolean // 窗口是否正在被拖动（用于高频同步画布/布局）
   modelJsonUrl?: string
   scale?: number
   opacity?: number
@@ -44,17 +45,26 @@ function createParamSetter(model: Live2DModel): Live2DParamSetter {
 }
 
 export function Live2DView(props: Props) {
-  const { modelJsonUrl, scale = 1.0, opacity = 1.0, mouthOpen = 0 } = props
+  const { modelJsonUrl, scale = 1.0, opacity = 1.0, mouthOpen = 0, windowDragging = false } = props
   const containerRef = useRef<HTMLDivElement | null>(null)
   const modelRef = useRef<Live2DModel | null>(null)
   const appRef = useRef<PIXI.Application | null>(null)
   const naturalSizeRef = useRef<{ width: number; height: number } | null>(null)
   const [modelLoaded, setModelLoaded] = useState(false)
   const mouthOpenRef = useRef(0)
+  const windowDraggingRef = useRef(false)
+  const lastLayoutRef = useRef<{ w: number; h: number; dpr: number }>({ w: 0, h: 0, dpr: 0 })
+  const syncLayoutRef = useRef<(() => void) | null>(null)
+  const dragRafRef = useRef<number>(0)
+  const pendingScaleAfterDragRef = useRef(false)
 
   useEffect(() => {
     mouthOpenRef.current = Math.max(0, Math.min(1.25, mouthOpen))
   }, [mouthOpen])
+
+  useEffect(() => {
+    windowDraggingRef.current = windowDragging
+  }, [windowDragging])
 
   const selectedModelUrl = useMemo(() => modelJsonUrl ?? defaultModelJsonUrl, [modelJsonUrl])
 
@@ -65,15 +75,17 @@ export function Live2DView(props: Props) {
     setModelLoaded(false)
     ;(window as unknown as { PIXI?: unknown }).PIXI = PIXI
 
-    const rect = containerRef.current.getBoundingClientRect()
+    // 使用 clientWidth/Height（整数、稳定）避免拖动窗口/跨屏 DPI 变化时出现小数抖动
+    const initW = Math.max(1, containerRef.current.clientWidth)
+    const initH = Math.max(1, containerRef.current.clientHeight)
 
     const app = new PIXI.Application({
       backgroundAlpha: 0,
       antialias: true,
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
-      width: rect.width,
-      height: rect.height,
+      width: initW,
+      height: initH,
     })
 
     appRef.current = app
@@ -94,10 +106,36 @@ export function Live2DView(props: Props) {
 
       live2d.anchor.set(0.5, 0.5)
 
-      // Store natural size for later recalculation
-      naturalSizeRef.current = {
-        width: Math.max(1, live2d.width || 1),
-        height: Math.max(1, live2d.height || 1),
+      // 记录稳定的“自然尺寸”，用于后续 fit-to-window 的 scale 计算
+      // 优先取 localBounds（更接近可见范围），其次 internalModel 原始尺寸，最后退回 live2d.width/height
+      try {
+        const internal = live2d.internalModel as unknown as {
+          originalWidth?: number
+          originalHeight?: number
+          width?: number
+          height?: number
+        }
+
+        const bounds = live2d.getLocalBounds()
+        const bW = typeof bounds?.width === 'number' && Number.isFinite(bounds.width) ? bounds.width : 0
+        const bH = typeof bounds?.height === 'number' && Number.isFinite(bounds.height) ? bounds.height : 0
+
+        const iW =
+          (typeof internal.width === 'number' && internal.width > 0 ? internal.width : 0) ||
+          (typeof internal.originalWidth === 'number' && internal.originalWidth > 0 ? internal.originalWidth : 0)
+        const iH =
+          (typeof internal.height === 'number' && internal.height > 0 ? internal.height : 0) ||
+          (typeof internal.originalHeight === 'number' && internal.originalHeight > 0 ? internal.originalHeight : 0)
+
+        naturalSizeRef.current = {
+          width: Math.max(1, bW || iW || live2d.width || 1),
+          height: Math.max(1, bH || iH || live2d.height || 1),
+        }
+      } catch {
+        naturalSizeRef.current = {
+          width: Math.max(1, live2d.width || 1),
+          height: Math.max(1, live2d.height || 1),
+        }
       }
 
       const setParam = createParamSetter(live2d)
@@ -171,35 +209,140 @@ export function Live2DView(props: Props) {
     }
   }, [modelLoaded])
 
-  // Update scale and resize canvas when prop changes or model loads
+  // 同步画布大小/分辨率与模型位置：
+  // - Windows/Electron 在拖动窗口、跨显示器（不同缩放比例）时，devicePixelRatio/布局可能变化
+  // - 若 PIXI renderer 不同步 resize/resolution，会导致 Live2D 画面与 DOM 覆盖层（气泡/小球）相对位置“漂移”
   useEffect(() => {
-    const model = modelRef.current
-    const app = appRef.current
-    const natural = naturalSizeRef.current
+    if (!modelLoaded) return
+
     const container = containerRef.current
+    const app = appRef.current
+    if (!container || !app) return
 
-    if (!model || !app || !natural || !container || !modelLoaded) return
+    // reset once per attach (avoid resetting on windowDragging toggles)
+    lastLayoutRef.current = { w: 0, h: 0, dpr: 0 }
 
-    // Get current container size (may have changed due to window resize)
-    const rect = container.getBoundingClientRect()
+    const syncLayout = () => {
+      const container = containerRef.current
+      const app = appRef.current
+      if (!container || !app) return
 
-    // Resize PIXI renderer to match container
-    app.renderer.resize(rect.width, rect.height)
+      // 使用 clientWidth/Height（整数、稳定）避免拖动窗口时 getBoundingClientRect 出现抖动导致 scale 逐步漂移
+      const w = Math.max(1, container.clientWidth)
+      const h = Math.max(1, container.clientHeight)
+      const dpr = window.devicePixelRatio || 1
 
-    // Calculate scale to fit model in container (fill most of the space)
-    const padding = 0.92
-    const targetW = rect.width * padding
-    const targetH = rect.height * padding
+      const last = lastLayoutRef.current
+      const sizeChanged = w !== last.w || h !== last.h
+      const dprChanged = Math.abs(dpr - last.dpr) > 0.001
+      const dragging = windowDraggingRef.current
+      const forceScale = !dragging && pendingScaleAfterDragRef.current
+      if (!sizeChanged && !dprChanged && !forceScale) {
+        // 拖动窗口时强制把模型保持在中心，避免合成/缩放抖动造成“视觉漂移”
+        if (dragging) {
+          const model = modelRef.current
+          if (model) model.position.set(w / 2, h / 2 + h * 0.06)
+        }
+        return
+      }
 
-    let baseScale = Math.min(targetW / natural.width, targetH / natural.height)
-    if (!Number.isFinite(baseScale) || baseScale <= 0 || baseScale > 10) {
-      baseScale = 0.15
+      try {
+        if (dprChanged) {
+          app.renderer.resolution = dpr
+          // 交互坐标也需要跟随 DPR，避免命中/事件偏移
+          const interaction = (app.renderer.plugins as unknown as { interaction?: { resolution?: number } }).interaction
+          if (interaction && typeof interaction.resolution === 'number') {
+            interaction.resolution = dpr
+          }
+        }
+
+        if (sizeChanged || dprChanged) {
+          app.renderer.resize(w, h)
+        }
+
+        const model = modelRef.current
+        const natural = naturalSizeRef.current
+        if (!dragging && model && natural) {
+          const padding = 0.92
+          const targetW = w * padding
+          const targetH = h * padding
+
+          let baseScale = Math.min(targetW / natural.width, targetH / natural.height)
+          if (!Number.isFinite(baseScale) || baseScale <= 0 || baseScale > 10) {
+            baseScale = 0.15
+          }
+
+          // 只在发生“明显变化”时再更新，避免极端拖动/系统抖动导致 scale 频繁微调（观感像越甩越大/越甩越小）
+          const currentScale = typeof model.scale?.x === 'number' ? model.scale.x : NaN
+          const denom = Number.isFinite(currentScale) && currentScale > 0 ? currentScale : 1
+          const relDiff = Math.abs(baseScale - denom) / denom
+          if (!Number.isFinite(currentScale) || relDiff > 0.005) {
+            // model.scale 与窗口大小绑定（外部 scale 参数仅作为触发同步的依赖，不在这里叠加）
+            model.scale.set(baseScale)
+          }
+
+          model.position.set(w / 2, h / 2 + h * 0.06)
+        } else if (model) {
+          model.position.set(w / 2, h / 2 + h * 0.06)
+        }
+
+        lastLayoutRef.current = { w, h, dpr }
+        if (dragging && (sizeChanged || dprChanged)) pendingScaleAfterDragRef.current = true
+        if (!dragging && forceScale) pendingScaleAfterDragRef.current = false
+      } catch {
+        // ignore
+      }
     }
 
-    // Model always fits the window - scale is handled by window size
-    model.scale.set(baseScale)
-    model.position.set(rect.width / 2, rect.height / 2 + rect.height * 0.06)
-  }, [scale, modelLoaded])
+    syncLayoutRef.current = syncLayout
+    syncLayout()
+
+    const handleWindowResize = () => syncLayout()
+    window.addEventListener('resize', handleWindowResize)
+
+    let ro: ResizeObserver | null = null
+    try {
+      ro = new ResizeObserver(() => syncLayout())
+      ro.observe(container)
+    } catch {
+      ro = null
+    }
+
+    // 兜底：DPI/缩放变化在某些环境下不会触发 resize/ResizeObserver
+    const dprTimer = window.setInterval(() => syncLayout(), 250)
+
+    return () => {
+      window.removeEventListener('resize', handleWindowResize)
+      if (ro) ro.disconnect()
+      clearInterval(dprTimer)
+      syncLayoutRef.current = null
+    }
+  }, [modelLoaded, scale])
+
+  // 拖动窗口时高频同步，避免“甩动时逐步漂移”的观感；结束拖动时再同步一次
+  useEffect(() => {
+    if (!modelLoaded) return
+
+    const stop = () => {
+      if (dragRafRef.current) window.cancelAnimationFrame(dragRafRef.current)
+      dragRafRef.current = 0
+    }
+
+    if (!windowDragging) {
+      stop()
+      syncLayoutRef.current?.()
+      return
+    }
+
+    stop()
+    const tick = () => {
+      syncLayoutRef.current?.()
+      dragRafRef.current = window.requestAnimationFrame(tick)
+    }
+    dragRafRef.current = window.requestAnimationFrame(tick)
+
+    return stop
+  }, [windowDragging, modelLoaded])
 
   // Update opacity when prop changes or model loads
   useEffect(() => {

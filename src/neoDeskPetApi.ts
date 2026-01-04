@@ -40,6 +40,10 @@ import type {
   AsrSettings,
   TaskPanelSettings,
   OrchestratorSettings,
+  ToolSettings,
+  McpSettings,
+  McpStateSnapshot,
+  ContextUsageSnapshot,
 } from '../electron/types'
 import type { TtsOptions } from '../electron/ttsOptions'
 
@@ -48,7 +52,7 @@ export type Live2DExpressionListener = (expressionName: string) => void
 export type Live2DMotionListener = (motionGroup: string, index: number) => void
 export type BubbleMessageListener = (message: string) => void
 
-export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[] }
+export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[]; fullText?: string }
 export type TtsSegmentStartedPayload = { utteranceId: string; segmentIndex: number; text: string }
 export type TtsUtteranceEndedPayload = { utteranceId: string }
 export type TtsUtteranceFailedPayload = { utteranceId: string; error: string }
@@ -60,6 +64,7 @@ export type TtsUtteranceEndedListener = (payload: TtsUtteranceEndedPayload) => v
 export type TtsUtteranceFailedListener = (payload: TtsUtteranceFailedPayload) => void
 export type TtsStopAllListener = () => void
 export type TasksChangedListener = (payload: TaskListResult) => void
+export type McpChangedListener = (snapshot: McpStateSnapshot) => void
 
 export type NeoDeskPetApi = {
   getSettings(): Promise<AppSettings>
@@ -79,6 +84,16 @@ export type NeoDeskPetApi = {
   setTaskPanelSettings(patch: Partial<TaskPanelSettings>): Promise<AppSettings>
   // Orchestrator settings (M4)
   setOrchestratorSettings(patch: Partial<OrchestratorSettings>): Promise<AppSettings>
+  // Tool center / toggles (M3.5)
+  setToolSettings(patch: Partial<ToolSettings>): Promise<AppSettings>
+  // MCP settings/state (M3.5 Step2)
+  setMcpSettings(patch: Partial<McpSettings>): Promise<AppSettings>
+  getMcpState(): Promise<McpStateSnapshot>
+  onMcpChanged(listener: McpChangedListener): () => void
+  // Context usage snapshot (chat -> main -> pet/chat)
+  setContextUsage(snapshot: ContextUsageSnapshot | null): void
+  getContextUsage(): Promise<ContextUsageSnapshot | null>
+  onContextUsageChanged(listener: (snapshot: ContextUsageSnapshot | null) => void): () => void
   // Chat profile
   setChatProfile(chatProfile: Partial<ChatProfile>): Promise<AppSettings>
   // Chat UI appearance
@@ -86,8 +101,30 @@ export type NeoDeskPetApi = {
   // TTS settings
   setTtsSettings(tts: Partial<TtsSettings>): Promise<AppSettings>
   listTtsOptions(): Promise<TtsOptions>
+  // TTS HTTP proxy（避免 renderer 直接请求本地 TTS 服务时的 CORS/预检问题）
+  ttsHttpGetJson(url: string): Promise<{ ok: boolean; status: number; statusText: string; json: unknown; error?: string }>
+  ttsHttpRequestArrayBuffer(payload: {
+    url: string
+    method?: 'GET' | 'POST'
+    headers?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+  }): Promise<{ ok: boolean; status: number; statusText: string; contentType: string; arrayBuffer: ArrayBuffer; error?: string }>
+  ttsHttpStreamStart(payload: {
+    url: string
+    method?: 'GET' | 'POST'
+    headers?: Record<string, string>
+    body?: string
+    timeoutMs?: number
+  }): Promise<{ streamId: string }>
+  ttsHttpStreamCancel(streamId: string): Promise<{ ok: true }>
   // ASR settings
   setAsrSettings(asr: Partial<AsrSettings>): Promise<AppSettings>
+  // ASR hotkey / transcript (pet <-> main <-> chat)
+  onAsrHotkeyToggle(listener: () => void): () => void
+  reportAsrTranscript(text: string): void
+  takeAsrTranscript(): Promise<string>
+  onAsrTranscript(listener: (text: string) => void): () => void
   // Model scanner
   scanModels(): Promise<ScannedModel[]>
   // Chat sessions/messages
@@ -101,6 +138,7 @@ export type NeoDeskPetApi = {
   setChatMessages(sessionId: string, messages: ChatMessageRecord[]): Promise<ChatSession>
   addChatMessage(sessionId: string, message: ChatMessageRecord): Promise<ChatSession>
   updateChatMessage(sessionId: string, messageId: string, content: string): Promise<ChatSession>
+  updateChatMessageRecord(sessionId: string, messageId: string, patch: Partial<ChatMessageRecord>): Promise<ChatSession>
   deleteChatMessage(sessionId: string, messageId: string): Promise<ChatSession>
   setChatAutoExtractCursor(sessionId: string, cursor: number): Promise<ChatSession>
   setChatAutoExtractMeta(
@@ -120,6 +158,7 @@ export type NeoDeskPetApi = {
   pauseTask(id: string): Promise<TaskRecord | null>
   resumeTask(id: string): Promise<TaskRecord | null>
   cancelTask(id: string): Promise<TaskRecord | null>
+  dismissTask(id: string): Promise<{ ok: true } | null>
   onTasksChanged(listener: TasksChangedListener): () => void
 
   // Long-term memory / personas
@@ -192,6 +231,13 @@ export type NeoDeskPetApi = {
   onTtsUtteranceEnded(listener: TtsUtteranceEndedListener): () => void
   onTtsUtteranceFailed(listener: TtsUtteranceFailedListener): () => void
   onTtsStopAll(listener: TtsStopAllListener): () => void
+
+  // TTS HTTP streaming proxy events (main -> renderer)
+  onTtsHttpStreamChunk(listener: (payload: { streamId: string; chunk: Uint8Array }) => void): () => void
+  onTtsHttpStreamDone(listener: (payload: { streamId: string }) => void): () => void
+  onTtsHttpStreamError(
+    listener: (payload: { streamId: string; error?: string; status?: number; statusText?: string; contentType?: string; arrayBuffer?: ArrayBuffer }) => void,
+  ): () => void
 }
 
 export type NeoDeskPetMemoryApi = Pick<

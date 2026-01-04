@@ -45,8 +45,14 @@ function extractTags(text: string): { cleanedText: string; expression?: string; 
   }
   MOTION_TAG_PATTERN.lastIndex = 0 // Reset regex state
 
-  // Clean up extra whitespace
-  cleanedText = cleanedText.replace(/\s+/g, ' ').trim()
+  // 清理空白：保留换行结构，但避免过多空行/空格导致渲染“缝隙”
+  cleanedText = cleanedText
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 
   return { cleanedText, expression, motion }
 }
@@ -61,7 +67,7 @@ function buildSystemPrompt(basePrompt: string, expressions: string[], motions: s
 
   let instruction = basePrompt
 
-  if (expressions.length > 0) {
+ if (expressions.length > 0) {
     const expList = expressions.slice(0, 20).join('、')
     instruction += `
 
@@ -70,10 +76,10 @@ function buildSystemPrompt(basePrompt: string, expressions: string[], motions: s
 
 在回复时，请在句末用标签标注想要展示的表情，格式为 [表情:表情名称]
 例如：
-- "主人好呀~ [表情:星星眼]"
-- "呜呜，好难过喵 [表情:哭]"
+- "…… [表情:星星眼]"
+- "…… [表情:哭]"
 
-注意：每条回复最多使用1个表情标签，放在回复末尾。`
+注意：每条回复最多使用1个表情标签；为降低界面延迟，尽量在回复开头/第一句末尾（前 20 个字内）给出；如果不方便，再放在末尾。`
   }
 
   if (motions.length > 0) {
@@ -82,7 +88,8 @@ function buildSystemPrompt(basePrompt: string, expressions: string[], motions: s
 
 【动作系统】
 可用的动作组：${motionList}
-如需触发动作，可使用 [动作:动作组名称] 标签`
+如需触发动作，可使用 [动作:动作组名称] 标签
+注意：动作标签同样尽量前置（前 20 个字内或第一句末尾），便于界面低延迟触发。`
   }
 
   return instruction

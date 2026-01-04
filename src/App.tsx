@@ -3,20 +3,27 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import type {
   AppSettings,
   BubbleStyle,
+  ChatMessageBlock,
   ChatMessageRecord,
   ChatSessionSummary,
+  ContextUsageSnapshot,
+  McpStateSnapshot,
+  McpServerConfig,
   MemoryRetrieveResult,
   Persona,
   PersonaSummary,
   TaskCreateArgs,
   TaskRecord,
+  TaskStepRecord,
   TailDirection,
 } from '../electron/types'
+import { getBuiltinToolDefinitions, getToolGroupId, isToolEnabled } from '../electron/toolRegistry'
 import { getApi } from './neoDeskPetApi'
 import { getWindowType } from './windowType'
 import { MemoryConsoleWindow } from './windows/MemoryConsoleWindow'
 import { Live2DView } from './live2d/Live2DView'
 import { SpeechBubble } from './components/SpeechBubble'
+import { ContextUsageOrb } from './components/ContextUsageOrb'
 import {
   getAvailableModels,
   parseModelMetadata,
@@ -25,7 +32,7 @@ import {
 } from './live2d/live2dModels'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatMessage } from './services/aiService'
 import { TtsPlayer } from './services/ttsService'
-import { createStreamingSentenceSegmenter, splitTextIntoSegments } from './services/textSegmentation'
+import { splitTextIntoTtsSegments } from './services/textSegmentation'
 
 function App() {
   const windowType = getWindowType()
@@ -95,54 +102,145 @@ function clampIntValue(v: unknown, fallback: number, min: number, max: number): 
   return Math.max(min, Math.min(max, Math.trunc(n)))
 }
 
-const TASK_PLANNER_TOOLS = [
-  'browser.fetch',
-  'browser.playwright',
-  'file.write',
-  'cli.exec',
-  'llm.summarize',
-  'llm.chat',
-  'delay.sleep',
-] as const
+function normalizeAssistantDisplayText(text: string, opts?: { trim?: boolean }): string {
+  const cleaned = String(text ?? '')
+    .replace(/\[表情[：:]\s*[^\]]+\]/g, '')
+    .replace(/\[动作[：:]\s*[^\]]+\]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+  return opts?.trim ? cleaned.trim() : cleaned
+}
+
+function extractLive2DTags(text: string): { displayText: string; expression?: string; motion?: string } {
+  const raw = String(text ?? '')
+  let expression: string | undefined
+  let motion: string | undefined
+
+  for (const m of raw.matchAll(/\[表情[：:]\s*([^\]]+)\]/g)) {
+    expression = m[1]?.trim() || undefined
+  }
+
+  for (const m of raw.matchAll(/\[动作[：:]\s*([^\]]+)\]/g)) {
+    motion = m[1]?.trim() || undefined
+  }
+  const displayText = normalizeAssistantDisplayText(raw, { trim: true })
+  return {
+    displayText,
+    expression,
+    motion,
+  }
+}
+
+function extractLastLive2DTags(text: string): { expression?: string; motion?: string } {
+  const raw = String(text ?? '')
+
+  let expression: string | undefined
+  let motion: string | undefined
+
+  for (const m of raw.matchAll(/\[表情[：:]\s*([^\]]+)\]/g)) {
+    expression = m[1]?.trim() || undefined
+  }
+
+  for (const m of raw.matchAll(/\[动作[：:]\s*([^\]]+)\]/g)) {
+    motion = m[1]?.trim() || undefined
+  }
+
+  return { expression, motion }
+}
+
+function normalizeMessageBlocks(m: ChatMessageRecord): ChatMessageBlock[] {
+  const blocksRaw = Array.isArray(m.blocks) ? m.blocks : []
+  const cleaned: ChatMessageBlock[] = blocksRaw
+    .map((b) => {
+      if (!b || typeof b !== 'object') return null
+      const t = (b as { type?: unknown }).type
+      if (t === 'text') {
+        const text = typeof (b as { text?: unknown }).text === 'string' ? String((b as { text?: unknown }).text) : ''
+        return { type: 'text', text }
+      }
+      if (t === 'tool_use') {
+        const taskId = typeof (b as { taskId?: unknown }).taskId === 'string' ? String((b as { taskId?: unknown }).taskId) : ''
+        if (!taskId.trim()) return null
+        return { type: 'tool_use', taskId }
+      }
+      if (t === 'status') {
+        const text = typeof (b as { text?: unknown }).text === 'string' ? String((b as { text?: unknown }).text) : ''
+        return { type: 'status', text }
+      }
+      return null
+    })
+    .filter((x): x is ChatMessageBlock => Boolean(x))
+
+  if (cleaned.length > 0) return cleaned
+
+  // 兼容旧数据：content + taskId
+  const legacy: ChatMessageBlock[] = []
+  if (m.content) legacy.push({ type: 'text', text: m.content })
+  if (m.taskId) legacy.push({ type: 'tool_use', taskId: m.taskId })
+  return legacy
+}
+
+function joinTextBlocks(blocks: ChatMessageBlock[]): string {
+  const parts = blocks
+    .filter((b) => b.type === 'text')
+    .map((b) => String((b as { text: string }).text ?? '').trim())
+    .filter(Boolean)
+  return parts.join('\n\n')
+}
+
+function buildToolResultSystemAddon(task: TaskRecord): string {
+  const t = task
+  const lines: string[] = []
+  lines.push('【工具执行结果】')
+  lines.push(`任务：${t.title}`)
+  lines.push(`状态：${t.status}`)
+
+  const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
+  if (runs.length > 0) {
+    lines.push('')
+    for (const r of runs.slice(0, 12)) {
+      lines.push(`- ${r.toolName} (${r.status})`)
+      if (r.inputPreview) lines.push(`  in: ${r.inputPreview}`)
+      if (r.outputPreview) lines.push(`  out: ${r.outputPreview}`)
+      if (r.error) lines.push(`  err: ${r.error}`)
+    }
+  } else {
+    const steps = Array.isArray(t.steps) ? t.steps : []
+    const useful = steps.filter((s) => s.tool || s.output || s.error)
+    if (useful.length > 0) {
+      lines.push('')
+      for (const s of useful.slice(0, 12)) {
+        const tool = typeof s.tool === 'string' ? s.tool : ''
+        lines.push(`- ${tool || s.title} (${s.status})`)
+        if (s.output) lines.push(`  out: ${String(s.output).slice(0, 800)}`)
+        if (s.error) lines.push(`  err: ${String(s.error).slice(0, 800)}`)
+      }
+    }
+  }
+
+  if (t.lastError) {
+    lines.push('')
+    lines.push(`任务错误：${t.lastError}`)
+  }
+
+  lines.push('')
+  lines.push('约束：以上为工具事实来源。最终回复只输出自然语言结果，不要提到工具内部名/执行日志。')
+  return lines.join('\n')
+}
+
+function trimTrailingCommaForSegment(text: string): string {
+  const raw = String(text ?? '')
+  const trimmed = raw.replace(/[，,]\s*$/u, '').trimEnd()
+  return trimmed || raw
+}
 
 type PlannerDecision =
   | { type: 'create_task'; assistantReply: string; task: TaskCreateArgs }
   | { type: 'need_info'; assistantReply: string; questions?: string[] }
   | { type: 'chat'; assistantReply: string }
-
-function looksLikeToolTaskRequest(text: string): boolean {
-  const t = String(text ?? '').trim()
-  if (!t) return false
-  if (/https?:\/\/\S+/i.test(t)) return true
-
-  const taskKeywords = [
-    '帮我',
-    '抓取',
-    '爬取',
-    '截图',
-    '打开',
-    '访问',
-    '浏览器',
-    'b站',
-    'B站',
-    'bilibili',
-    '下载',
-    '保存',
-    '写入',
-    '生成文件',
-    '整理',
-    '归档',
-    '执行',
-    '运行',
-    '命令',
-    'powershell',
-    'cmd',
-    '终端',
-    '总结网页',
-    '总结这个网站',
-  ]
-  return taskKeywords.some((k) => t.includes(k))
-}
 
 function extractFirstJsonObject(text: string): string | null {
   const raw = String(text ?? '').trim()
@@ -231,9 +329,43 @@ function parsePlannerDecision(text: string): PlannerDecision | null {
   return null
 }
 
-function buildPlannerSystemPrompt(): string {
+function buildPlannerSystemPrompt(opts?: {
+  systemPrompt?: string
+  toolNames?: string[]
+  expressions?: string[]
+  motions?: string[]
+}): string {
   const lines: string[] = []
   lines.push('你是 NeoDeskPet 的“任务规划器（Planner）”。你的工作是：根据用户的自然语言请求，决定是否要创建“可执行任务（Task）”，并输出严格 JSON。')
+  const systemPrompt = (opts?.systemPrompt ?? '').trim()
+  if (systemPrompt) {
+    lines.push('')
+    lines.push('桌宠人设（assistantReply 必须遵循）：')
+    lines.push(systemPrompt)
+  }
+
+  const expressions = (opts?.expressions ?? []).filter((x) => typeof x === 'string').map((x) => x.trim()).filter(Boolean)
+  const motions = (opts?.motions ?? []).filter((x) => typeof x === 'string').map((x) => x.trim()).filter(Boolean)
+  if (expressions.length > 0 || motions.length > 0) {
+    lines.push('')
+    lines.push('Live2D 可用表情/动作（可选，不需要就不要写标签）：')
+    if (expressions.length > 0) lines.push(`- 表情：${expressions.slice(0, 20).join('、')}`)
+    if (motions.length > 0) lines.push(`- 动作组：${motions.slice(0, 10).join('、')}`)
+    lines.push('可以在 assistantReply 的开头或第一句末尾（前20字）选择性加标签：')
+    lines.push('- [表情:表情名称]')
+    lines.push('- [动作:动作组名称]')
+    lines.push('要点：')
+    lines.push('- 如果 assistantReply 非空，建议根据语气选择 1 个表情标签（可选）。')
+    lines.push('- 不需要变化就不要写标签，没有标签就不会触发。')
+    lines.push('- 如果写了标签，名称必须从上面可用列表中选，禁止编造。')
+    lines.push('- 为降低界面延迟，尽量前置标签（前20字）。')
+  }
+
+  const toolNames = (opts?.toolNames ?? getBuiltinToolDefinitions().map((t) => t.name))
+    .filter((x) => typeof x === 'string')
+    .map((x) => x.trim())
+    .filter(Boolean)
+
   lines.push('')
   lines.push('你只能输出一个 JSON 对象，禁止输出 Markdown、代码块、解释文字。')
   lines.push('')
@@ -254,10 +386,11 @@ function buildPlannerSystemPrompt(): string {
   lines.push('- chat:')
   lines.push('  {"type":"chat","assistantReply":"..."}')
   lines.push('')
-  lines.push(`工具列表（step.tool 只能从这里选）：${TASK_PLANNER_TOOLS.join(', ')}`)
+  lines.push(`工具列表（step.tool 只能从这里选）：${toolNames.join(', ')}`)
   lines.push('')
   lines.push('各工具输入约定（step.input 必须是字符串；如果是 JSON，请把 JSON stringify 成字符串）：')
   lines.push('- browser.fetch：{"url":"https://...","maxChars":5000,"timeoutMs":15000,"stripHtml":false}')
+  lines.push('- browser.open：{"url":"https://...","appPath":"(可选)指定浏览器exe","args":["(可选)启动参数"]}（仅“打开网站/保持登录态”优先用这个）')
   lines.push(
     '- browser.playwright：{"url":"https://...","headless":true,"channel":"msedge","profile":"default","screenshot":{"path":"task-output/xxx.png","fullPage":false},"extract":{"selector":"body","format":"innerText|text|html","maxChars":1200,"optional":true},"actions":[{"type":"waitMs","ms":1200},{"type":"click","selector":"..."},{"type":"fill","selector":"...","text":"..."},{"type":"press","selector":"...","key":"Enter"},{"type":"waitForLoad","state":"networkidle"}]}（省略 extract 表示不提取页面文本；只“打开网页”不要加 extract）',
   )
@@ -270,36 +403,15 @@ function buildPlannerSystemPrompt(): string {
   lines.push('- 能直接执行就 create_task；缺信息就 need_info；都不是就 chat。')
   lines.push('- 如果用户是在询问“你能做什么/有哪些工具/工具列表/能力说明”，一律输出 chat：列出可用工具与典型用法示例，不要创建任务、更不要实际执行。')
   lines.push('- 抓取/总结网页：优先 browser.fetch（更快）；遇到动态/需要登录/需要点击交互，才用 browser.playwright。')
-  lines.push('- 仅“打开某网站”：用 browser.playwright，默认不做 extract；如果用户需要页面内容/摘要，才加 extract。')
-  lines.push('- 默认避免高风险动作（删除/覆盖重要文件、支付、发送敏感信息）。遇到此类请求优先 need_info 让用户确认。')
-  lines.push('- assistantReply 用中文，语气友好自然，简短说明你要做什么/需要什么，并尽量点出将使用的 tool。')
-  return lines.join('\n')
-}
-
-function formatTaskFinalMessage(task: TaskRecord): string {
-  const label = task.status === 'done' ? '任务完成' : task.status === 'failed' ? '任务失败' : '任务结束'
-  const lines: string[] = [`[${label}] ${task.title}`]
-
-  if (task.status === 'failed') {
-    const err = (task.lastError ?? '').trim()
-    if (err) lines.push(`原因：${err}`)
-  }
-
-  const lastStepWithOutput = [...(task.steps ?? [])].reverse().find((s) => (s.output ?? '').trim().length > 0)
-  const out = (lastStepWithOutput?.output ?? '').trim()
-  if (out) {
-    const preview = out.length > 900 ? `${out.slice(0, 900)}…` : out
-    lines.push('结果：')
-    lines.push(preview)
-  }
-
-  lines.push('（可在桌宠任务面板查看详情）')
+  lines.push('- 仅“打开某网站”：优先 browser.open；需要截图/交互/登录才用 browser.playwright（默认不做 extract）。')
+  lines.push('- assistantReply 用中文，简短说明你要做什么/需要什么，并尽量点出将使用的 tool。语气/人设只允许来自“桌宠人设”。')
   return lines.join('\n')
 }
 
 function PetWindow() {
   const api = useMemo(() => getApi(), [])
   const isDragging = useRef(false)
+  const [windowDragging, setWindowDragging] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const isOverModel = useRef(true)
   const clickStartTime = useRef(0)
@@ -307,28 +419,454 @@ function PetWindow() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const settingsRef = useRef<AppSettings | null>(null)
   const ttsPlayerRef = useRef<TtsPlayer | null>(null)
-  const ttsQueueRef = useRef<{ utteranceId: string; segments: string[]; nextIndex: number; finalized: boolean } | null>(null)
+  const ttsQueueRef = useRef<
+    { utteranceId: string; segments: string[]; fullText?: string; finalized: boolean; started: boolean } | null
+  >(null)
+  const ttsQueueWakeRef = useRef<(() => void) | null>(null)
   const ttsQueueRunningRef = useRef(false)
+  const ttsActiveUtteranceRef = useRef<string | null>(null)
+  const ttsSyncRef = useRef<
+    | {
+        utteranceId: string
+        segments: string[]
+        nextIndex: number
+        heardVoice: boolean
+        inSilence: boolean
+        silenceMs: number
+        lastTickAt: number
+        silenceThreshold: number
+        minSilenceMs: number
+      }
+    | null
+  >(null)
   const [mouthOpen, setMouthOpen] = useState(0)
   const [bubblePayload, setBubblePayload] = useState<
     | { text: string; startAt: number | null; mode: 'typing' | 'append'; autoHideDelay?: number }
     | null
   >(null)
   const [tasks, setTasks] = useState<TaskRecord[]>([])
+  const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot | null>(null)
+  const toolAnimRef = useRef<{ motionGroups: string[]; expressions: string[] }>({ motionGroups: [], expressions: [] })
 
-  // Default click phrases (used if settings not loaded yet)
-  const defaultPhrases = [
-    '主人好呀~',
-    '有什么事吗？',
-    '嗯？怎么了~',
-    '今天也要加油哦！',
-    '想我了吗？',
-  ]
+  // 默认不提供任何“固定人设台词”，避免与 AI 设置里的人设割裂
+  const defaultPhrases: string[] = []
+
+  const [asrSubtitle, setAsrSubtitle] = useState<string>('')
+  const [asrRecording, setAsrRecording] = useState(false)
+  const asrSubtitleHideTimerRef = useRef<number | null>(null)
+
+  const asrClientRef = useRef<{
+    ws: WebSocket
+    mediaStream: MediaStream
+    audioContext: AudioContext
+    node: AudioNode
+    sink: GainNode
+    stopFeeder: () => void
+    sampleRate: number
+  } | null>(null)
+  const asrStartingRef = useRef(false)
+  const asrStartKindRef = useRef<'continuous' | 'hotkey' | null>(null)
+  const asrFinalSegmentsRef = useRef<string[]>([])
+  const asrPartialRef = useRef<string>('')
+
+  const clearAsrSubtitleTimer = useCallback(() => {
+    if (asrSubtitleHideTimerRef.current) {
+      window.clearTimeout(asrSubtitleHideTimerRef.current)
+      asrSubtitleHideTimerRef.current = null
+    }
+  }, [])
+
+  const showAsrSubtitle = useCallback(
+    (text: string, options?: { autoHideMs?: number }) => {
+      clearAsrSubtitleTimer()
+
+      const asr = settingsRef.current?.asr
+      if (!asr?.showSubtitle) return
+
+      setAsrSubtitle(text)
+      const ms = Math.max(0, Math.min(30000, Math.floor(options?.autoHideMs ?? 0)))
+      if (ms > 0) {
+        asrSubtitleHideTimerRef.current = window.setTimeout(() => {
+          asrSubtitleHideTimerRef.current = null
+          setAsrSubtitle('')
+        }, ms)
+      }
+    },
+    [clearAsrSubtitleTimer],
+  )
+
+  const stopAsr = useCallback(() => {
+    const client = asrClientRef.current
+    if (!client) return
+    asrClientRef.current = null
+    asrStartingRef.current = false
+    asrStartKindRef.current = null
+    setAsrRecording(false)
+
+    try {
+      client.stopFeeder()
+    } catch (_) {
+      /* ignore */
+    }
+
+    try {
+      client.node.disconnect()
+    } catch (_) {
+      /* ignore */
+    }
+
+    try {
+      client.sink.disconnect()
+    } catch (_) {
+      /* ignore */
+    }
+
+    try {
+      client.audioContext.close()
+    } catch (_) {
+      /* ignore */
+    }
+
+    try {
+      client.mediaStream.getTracks().forEach((t) => t.stop())
+    } catch (_) {
+      /* ignore */
+    }
+
+    try {
+      client.ws.close()
+    } catch (_) {
+      /* ignore */
+    }
+  }, [])
+
+  const sendAsrConfig = useCallback(() => {
+    const client = asrClientRef.current
+    if (!client) return
+    if (client.ws.readyState !== WebSocket.OPEN) return
+
+    const asr = settingsRef.current?.asr
+    if (!asr) return
+
+    client.ws.send(
+      JSON.stringify({
+        type: 'config',
+        sampleRate: client.sampleRate,
+        language: asr.language,
+        useItn: asr.useItn,
+        vadChunkMs: asr.vadChunkMs,
+        maxEndSilenceMs: asr.maxEndSilenceMs,
+        minSpeechMs: asr.minSpeechMs,
+        maxSpeechMs: asr.maxSpeechMs,
+        prerollMs: asr.prerollMs,
+        postrollMs: asr.postrollMs,
+        enableAgc: asr.enableAgc,
+        agcTargetRms: asr.agcTargetRms,
+        agcMaxGain: asr.agcMaxGain,
+        debug: asr.debug,
+      }),
+    )
+  }, [])
+
+  const handleAsrWsText = useCallback(
+    (raw: string) => {
+      let payload: unknown
+      try {
+        payload = JSON.parse(raw)
+      } catch {
+        return
+      }
+
+      const msg = payload as { type?: string; text?: string; message?: string }
+      const msgType = String(msg.type ?? '').trim()
+      const text = String(msg.text ?? '').trim()
+
+      if (msgType === 'partial') {
+        asrPartialRef.current = text
+        if (text) showAsrSubtitle(text)
+        return
+      }
+
+      if (msgType === 'result') {
+        asrPartialRef.current = ''
+        if (!text) return
+
+        const asr = settingsRef.current?.asr
+        const mode = asr?.mode ?? 'continuous'
+        if (mode === 'hotkey') {
+          asrFinalSegmentsRef.current.push(text)
+          showAsrSubtitle(asrFinalSegmentsRef.current.join(' '))
+          return
+        }
+
+        // continuous: one result == one utterance
+        showAsrSubtitle(text, { autoHideMs: 6000 })
+        try {
+          api?.reportAsrTranscript(text)
+        } catch (_) {
+          /* ignore */
+        }
+        return
+      }
+
+      if (msgType === 'debug') {
+        const hint = String(msg.message ?? '').trim()
+        if (hint && (settingsRef.current?.asr?.debug ?? false)) {
+          console.debug('[ASR]', hint)
+        }
+      }
+    },
+    [api, showAsrSubtitle],
+  )
+
+  const startAsr = useCallback(async () => {
+    const asr = settingsRef.current?.asr
+    if (!asr?.enabled) return
+    if (asrClientRef.current) return
+    if (asrStartingRef.current) return
+    asrStartingRef.current = true
+
+    try {
+      if (!asr.wsUrl.trim()) {
+        showAsrSubtitle('ASR WebSocket 地址为空', { autoHideMs: 4000 })
+        return
+      }
+
+      const pickStream = async () => {
+        const deviceId = (asr.micDeviceId || '').trim()
+        const base: MediaTrackConstraints = {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+        }
+
+        if (!deviceId) {
+          return navigator.mediaDevices.getUserMedia({ audio: base })
+        }
+
+        // 优先尝试 exact；失败时尝试 ideal；再失败回退系统默认
+        try {
+          return await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { exact: deviceId } } })
+        } catch (_e1) {
+          try {
+            return await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { ideal: deviceId } } })
+          } catch (_e2) {
+            return navigator.mediaDevices.getUserMedia({ audio: base })
+          }
+        }
+      }
+
+      const mediaStream = await pickStream()
+
+      // 使用系统默认采样率：音质更稳定；服务端会按 VAD 分块自行重采样
+      const audioContext = new AudioContext()
+      const sampleRate = audioContext.sampleRate || 48000
+
+      const source = audioContext.createMediaStreamSource(mediaStream)
+
+      // 避免把麦克风音频直通到扬声器造成回声/啸叫
+      const sink = audioContext.createGain()
+      sink.gain.value = 0
+      sink.connect(audioContext.destination)
+
+      const ws = new WebSocket(asr.wsUrl)
+      ws.binaryType = 'arraybuffer'
+
+      const bufferSize = 4096
+
+      const sendPcm = (pcm: Float32Array) => {
+        if (ws.readyState !== WebSocket.OPEN) return
+        const copy = new Float32Array(pcm.length)
+        copy.set(pcm)
+        ws.send(copy.buffer)
+      }
+
+      let node: AudioNode
+      let stopFeeder: () => void
+
+      const tryCreateWorklet = async () => {
+        const backend = (settingsRef.current?.asr?.captureBackend ?? 'auto') as 'auto' | 'script' | 'worklet'
+        if (backend === 'script') return null
+        if (!audioContext.audioWorklet) return null
+
+        const workletCode = `
+class NdpPcmProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buf = new Float32Array(${bufferSize});
+    this._idx = 0;
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input[0]) {
+      const ch = input[0];
+      let off = 0;
+      while (off < ch.length) {
+        const take = Math.min(ch.length - off, this._buf.length - this._idx);
+        this._buf.set(ch.subarray(off, off + take), this._idx);
+        this._idx += take;
+        off += take;
+        if (this._idx >= this._buf.length) {
+          this.port.postMessage(this._buf, [this._buf.buffer]);
+          this._buf = new Float32Array(${bufferSize});
+          this._idx = 0;
+        }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('ndp-pcm', NdpPcmProcessor);
+`
+        const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: 'text/javascript' }))
+        try {
+          await audioContext.audioWorklet.addModule(blobUrl)
+        } finally {
+          URL.revokeObjectURL(blobUrl)
+        }
+
+        const workletNode = new AudioWorkletNode(audioContext, 'ndp-pcm', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        })
+
+        workletNode.port.onmessage = (ev) => {
+          const buf = ev.data
+          if (buf instanceof Float32Array) {
+            sendPcm(buf)
+            return
+          }
+          if (buf instanceof ArrayBuffer) {
+            sendPcm(new Float32Array(buf))
+          }
+        }
+
+        source.connect(workletNode)
+        workletNode.connect(sink)
+
+        const stop = () => {
+          try {
+            workletNode.port.onmessage = null
+          } catch (_) {
+            /* ignore */
+          }
+          try {
+            source.disconnect(workletNode)
+          } catch (_) {
+            /* ignore */
+          }
+          try {
+            workletNode.disconnect()
+          } catch (_) {
+            /* ignore */
+          }
+        }
+
+        return { node: workletNode, stop }
+      }
+
+      const created = await (async () => {
+        const backend = (settingsRef.current?.asr?.captureBackend ?? 'auto') as 'auto' | 'script' | 'worklet'
+        if (backend === 'worklet' && !audioContext.audioWorklet) {
+          showAsrSubtitle('当前环境不支持 AudioWorklet，已回退为 ScriptProcessor', { autoHideMs: 4000 })
+          return null
+        }
+        return tryCreateWorklet()
+      })()
+      if (created) {
+        node = created.node
+        stopFeeder = created.stop
+      } else {
+        const proc = audioContext.createScriptProcessor(bufferSize, 1, 1)
+        proc.onaudioprocess = (e) => {
+          const input = e.inputBuffer.getChannelData(0)
+          sendPcm(input)
+        }
+        source.connect(proc)
+        proc.connect(sink)
+
+        node = proc
+        stopFeeder = () => {
+          try {
+            proc.onaudioprocess = null
+          } catch (_) {
+            /* ignore */
+          }
+          try {
+            source.disconnect(proc)
+          } catch (_) {
+            /* ignore */
+          }
+          try {
+            proc.disconnect()
+          } catch (_) {
+            /* ignore */
+          }
+        }
+      }
+
+      ws.addEventListener('open', () => {
+        sendAsrConfig()
+      })
+      ws.addEventListener('message', (ev) => {
+        if (typeof ev.data === 'string') {
+          handleAsrWsText(ev.data)
+          return
+        }
+        if (ev.data instanceof ArrayBuffer) {
+          try {
+            const text = new TextDecoder('utf-8').decode(new Uint8Array(ev.data))
+            handleAsrWsText(text)
+          } catch {
+            /* ignore */
+          }
+        }
+      })
+      ws.addEventListener('error', () => {
+        showAsrSubtitle('ASR 连接失败', { autoHideMs: 4000 })
+      })
+      ws.addEventListener('close', () => {
+        if (asrClientRef.current?.ws === ws) {
+          asrClientRef.current = null
+          setAsrRecording(false)
+        }
+      })
+
+      asrClientRef.current = { ws, mediaStream, audioContext, node, sink, stopFeeder, sampleRate }
+      setAsrRecording(true)
+      showAsrSubtitle('录音中…')
+    } finally {
+      asrStartingRef.current = false
+    }
+  }, [handleAsrWsText, sendAsrConfig, showAsrSubtitle])
 
   useEffect(() => {
     if (!api) return
     api.getSettings().then(setSettings).catch((err) => console.error(err))
     return api.onSettingsChanged(setSettings)
+  }, [api])
+
+  useEffect(() => {
+    if (!api) return
+    let disposed = false
+    api
+      .getContextUsage()
+      .then((snap) => {
+        if (disposed) return
+        setContextUsage(snap)
+      })
+      .catch(() => {
+        /* ignore */
+      })
+    const off = api.onContextUsageChanged((snap) => {
+      if (disposed) return
+      setContextUsage(snap)
+    })
+    return () => {
+      disposed = true
+      off()
+    }
   }, [api])
 
   // Listen for task list updates (M2 mini panel)
@@ -352,9 +890,175 @@ function PetWindow() {
     }
   }, [api])
 
+  // Task (agent.run) 最终回复里携带的 Live2D 标签：优先按 LLM 指定的表情/动作触发（不再退化为“总是第一个”）
+  const taskLive2dInitRef = useRef(false)
+  const lastTaskLive2dRef = useRef<Map<string, { expression?: string; motion?: string }>>(new Map())
+  useEffect(() => {
+    if (!api) return
+
+    const expressions = toolAnimRef.current.expressions ?? []
+    const motions = toolAnimRef.current.motionGroups ?? []
+    const normalize = (s: unknown) => String(s ?? '').trim()
+
+    const resolveExpression = (nameRaw: string): string | null => {
+      const name = normalize(nameRaw)
+      if (!name) return null
+      if (expressions.includes(name)) return name
+      const lower = name.toLowerCase()
+      const hit = expressions.find((e) => e.toLowerCase() === lower) ?? null
+      return hit
+    }
+
+    const resolveMotion = (nameRaw: string): string | null => {
+      const name = normalize(nameRaw)
+      if (!name) return null
+      if (motions.includes(name)) return name
+      const lower = name.toLowerCase()
+      const hit = motions.find((m) => m.toLowerCase() === lower) ?? null
+      return hit
+    }
+
+    const next = new Map<string, { expression?: string; motion?: string }>()
+
+    for (const t of tasks) {
+      const expression = normalize((t as unknown as { live2dExpression?: unknown }).live2dExpression) || undefined
+      const motion = normalize((t as unknown as { live2dMotion?: unknown }).live2dMotion) || undefined
+      next.set(t.id, { expression, motion })
+
+      if (!taskLive2dInitRef.current) continue
+
+      const prev = lastTaskLive2dRef.current.get(t.id)
+      if (expression && expression !== prev?.expression) {
+        const exp = resolveExpression(expression)
+        if (exp) api.triggerExpression(exp)
+      }
+      if (motion && motion !== prev?.motion) {
+        const m = resolveMotion(motion)
+        if (m) api.triggerMotion(m, 0)
+      }
+    }
+
+    lastTaskLive2dRef.current = next
+    if (!taskLive2dInitRef.current) taskLive2dInitRef.current = true
+  }, [api, tasks])
+
   useEffect(() => {
     settingsRef.current = settings
   }, [settings])
+
+  const asrEnabled = settings?.asr?.enabled ?? false
+  const asrMode = settings?.asr?.mode ?? 'continuous'
+  const asrWsUrl = settings?.asr?.wsUrl ?? ''
+  const asrMicDeviceId = settings?.asr?.micDeviceId ?? ''
+  const asrShowSubtitle = settings?.asr?.showSubtitle ?? true
+
+  useEffect(() => {
+    if (!asrShowSubtitle) {
+      setAsrSubtitle('')
+      clearAsrSubtitleTimer()
+    }
+  }, [asrShowSubtitle, clearAsrSubtitleTimer])
+
+  // hotkey toggle: press once to start, press again to stop (only when mode=hotkey)
+  useEffect(() => {
+    if (!api) return
+
+    return api.onAsrHotkeyToggle(() => {
+      const asr = settingsRef.current?.asr
+      if (!asr?.enabled) return
+      if ((asr.mode ?? 'continuous') !== 'hotkey') return
+
+      if (asrClientRef.current) {
+        stopAsr()
+        const parts = [...asrFinalSegmentsRef.current]
+        if (asrPartialRef.current.trim()) parts.push(asrPartialRef.current.trim())
+        asrFinalSegmentsRef.current = []
+        asrPartialRef.current = ''
+
+        const finalText = parts.join(' ').trim()
+        if (finalText) {
+          try {
+            api.reportAsrTranscript(finalText)
+          } catch (_) {
+            /* ignore */
+          }
+          showAsrSubtitle(finalText, { autoHideMs: 6000 })
+        } else {
+          showAsrSubtitle('', { autoHideMs: 0 })
+        }
+        return
+      }
+
+      asrFinalSegmentsRef.current = []
+      asrPartialRef.current = ''
+      asrStartKindRef.current = 'hotkey'
+      void startAsr().catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[ASR] start failed:', msg)
+        showAsrSubtitle('ASR 启动失败', { autoHideMs: 4000 })
+        stopAsr()
+      })
+    })
+  }, [api, showAsrSubtitle, startAsr, stopAsr])
+
+  // continuous mode: start/stop with switch (no hotkey needed)
+  useEffect(() => {
+    if (!asrEnabled) {
+      stopAsr()
+      return
+    }
+
+    if (asrMode !== 'continuous') {
+      if (asrStartKindRef.current === 'continuous') stopAsr()
+      return
+    }
+
+    if (asrStartKindRef.current !== 'continuous') {
+      stopAsr()
+      asrStartKindRef.current = 'continuous'
+    }
+
+    void startAsr().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[ASR] start failed:', msg)
+      showAsrSubtitle('ASR 启动失败', { autoHideMs: 4000 })
+      stopAsr()
+    })
+    return () => stopAsr()
+  }, [asrEnabled, asrMicDeviceId, asrMode, asrWsUrl, showAsrSubtitle, startAsr, stopAsr])
+
+  const asrConfigKey = useMemo(() => {
+    const asr = settings?.asr
+    if (!asr) return ''
+    const payload = {
+      language: asr.language,
+      useItn: asr.useItn,
+      vadChunkMs: asr.vadChunkMs,
+      maxEndSilenceMs: asr.maxEndSilenceMs,
+      minSpeechMs: asr.minSpeechMs,
+      maxSpeechMs: asr.maxSpeechMs,
+      prerollMs: asr.prerollMs,
+      postrollMs: asr.postrollMs,
+      enableAgc: asr.enableAgc,
+      agcTargetRms: asr.agcTargetRms,
+      agcMaxGain: asr.agcMaxGain,
+      debug: asr.debug,
+    }
+    return JSON.stringify(payload)
+  }, [settings?.asr])
+
+  useEffect(() => {
+    if (!asrEnabled) return
+    if (!asrClientRef.current) return
+    sendAsrConfig()
+  }, [asrConfigKey, asrEnabled, sendAsrConfig])
+
+  useEffect(() => {
+    return () => {
+      stopAsr()
+      clearAsrSubtitleTimer()
+    }
+  }, [clearAsrSubtitleTimer, stopAsr])
 
   // Listen for bubble messages from chat window
   useEffect(() => {
@@ -364,7 +1068,7 @@ function PetWindow() {
       if (!s) return
 
       const showBubble = s.bubble?.showOnChat ?? false
-      const tts = s.tts
+      const tts = s.tts ? { ...s.tts, segmented: false } : s.tts
 
       const startTypingNow = () => {
         if (!showBubble) return
@@ -397,88 +1101,88 @@ function PetWindow() {
   useEffect(() => {
     if (!api) return
 
-    const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms))
+    const wakeQueue = () => {
+      if (!ttsQueueWakeRef.current) return
+      const w = ttsQueueWakeRef.current
+      ttsQueueWakeRef.current = null
+      w()
+    }
 
-    const startQueueIfNeeded = () => {
-      if (ttsQueueRunningRef.current) return
+    const startIfReady = () => {
+      const current = ttsQueueRef.current
+      const s = settingsRef.current
+      if (!current || !s?.tts?.enabled || !s.tts.segmented) return
+      if (!current.finalized) return
+      if (ttsQueueRunningRef.current || current.started) return
+
+      const utteranceId = current.utteranceId
+      const segments = current.segments.map((x) => String(x ?? '').trim()).filter(Boolean)
+      if (segments.length === 0) {
+        api.reportTtsUtteranceFailed({ utteranceId, error: 'TTS 分句为空' })
+        ttsQueueRef.current = null
+        return
+      }
+      const textForTts = String(current.fullText ?? segments.join('')).trim()
+      if (!textForTts) {
+        api.reportTtsUtteranceFailed({ utteranceId, error: 'TTS 文本为空' })
+        ttsQueueRef.current = null
+        return
+      }
+
       ttsQueueRunningRef.current = true
+      current.started = true
+      ttsActiveUtteranceRef.current = utteranceId
 
-      void (async () => {
-        try {
-          let keepLooping = true
-          while (keepLooping) {
-            const current = ttsQueueRef.current
-            const s = settingsRef.current
-            if (!current || !s?.tts?.enabled || !s?.tts?.segmented) break
+      const showBubble = settingsRef.current?.bubble?.showOnChat ?? false
+      if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
+      const player = ttsPlayerRef.current
+      if (!player) return
 
-            if (current.nextIndex >= current.segments.length) {
-              if (current.finalized) {
-                api.reportTtsUtteranceEnded({ utteranceId: current.utteranceId })
-                ttsQueueRef.current = null
-                keepLooping = false
-                break
-              }
-              keepLooping = false
-              break
-            }
+      const ttsSettings = { ...s.tts, streaming: true }
+      const pauseMs = Math.max(0, Math.min(60000, Math.floor(ttsSettings.pauseMs ?? 280)))
 
-            const utteranceId = current.utteranceId
-            const segmentIndex = current.nextIndex
-            const text = current.segments[current.nextIndex] || ''
-            current.nextIndex += 1
+      // 静音检测阈值：依赖 fragment_interval 插入的“明显静音”来判定下一句开始
+      ttsSyncRef.current = {
+        utteranceId,
+        segments,
+        nextIndex: 0,
+        heardVoice: false,
+        inSilence: false,
+        silenceMs: 0,
+        lastTickAt: Date.now(),
+        silenceThreshold: 0.006,
+        minSilenceMs: Math.max(120, Math.floor(pauseMs * 0.6)),
+      }
 
-            if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
-            const player = ttsPlayerRef.current
-            if (!player) break
-
-            const ttsSettings = settingsRef.current?.tts
-            if (!ttsSettings) break
-
-            try {
-              await new Promise<void>((resolve, reject) => {
-                void player
-                  .speak(text, ttsSettings, {
-                    onFirstPlay: () => {
-                      api.reportTtsSegmentStarted({ utteranceId, segmentIndex, text })
-
-                      const s = settingsRef.current
-                      const showBubble = s?.bubble?.showOnChat ?? false
-                      if (!showBubble) return
-                      setBubblePayload({ text, startAt: Date.now(), mode: 'append', autoHideDelay: 0 })
-                    },
-                    onEnded: resolve,
-                  })
-                  .catch(reject)
-              })
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err)
-              api.reportTtsUtteranceFailed({ utteranceId, error: msg })
-              ttsQueueRef.current = null
-              break
-            }
-
-            if (!ttsQueueRef.current || ttsQueueRef.current.utteranceId !== utteranceId) {
-              keepLooping = false
-              break
-            }
-
-            // 一句读完后关闭气泡，下一句会重新弹出
-            const showBubble = settingsRef.current?.bubble?.showOnChat ?? false
+      void player
+        .speak(textForTts, ttsSettings, {
+          onFirstPlay: () => {
+            // 真实“开口”由 analyser 检测触发；这里仅保证 bubble UI 可先进入“等待状态”
             if (showBubble) setBubblePayload(null)
-
-            const pauseMs = Math.max(0, Math.min(5000, settingsRef.current?.tts?.pauseMs ?? 280))
-            if (pauseMs > 0) await sleep(pauseMs)
-          }
-        } finally {
+          },
+          onEnded: () => {
+            if (ttsActiveUtteranceRef.current === utteranceId) {
+              ttsActiveUtteranceRef.current = null
+              api.reportTtsUtteranceEnded({ utteranceId })
+            }
+            ttsSyncRef.current = null
+            ttsQueueRef.current = null
+            ttsQueueRunningRef.current = false
+            setMouthOpen(0)
+            setBubblePayload(null)
+            wakeQueue()
+          },
+        })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (ttsActiveUtteranceRef.current === utteranceId) ttsActiveUtteranceRef.current = null
+          api.reportTtsUtteranceFailed({ utteranceId, error: msg })
+          ttsSyncRef.current = null
+          ttsQueueRef.current = null
           ttsQueueRunningRef.current = false
-          // 若队列在运行期间被追加了新 segment，尝试继续
-          const next = ttsQueueRef.current
-          const s = settingsRef.current
-          if (next && s?.tts?.enabled && s?.tts?.segmented && next.nextIndex < next.segments.length) {
-            startQueueIfNeeded()
-          }
-        }
-      })()
+          setMouthOpen(0)
+          wakeQueue()
+        })
     }
 
     const unsubEnqueue = api.onTtsEnqueue((payload) => {
@@ -495,24 +1199,39 @@ function PetWindow() {
         if (prev && prev.utteranceId !== payload.utteranceId) {
           api.reportTtsUtteranceEnded({ utteranceId: prev.utteranceId })
         }
+        ttsSyncRef.current = null
+        ttsActiveUtteranceRef.current = null
         ttsPlayerRef.current?.stop()
         setMouthOpen(0)
-        ttsQueueRef.current = { utteranceId: payload.utteranceId, segments: [], nextIndex: 0, finalized: false }
+        ttsQueueRunningRef.current = false
+        ttsQueueRef.current = {
+          utteranceId: payload.utteranceId,
+          segments: [],
+          fullText: typeof payload.fullText === 'string' ? payload.fullText : undefined,
+          finalized: false,
+          started: false,
+        }
         setBubblePayload(null)
+        wakeQueue()
       }
 
       const current = ttsQueueRef.current
       if (!current || current.utteranceId !== payload.utteranceId) return
 
+      if (typeof payload.fullText === 'string' && payload.fullText.trim()) {
+        current.fullText = payload.fullText
+      }
       if (payload.segments?.length) current.segments.push(...payload.segments)
-      startQueueIfNeeded()
+      wakeQueue()
+      startIfReady()
     })
 
     const unsubFinalize = api.onTtsFinalize((utteranceId) => {
       const current = ttsQueueRef.current
       if (!current || current.utteranceId !== utteranceId) return
       current.finalized = true
-      startQueueIfNeeded()
+      wakeQueue()
+      startIfReady()
     })
 
     return () => {
@@ -524,14 +1243,21 @@ function PetWindow() {
   useEffect(() => {
     if (!api) return
     return api.onTtsStopAll(() => {
-      const current = ttsQueueRef.current
-      if (current) {
-        api.reportTtsUtteranceEnded({ utteranceId: current.utteranceId })
+      const utteranceId = ttsActiveUtteranceRef.current ?? ttsQueueRef.current?.utteranceId ?? null
+      if (utteranceId) {
+        api.reportTtsUtteranceEnded({ utteranceId })
       }
 
+      ttsActiveUtteranceRef.current = null
+      ttsSyncRef.current = null
       ttsQueueRef.current = null
       ttsQueueRunningRef.current = false
       ttsPlayerRef.current?.stop()
+      if (ttsQueueWakeRef.current) {
+        const w = ttsQueueWakeRef.current
+        ttsQueueWakeRef.current = null
+        w()
+      }
       setMouthOpen(0)
       setBubblePayload(null)
     })
@@ -551,22 +1277,96 @@ function PetWindow() {
         return Math.abs(next - prev) < 0.01 ? prev : next
       })
 
+      // 分句同步：按“每句开始播放”触发 UI（依赖 fragment_interval 插入的静音）
+      try {
+        const sync = ttsSyncRef.current
+        if (player && sync && ttsActiveUtteranceRef.current === sync.utteranceId) {
+          const now = Date.now()
+          const dt = Math.max(0, now - sync.lastTickAt)
+          sync.lastTickAt = now
+
+          const isSilent = level < sync.silenceThreshold
+
+          if (!sync.heardVoice) {
+            // 首句：等真正“开口”再触发（避免音频前置静音导致提前显示）
+              if (!isSilent && sync.segments.length > 0) {
+                sync.heardVoice = true
+                const idx = 0
+                const text = trimTrailingCommaForSegment(sync.segments[idx])
+                api?.reportTtsSegmentStarted({ utteranceId: sync.utteranceId, segmentIndex: idx, text })
+                const showBubble = settingsRef.current?.bubble?.showOnChat ?? false
+                if (showBubble) {
+                  const bubbleDelay = settingsRef.current?.bubble?.autoHideDelay ?? 5000
+                  setBubblePayload({ text, startAt: Date.now(), mode: 'append', autoHideDelay: bubbleDelay })
+              }
+              sync.nextIndex = 1
+              sync.inSilence = false
+              sync.silenceMs = 0
+            }
+          } else if (sync.nextIndex < sync.segments.length) {
+            if (isSilent) {
+              if (!sync.inSilence) {
+                sync.inSilence = true
+                sync.silenceMs = 0
+              }
+              sync.silenceMs += dt
+            } else {
+              if (sync.inSilence && sync.silenceMs >= sync.minSilenceMs) {
+                const idx = sync.nextIndex
+                const text = trimTrailingCommaForSegment(sync.segments[idx])
+                api?.reportTtsSegmentStarted({ utteranceId: sync.utteranceId, segmentIndex: idx, text })
+                const showBubble = settingsRef.current?.bubble?.showOnChat ?? false
+                if (showBubble) {
+                  const bubbleDelay = settingsRef.current?.bubble?.autoHideDelay ?? 5000
+                  setBubblePayload({ text, startAt: Date.now(), mode: 'append', autoHideDelay: bubbleDelay })
+                }
+                sync.nextIndex = idx + 1
+              }
+              sync.inSilence = false
+              sync.silenceMs = 0
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+
       raf = window.requestAnimationFrame(tick)
     }
 
     raf = window.requestAnimationFrame(tick)
     return () => window.cancelAnimationFrame(raf)
-  }, [])
+  }, [api])
 
   const petScale = settings?.petScale ?? 1.0
   const petOpacity = settings?.petOpacity ?? 1.0
   const bubbleSettings = settings?.bubble
   const taskPanelX = settings?.taskPanel?.positionX ?? 50
   const taskPanelY = settings?.taskPanel?.positionY ?? 78
-  const visibleTasks = tasks.filter((t) => t.status !== 'done' && t.status !== 'canceled')
+  // 仅展示“进行中”任务：failed/done/canceled 不应长期挂在面板里（否则用户会误以为还在跑且无法终止）
+  const visibleTasks = tasks.filter((t) => t.status === 'pending' || t.status === 'running' || t.status === 'paused')
 
   // Get model URL directly from settings
   const modelJsonUrl = settings?.live2dModelFile ?? '/live2d/Haru/Haru.model3.json'
+
+  // 解析当前 Live2D 模型的可用表情/动作名，用于工具调用时做更通用的触发（尽量不硬编码具体名字）
+  useEffect(() => {
+    let cancelled = false
+    parseModelMetadata(modelJsonUrl)
+      .then((metadata) => {
+        if (cancelled) return
+        const expressions = metadata.expressions?.map((e) => e.name).filter(Boolean) ?? []
+        const motions = metadata.motionGroups?.map((g) => g.name).filter(Boolean) ?? []
+        toolAnimRef.current = { motionGroups: motions, expressions }
+      })
+      .catch(() => {
+        if (cancelled) return
+        toolAnimRef.current = { motionGroups: [], expressions: [] }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [modelJsonUrl])
 
   // 与 Live2DView 内的模型摆放保持一致的近似命中（用于拖拽/右键判断）
   const isPointOverLive2D = (clientX: number, clientY: number) => {
@@ -586,11 +1386,13 @@ function PetWindow() {
   }
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement | null)?.closest?.('[data-no-window-drag="true"]')) return
     isOverModel.current = isPointOverLive2D(e.clientX, e.clientY)
     if (e.button === 0 && isOverModel.current) {
       // Left click on model - start drag
       isDragging.current = true
       clickStartTime.current = Date.now()
+      setWindowDragging(true)
       api?.startDrag()
     }
   }
@@ -598,6 +1400,7 @@ function PetWindow() {
   const handleMouseUp = (e: React.MouseEvent) => {
     if (e.button === 0 && isDragging.current) {
       isDragging.current = false
+      setWindowDragging(false)
       api?.stopDrag()
 
       // Check if it was a click (not a drag) - less than 200ms
@@ -605,8 +1408,10 @@ function PetWindow() {
         if (clickDuration < 200 && bubbleSettings?.showOnClick) {
           // Show random phrase from settings or defaults
           const phrases = bubbleSettings?.clickPhrases?.length > 0 ? bubbleSettings.clickPhrases : defaultPhrases
-          const phrase = phrases[Math.floor(Math.random() * phrases.length)]
-          setBubblePayload({ text: phrase, startAt: Date.now(), mode: 'typing' })
+          if (phrases.length > 0) {
+            const phrase = phrases[Math.floor(Math.random() * phrases.length)]
+            setBubblePayload({ text: phrase, startAt: Date.now(), mode: 'typing' })
+          }
         }
       }
     }
@@ -633,6 +1438,7 @@ function PetWindow() {
     const handleGlobalMouseUp = () => {
       if (isDragging.current) {
         isDragging.current = false
+        setWindowDragging(false)
         api?.stopDrag()
       }
     }
@@ -649,9 +1455,26 @@ function PetWindow() {
       onMouseMove={handleMouseMove}
       onContextMenu={handleContextMenu}
     >
-      <Live2DView modelJsonUrl={modelJsonUrl} scale={petScale} opacity={petOpacity} mouthOpen={mouthOpen} />
+      <Live2DView
+        modelJsonUrl={modelJsonUrl}
+        scale={petScale}
+        opacity={petOpacity}
+        mouthOpen={mouthOpen}
+        windowDragging={windowDragging}
+      />
+      <ContextUsageOrb
+        enabled={bubbleSettings?.contextOrbEnabled ?? false}
+        usage={contextUsage}
+        position={{ x: bubbleSettings?.contextOrbX ?? 12, y: bubbleSettings?.contextOrbY ?? 16 }}
+        onPositionChange={(next) => api?.setBubbleSettings({ contextOrbX: next.x, contextOrbY: next.y })}
+        interactionDisabled={windowDragging}
+      />
+      {asrShowSubtitle && asrSubtitle.trim() && (
+        <div className={`ndp-asr-subtitle${asrRecording ? ' ndp-asr-subtitle-recording' : ''}`}>{asrSubtitle}</div>
+      )}
       {bubblePayload && (
         <SpeechBubble
+          key={`${bubblePayload.startAt ?? 'pending'}-${bubblePayload.mode}`}
           text={bubblePayload.text}
           startAt={bubblePayload.startAt}
           mode={bubblePayload.mode}
@@ -683,7 +1506,7 @@ function PetWindow() {
           {visibleTasks.slice(0, 3).map((task) => {
             const currentStep = task.steps?.[Math.max(0, Math.min(task.currentStepIndex, task.steps.length - 1))]
             const lastStep = task.currentStepIndex > 0 ? task.steps?.[task.currentStepIndex - 1] : null
-            const outputPreview = (lastStep?.output || '').trim()
+            const outputPreview = ((lastStep?.output ?? '') || (currentStep?.output ?? '')).trim()
             const progressText =
               task.steps?.length > 0
                 ? `${Math.min(task.currentStepIndex + 1, task.steps.length)}/${task.steps.length}`
@@ -726,9 +1549,17 @@ function PetWindow() {
                   <button
                     className="ndp-task-btn ndp-task-btn-danger"
                     onMouseDown={(e) => e.stopPropagation()}
-                    onClick={() => void api?.cancelTask(task.id).catch((err) => console.error(err))}
+                    onClick={() => {
+                      if (!api) return
+                      // 兜底：极少数情况下 terminal task 仍被渲染到面板里，此时“终止”改为清理
+                      if (task.status === 'pending' || task.status === 'running' || task.status === 'paused') {
+                        void api.cancelTask(task.id).catch((err) => console.error(err))
+                      } else {
+                        void api.dismissTask(task.id).catch((err) => console.error(err))
+                      }
+                    }}
                   >
-                    终止
+                    {task.status === 'pending' || task.status === 'running' || task.status === 'paused' ? '终止' : '清除'}
                   </button>
                 </div>
               </div>
@@ -744,12 +1575,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const { api } = props
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessageRecord[]>([])
+  const [tasks, setTasks] = useState<TaskRecord[]>([])
+  const [toolUseOpenByTaskId, setToolUseOpenByTaskId] = useState<Record<string, boolean>>({})
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [currentPersona, setCurrentPersona] = useState<Persona | null>(null)
   const [lastRetrieveDebug, setLastRetrieveDebug] = useState<MemoryRetrieveResult['debug'] | null>(null)
+  const [mcpSnapshotForContext, setMcpSnapshotForContext] = useState<McpStateSnapshot | null>(null)
   const settingsRef = useRef<AppSettings | null>(null)
+  const toolAnimRef = useRef<{ motionGroups: string[]; expressions: string[] }>({ motionGroups: [], expressions: [] })
   const isLoadingRef = useRef(false)
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
@@ -766,35 +1601,47 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const [ttsSegmentedMessageFlags, setTtsSegmentedMessageFlags] = useState<Record<string, true>>({})
+  const [ttsRevealedSegments, setTtsRevealedSegments] = useState<Record<string, number>>({})
+  const [ttsPendingUtteranceId, setTtsPendingUtteranceId] = useState<string | null>(null)
   const ttsUtteranceMetaRef = useRef<
     Record<
       string,
       {
         sessionId: string
-        assistantMessageId: string
         createdAt: number
+        messageId: string
         displayedSegments: number
-        accumulated: string
         fallbackContent?: string
       }
     >
   >({})
-  const asrClientRef = useRef<{
-    ws: WebSocket
-    mediaStream: MediaStream
-    audioContext: AudioContext
-    node: AudioNode
-    sink: GainNode
-    stopFeeder: () => void
-    sampleRate: number
-  } | null>(null)
-  const asrStartingRef = useRef(false)
-  const asrSendingRef = useRef(false)
-  const asrSendQueueRef = useRef<string[]>([])
   const aiAbortRef = useRef<AbortController | null>(null)
   const plannerPendingRef = useRef(false)
+  const pendingAsrAutoSendRef = useRef<string[]>([])
+  const asrAutoSendFlushingRef = useRef(false)
   const taskOriginSessionRef = useRef<Map<string, string>>(new Map())
-  const taskFinalAnnouncedRef = useRef<Set<string>>(new Set())
+  const taskOriginMessageRef = useRef<Map<string, string>>(new Map())
+  const taskOriginBlocksRef = useRef<Map<string, ChatMessageBlock[]>>(new Map())
+  const taskLastSyncedReplyRef = useRef<Map<string, string>>(new Map())
+  const taskFinalizeContextRef = useRef<
+    Map<
+      string,
+      {
+        sessionId: string
+        messageId: string
+        chatHistory: ChatMessage[]
+        systemAddon: string
+        userText: string
+      }
+    >
+  >(new Map())
+  const taskFinalizingRef = useRef<Set<string>>(new Set())
+  const contextUsageLastSentAtRef = useRef(0)
+  const contextUsagePendingRef = useRef<ContextUsageSnapshot | null>(null)
+  const contextUsageSendTimerRef = useRef<number | null>(null)
+  const [contextRetrieveAddon, setContextRetrieveAddon] = useState<string>('')
+  const contextRetrieveAddonReqIdRef = useRef(0)
 
   const getActivePersonaId = useCallback((): string => {
     const pid = settingsRef.current?.activePersonaId
@@ -1054,46 +1901,27 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const meta = ttsUtteranceMetaRef.current[payload.utteranceId]
       if (!meta) return
 
-      const text = (payload.text ?? '').trim()
-      if (!text) return
+      const idx = clampIntValue(payload.segmentIndex, -1, 0, 1_000_000)
+      if (idx < 0) return
 
-      const next = meta.accumulated ? `${meta.accumulated}\n${text}` : text
-      meta.accumulated = next
-      meta.displayedSegments += 1
+      meta.displayedSegments = Math.max(meta.displayedSegments, idx + 1)
 
-      if (meta.sessionId === currentSessionId) {
-        setMessages((prevMsgs) =>
-          prevMsgs.map((m) => (m.id === meta.assistantMessageId ? { ...m, content: next } : m)),
-        )
+      if (idx === 0) {
+        setTtsPendingUtteranceId((prev) => (prev === payload.utteranceId ? null : prev))
       }
-      api.updateChatMessage(meta.sessionId, meta.assistantMessageId, next).catch(() => undefined)
+
+      setTtsRevealedSegments((prev) => ({ ...prev, [meta.messageId]: meta.displayedSegments }))
     })
 
     const unsubUtteranceFailed = api.onTtsUtteranceFailed((payload) => {
       const meta = ttsUtteranceMetaRef.current[payload.utteranceId]
       if (meta) {
-        const createId = () => {
-          if ('crypto' in globalThis && typeof globalThis.crypto.randomUUID === 'function') {
-            return globalThis.crypto.randomUUID()
-          }
-          return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-        }
-
-        const fallback = meta.fallbackContent?.trim() ?? ''
-        const content = meta.displayedSegments === 0 && fallback.length > 0 ? fallback : `[错误] ${payload.error}`
-
-        const msg: ChatMessageRecord = {
-          id: createId(),
-          role: 'assistant',
-          content,
-          createdAt: Date.now(),
-        }
-
-        if (meta.sessionId === currentSessionId) {
-          setMessages((prevMsgs) => [...prevMsgs, msg])
-        }
-        api.addChatMessage(meta.sessionId, msg).catch(() => undefined)
-
+        setTtsPendingUtteranceId((prev) => (prev === payload.utteranceId ? null : prev))
+        setTtsRevealedSegments((prev) => {
+          const next = { ...prev }
+          delete next[meta.messageId]
+          return next
+        })
         delete ttsUtteranceMetaRef.current[payload.utteranceId]
       }
       setError(payload.error)
@@ -1103,16 +1931,12 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const meta = ttsUtteranceMetaRef.current[payload.utteranceId]
       delete ttsUtteranceMetaRef.current[payload.utteranceId]
       if (meta) {
-        // 兜底：如果没有收到任何 segmentStarted，但模型有 fallbackContent，则把最终内容写回同一条 assistant 消息
-        if (meta.displayedSegments === 0 && !meta.accumulated && (meta.fallbackContent?.trim() ?? '').length > 0) {
-          const content = meta.fallbackContent!.trim()
-          if (meta.sessionId === currentSessionId) {
-            setMessages((prevMsgs) =>
-              prevMsgs.map((m) => (m.id === meta.assistantMessageId ? { ...m, content } : m)),
-            )
-          }
-          api.updateChatMessage(meta.sessionId, meta.assistantMessageId, content).catch(() => undefined)
-        }
+        setTtsPendingUtteranceId((prev) => (prev === payload.utteranceId ? null : prev))
+        setTtsRevealedSegments((prev) => {
+          const next = { ...prev }
+          delete next[meta.messageId]
+          return next
+        })
       }
       const sessionId = meta?.sessionId
       if (sessionId) {
@@ -1189,15 +2013,46 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       parseModelMetadata(modelFile).then((metadata) => {
         const expressions = metadata.expressions?.map((e) => e.name) || []
         const motions = metadata.motionGroups?.map((g) => g.name) || []
+        toolAnimRef.current = { motionGroups: motions, expressions }
         setModelInfoToAIService(expressions, motions)
       })
+    } else {
+      toolAnimRef.current = { motionGroups: [], expressions: [] }
     }
   }, [settings?.ai, settings?.live2dModelFile])
 
   // Auto scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, ttsRevealedSegments])
+
+  const reloadCurrentSessionMessages = useCallback(async () => {
+    if (!api || !currentSessionId) return
+    if (isLoadingRef.current) return
+    const session = await api.getChatSession(currentSessionId).catch(() => null)
+    if (!session) return
+    setMessages(session.messages)
+  }, [api, currentSessionId])
+
+  // 隐藏窗口后台 autoSend 后，首次打开聊天窗可能出现 UI state 未刷新（只看到 assistant、缺 user）的情况。
+  // 这里在窗口变为可见/获得焦点时，主动从持久化 session 拉一次消息，保证 UI 与存储一致。
+  useEffect(() => {
+    let inflight = false
+    const onShow = () => {
+      if (document.visibilityState !== 'visible') return
+      if (inflight) return
+      inflight = true
+      void reloadCurrentSessionMessages().finally(() => {
+        inflight = false
+      })
+    }
+    window.addEventListener('focus', onShow)
+    document.addEventListener('visibilitychange', onShow)
+    return () => {
+      window.removeEventListener('focus', onShow)
+      document.removeEventListener('visibilitychange', onShow)
+    }
+  }, [reloadCurrentSessionMessages])
 
   const currentSession = useMemo(
     () => sessions.find((s) => s.id === currentSessionId) ?? null,
@@ -1214,6 +2069,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const retrieveEnabled = currentPersona?.retrieveEnabled ?? true
   const plannerEnabled = settings?.orchestrator?.plannerEnabled ?? false
   const plannerMode = settings?.orchestrator?.plannerMode ?? 'auto'
+  const toolCallingEnabled = settings?.orchestrator?.toolCallingEnabled ?? false
+  const toolCallingMode = settings?.orchestrator?.toolCallingMode ?? 'auto'
 
   const effectiveCountUi = useMemo(() => collapseAssistantRuns(messages).length, [messages])
   const cursorUi = clampIntValue(currentSession?.autoExtractCursor ?? 0, 0, 0, 1_000_000)
@@ -1338,6 +2195,32 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     [api],
   )
 
+  const toggleToolCallingEnabled = useCallback(
+    async (enabled: boolean) => {
+      if (!api) return
+      try {
+        await api.setOrchestratorSettings({ toolCallingEnabled: enabled })
+      } catch (err) {
+        console.error(err)
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [api],
+  )
+
+  const setToolCallingMode = useCallback(
+    async (mode: 'auto' | 'native' | 'text') => {
+      if (!api) return
+      try {
+        await api.setOrchestratorSettings({ toolCallingMode: mode })
+      } catch (err) {
+        console.error(err)
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [api],
+  )
+
   const newMessageId = useCallback(() => {
     if ('crypto' in globalThis && typeof globalThis.crypto.randomUUID === 'function') {
       return globalThis.crypto.randomUUID()
@@ -1345,37 +2228,253 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
   }, [])
 
-  // 任务完成/失败后，把结果回写到对应会话里（仅对 planner 创建的任务生效）
+  // 将任务的“人话回复”同步回对应会话（仅对 planner 创建的任务生效）
   useEffect(() => {
     if (!api) return
 
+    api
+      .listTasks()
+      .then((res) => setTasks(res.items ?? []))
+      .catch(() => undefined)
+
     const off = api.onTasksChanged((payload) => {
-      for (const t of payload.items ?? []) {
+      const items = payload.items ?? []
+      setTasks(items)
+      for (const t of items) {
         const sessionId = taskOriginSessionRef.current.get(t.id)
-        if (!sessionId) continue
-        if (taskFinalAnnouncedRef.current.has(t.id)) continue
-        if (t.status !== 'done' && t.status !== 'failed' && t.status !== 'canceled') continue
+        const messageId = taskOriginMessageRef.current.get(t.id)
+        if (!sessionId || !messageId) continue
 
-        taskFinalAnnouncedRef.current.add(t.id)
+        const isFinal = t.status === 'done' || t.status === 'failed' || t.status === 'canceled'
+        if (!isFinal) continue
+
+        const finalizeCtx = taskFinalizeContextRef.current.get(t.id) ?? null
+        if (finalizeCtx) {
+          if (taskFinalizingRef.current.has(t.id)) continue
+          taskFinalizingRef.current.add(t.id)
+
+          void (async () => {
+            const aiService = getAIService()
+            if (!aiService) {
+              const errText = '[错误] AI 服务未初始化'
+              const baseBlocks = taskOriginBlocksRef.current.get(t.id) ?? []
+              const nextBlocks = baseBlocks.map((b) => ({ ...b }))
+              const lastTextIdx = (() => {
+                for (let i = nextBlocks.length - 1; i >= 0; i -= 1) {
+                  if (nextBlocks[i].type === 'text') return i
+                }
+                return -1
+              })()
+              if (lastTextIdx >= 0) nextBlocks[lastTextIdx] = { type: 'text', text: errText }
+              else nextBlocks.push({ type: 'text', text: errText })
+              const nextContent = joinTextBlocks(nextBlocks)
+
+              if (sessionId === currentSessionId) {
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)),
+                )
+              }
+              await api.updateChatMessageRecord(sessionId, messageId, { content: nextContent, blocks: nextBlocks }).catch(() => undefined)
+              return
+            }
+
+            const baseBlocks = taskOriginBlocksRef.current.get(t.id) ?? []
+            const buildBlocksWithFinal = (finalText: string): ChatMessageBlock[] => {
+              const copied = Array.isArray(baseBlocks) ? baseBlocks.map((b) => ({ ...b })) : []
+              const lastTextIdx = (() => {
+                for (let i = copied.length - 1; i >= 0; i -= 1) {
+                  if (copied[i].type === 'text') return i
+                }
+                return -1
+              })()
+              if (lastTextIdx >= 0) copied[lastTextIdx] = { type: 'text', text: finalText }
+              else copied.push({ type: 'text', text: finalText })
+              return copied
+            }
+
+            const toolAddon = buildToolResultSystemAddon(t)
+            const mergedAddon = [finalizeCtx.systemAddon, toolAddon].filter(Boolean).join('\n\n')
+
+            const prompt: ChatMessage[] = [
+              ...finalizeCtx.chatHistory,
+              {
+                role: 'user',
+                content: '工具已执行完毕。请基于工具执行结果继续完成刚才的请求：只输出最终自然语言回复，不要重复前置话术。',
+              },
+            ]
+
+            const enableChatStreaming = settingsRef.current?.ai?.enableChatStreaming ?? false
+
+            if (enableChatStreaming) {
+              let acc = ''
+              let pending = ''
+              let raf = 0
+              let lastExpression: string | undefined
+              let lastMotion: string | undefined
+
+              const flush = () => {
+                if (!pending) return
+                acc += pending
+                pending = ''
+
+                const displayFinal = normalizeAssistantDisplayText(acc)
+                const nextBlocks = buildBlocksWithFinal(displayFinal)
+                const nextContent = joinTextBlocks(nextBlocks)
+
+                if (sessionId === currentSessionId) {
+                  setMessages((prev) =>
+                    prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)),
+                  )
+                }
+
+                const tags = extractLastLive2DTags(acc)
+                if (tags.expression && tags.expression !== lastExpression) {
+                  lastExpression = tags.expression
+                  api.triggerExpression(tags.expression)
+                }
+                if (tags.motion && tags.motion !== lastMotion) {
+                  lastMotion = tags.motion
+                  api.triggerMotion(tags.motion, 0)
+                }
+              }
+
+              const scheduleFlush = () => {
+                if (raf) return
+                raf = window.requestAnimationFrame(() => {
+                  raf = 0
+                  flush()
+                })
+              }
+
+              const response = await aiService.chatStream(prompt, {
+                systemAddon: mergedAddon,
+                onDelta: (delta) => {
+                  pending += delta
+                  scheduleFlush()
+                },
+              })
+
+              if (raf) {
+                window.cancelAnimationFrame(raf)
+                raf = 0
+              }
+              flush()
+
+              if (response.error) {
+                const nextText = response.error === ABORTED_ERROR ? '' : `[错误] ${response.error}`
+                const nextBlocks = buildBlocksWithFinal(nextText)
+                const nextContent = joinTextBlocks(nextBlocks)
+                if (sessionId === currentSessionId) {
+                  setMessages((prev) =>
+                    prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)),
+                  )
+                }
+                await api.updateChatMessageRecord(sessionId, messageId, { content: nextContent, blocks: nextBlocks }).catch(() => undefined)
+                return
+              }
+
+              const finalText = normalizeAssistantDisplayText(acc, { trim: true })
+              const finalBlocks = buildBlocksWithFinal(finalText)
+              const finalContent = joinTextBlocks(finalBlocks)
+              if (sessionId === currentSessionId) {
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === messageId ? { ...m, content: finalContent, blocks: finalBlocks } : m)),
+                )
+                if (finalText) api.sendBubbleMessage(finalText)
+              }
+
+              await api.updateChatMessageRecord(sessionId, messageId, { content: finalContent, blocks: finalBlocks }).catch(() => undefined)
+              void runAutoExtractIfNeeded(sessionId)
+              return
+            }
+
+            const response = await aiService.chat(prompt, { systemAddon: mergedAddon })
+            if (response.error) {
+              const nextText = response.error === ABORTED_ERROR ? '' : `[错误] ${response.error}`
+              const nextBlocks = buildBlocksWithFinal(nextText)
+              const nextContent = joinTextBlocks(nextBlocks)
+              if (sessionId === currentSessionId) {
+                setMessages((prev) =>
+                  prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)),
+                )
+              }
+              await api.updateChatMessageRecord(sessionId, messageId, { content: nextContent, blocks: nextBlocks }).catch(() => undefined)
+              return
+            }
+
+            const { displayText, expression, motion } = extractLive2DTags(response.content)
+            const finalBlocks = buildBlocksWithFinal(displayText)
+            const finalContent = joinTextBlocks(finalBlocks)
+
+            if (sessionId === currentSessionId) {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === messageId ? { ...m, content: finalContent, blocks: finalBlocks } : m)),
+              )
+              if (displayText) api.sendBubbleMessage(displayText)
+              if (expression) api.triggerExpression(expression)
+              if (motion) api.triggerMotion(motion, 0)
+            }
+
+            await api.updateChatMessageRecord(sessionId, messageId, { content: finalContent, blocks: finalBlocks }).catch(() => undefined)
+            void runAutoExtractIfNeeded(sessionId)
+          })()
+            .catch((err) => console.error('[TaskFinalize] failed:', err))
+            .finally(() => {
+              taskFinalizingRef.current.delete(t.id)
+              taskFinalizeContextRef.current.delete(t.id)
+              taskOriginSessionRef.current.delete(t.id)
+              taskOriginMessageRef.current.delete(t.id)
+              taskOriginBlocksRef.current.delete(t.id)
+              taskLastSyncedReplyRef.current.delete(t.id)
+            })
+
+          continue
+        }
+
+        // 兼容旧链路（agent.run 等）：直接使用任务 finalReply/draftReply 回填
+        const finalRaw = String((t.finalReply ?? t.draftReply ?? t.lastError) ?? '').trim()
+        const last = taskLastSyncedReplyRef.current.get(t.id) ?? ''
+        if (finalRaw && last !== finalRaw) {
+          taskLastSyncedReplyRef.current.set(t.id, finalRaw)
+          const { displayText, expression, motion } = extractLive2DTags(finalRaw)
+
+          const baseBlocks = taskOriginBlocksRef.current.get(t.id) ?? []
+          const nextBlocks: ChatMessageBlock[] = (() => {
+            const copied = Array.isArray(baseBlocks) ? baseBlocks.map((b) => ({ ...b })) : []
+            const lastTextIdx = (() => {
+              for (let i = copied.length - 1; i >= 0; i -= 1) {
+                if (copied[i].type === 'text') return i
+              }
+              return -1
+            })()
+            if (lastTextIdx >= 0) copied[lastTextIdx] = { type: 'text', text: displayText }
+            else copied.push({ type: 'text', text: displayText })
+            return copied
+          })()
+
+          const nextContent = joinTextBlocks(nextBlocks)
+
+          if (sessionId === currentSessionId) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)),
+            )
+            if (displayText) api.sendBubbleMessage(displayText)
+            if (expression) api.triggerExpression(expression)
+            if (motion) api.triggerMotion(motion, 0)
+          }
+
+          api.updateChatMessageRecord(sessionId, messageId, { content: nextContent, blocks: nextBlocks }).catch(() => undefined)
+        }
+
         taskOriginSessionRef.current.delete(t.id)
-
-        const content = formatTaskFinalMessage(t)
-        const msg: ChatMessageRecord = { id: newMessageId(), role: 'assistant', content, createdAt: Date.now() }
-
-        if (sessionId === currentSessionId) {
-          setMessages((prev) => [...prev, msg])
-        }
-        api.addChatMessage(sessionId, msg).catch(() => undefined)
-
-        // 低打扰：只在失败时冒泡提示
-        if (t.status === 'failed' && sessionId === currentSessionId && content) {
-          api.sendBubbleMessage(content)
-        }
+        taskOriginMessageRef.current.delete(t.id)
+        taskOriginBlocksRef.current.delete(t.id)
+        taskLastSyncedReplyRef.current.delete(t.id)
       }
     })
 
     return () => off()
-  }, [api, currentSessionId, newMessageId])
+  }, [api, currentSessionId, runAutoExtractIfNeeded])
 
   const closeOverlays = useCallback(() => {
     setContextMenu(null)
@@ -1400,6 +2499,31 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   }, [])
 
   const canUseVision = settings?.ai?.enableVision ?? false
+  const chatOrbEnabled = settings?.chatUi?.contextOrbEnabled ?? false
+  const chatOrbX = settings?.chatUi?.contextOrbX ?? 6
+  const chatOrbY = settings?.chatUi?.contextOrbY ?? 14
+
+  useEffect(() => {
+    if (!api) return
+    let disposed = false
+    api
+      .getMcpState()
+      .then((snap) => {
+        if (disposed) return
+        setMcpSnapshotForContext(snap)
+      })
+      .catch(() => {
+        /* ignore */
+      })
+    const off = api.onMcpChanged((snap) => {
+      if (disposed) return
+      setMcpSnapshotForContext(snap)
+    })
+    return () => {
+      disposed = true
+      off()
+    }
+  }, [api])
 
   const estimateTokensFromText = useCallback((text: string): number => {
     const cleaned = (text ?? '').trim()
@@ -1421,6 +2545,96 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     },
     [estimateTokensFromText],
   )
+
+  const toolDirectoryAddon = useMemo(() => {
+    const defs = getBuiltinToolDefinitions()
+    const lines: string[] = defs.map((d) => `- ${d.name}：${d.description}`)
+
+    const servers = Array.isArray(mcpSnapshotForContext?.servers) ? mcpSnapshotForContext!.servers : []
+    for (const s of servers) {
+      const tools = Array.isArray(s.tools) ? s.tools : []
+      for (const t of tools) {
+        const toolName = typeof t?.toolName === 'string' ? t.toolName : ''
+        if (!toolName) continue
+        const desc =
+          (typeof t?.description === 'string' && t.description.trim()) ||
+          (typeof t?.title === 'string' && t.title.trim()) ||
+          (typeof t?.name === 'string' && t.name.trim()) ||
+          ''
+        lines.push(`- ${toolName}：${desc || 'MCP tool'}`)
+      }
+    }
+
+    const MAX_TOOL_LINES = 80
+    const toolLines =
+      lines.length > MAX_TOOL_LINES ? [...lines.slice(0, MAX_TOOL_LINES), `- ...（${lines.length - MAX_TOOL_LINES} 项已省略）`] : lines
+
+    const toolSwitch = toolCallingEnabled ? `已启用（mode=${toolCallingMode}）` : '已关闭'
+    const plannerSwitch = plannerEnabled ? `已启用（mode=${plannerMode}）` : '已关闭'
+
+    return [
+      '【可用工具（权威，本地注册表）】',
+      toolLines.join('\n'),
+      '',
+      `当前开关：任务规划器${plannerSwitch}；工具执行${toolSwitch}`,
+      '规则：只有当用户在问“你能做什么/有哪些工具/能力说明”时，才解释并列出工具；否则不要主动输出工具清单。',
+      '注意：当“工具执行”为关闭时，不要承诺你会真的去执行这些工具；只能聊天/解释用法。',
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }, [
+    mcpSnapshotForContext,
+    plannerEnabled,
+    plannerMode,
+    toolCallingEnabled,
+    toolCallingMode,
+  ])
+
+  useEffect(() => {
+    if (!api) return
+
+    if (!memEnabled || !retrieveEnabled) {
+      setContextRetrieveAddon('')
+      return
+    }
+
+    const queryText = (input ?? '').trim()
+    if (!queryText) {
+      setContextRetrieveAddon('')
+      return
+    }
+
+    const nowId = (contextRetrieveAddonReqIdRef.current += 1)
+    const includeShared = settingsRef.current?.memory?.includeSharedOnRetrieve ?? true
+    const personaId = getActivePersonaId()
+
+    const timer = window.setTimeout(() => {
+      void api
+        .retrieveMemory({
+          personaId,
+          query: queryText,
+          limit: 12,
+          maxChars: 3200,
+          includeShared,
+        })
+        .then((res) => {
+          if (contextRetrieveAddonReqIdRef.current !== nowId) return
+          const addon = res.addon?.trim() ?? ''
+          setContextRetrieveAddon(addon)
+        })
+        .catch(() => {
+          if (contextRetrieveAddonReqIdRef.current !== nowId) return
+          setContextRetrieveAddon('')
+        })
+    }, 800)
+
+    return () => window.clearTimeout(timer)
+  }, [api, getActivePersonaId, input, memEnabled, retrieveEnabled])
+
+  const systemAddonForUsage = useMemo(() => {
+    const parts = [contextRetrieveAddon.trim(), toolDirectoryAddon.trim()].filter(Boolean)
+    return parts.join('\n\n')
+  }, [contextRetrieveAddon, toolDirectoryAddon])
 
   const trimChatHistoryToMaxContext = useCallback(
     (history: ChatMessage[], systemAddon: string): { history: ChatMessage[]; trimmedCount: number } => {
@@ -1450,6 +2664,118 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     },
     [estimateTokensForChatMessage, estimateTokensFromText],
   )
+
+  const chatContextUsage = useMemo<ContextUsageSnapshot | null>(() => {
+    const ai = settings?.ai
+    if (!ai) return null
+
+    const maxContextTokensRaw = ai.maxContextTokens ?? 128000
+    const maxContextTokens = Math.max(2048, Math.trunc(Number.isFinite(maxContextTokensRaw) ? maxContextTokensRaw : 128000))
+
+    const maxTokensRaw = ai.maxTokens ?? 2048
+    const outputReserve = Math.max(512, Math.min(8192, Math.trunc(Number.isFinite(maxTokensRaw) ? maxTokensRaw : 2048)))
+
+    const systemPromptTokens = estimateTokensFromText(ai.systemPrompt ?? '')
+    const addonTokens = estimateTokensFromText(systemAddonForUsage ?? '')
+
+    const chatHistory: ChatMessage[] = messages.map((m) => {
+      if (m.role !== 'user') return { role: 'assistant', content: m.content }
+
+      if (m.image && canUseVision) {
+        const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
+        const text = m.content === '[图片]' ? '' : m.content
+        if (text.trim().length > 0) parts.push({ type: 'text', text })
+        parts.push({ type: 'image_url', image_url: { url: m.image } })
+        return { role: 'user', content: parts }
+      }
+
+      const plain = m.content.trim().length > 0 ? m.content : '[图片]'
+      return { role: 'user', content: plain }
+    })
+
+    // 估算“下一次发送”时会附带的内容：把当前输入（以及待发送图片）也视为会进入上下文
+    const inputText = (input ?? '').trim()
+    const withPending: ChatMessage[] = [...chatHistory]
+    if (inputText || pendingImage) {
+      if (pendingImage && canUseVision) {
+        const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
+        if (inputText) parts.push({ type: 'text', text: inputText })
+        parts.push({ type: 'image_url', image_url: { url: pendingImage } })
+        withPending.push({ role: 'user', content: parts })
+      } else {
+        withPending.push({ role: 'user', content: inputText || '[图片]' })
+      }
+    }
+
+    const trimmed = trimChatHistoryToMaxContext(withPending, systemAddonForUsage)
+    const historyTokens = trimmed.history.reduce((sum, msg) => sum + estimateTokensForChatMessage(msg), 0)
+
+    return {
+      usedTokens: systemPromptTokens + addonTokens + historyTokens + outputReserve,
+      maxContextTokens,
+      outputReserveTokens: outputReserve,
+      systemPromptTokens,
+      addonTokens,
+      historyTokens,
+      trimmedCount: trimmed.trimmedCount,
+      updatedAt: Date.now(),
+    }
+  }, [
+    canUseVision,
+    estimateTokensForChatMessage,
+    estimateTokensFromText,
+    input,
+    messages,
+    pendingImage,
+    settings?.ai,
+    systemAddonForUsage,
+    trimChatHistoryToMaxContext,
+  ])
+
+  useEffect(() => {
+    if (!api) return
+    if (!chatContextUsage) return
+    contextUsagePendingRef.current = chatContextUsage
+
+    const flushPending = () => {
+      const pending = contextUsagePendingRef.current
+      if (!pending) return
+      contextUsagePendingRef.current = null
+      contextUsageLastSentAtRef.current = Date.now()
+      try {
+        api.setContextUsage(pending)
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const nowTs = Date.now()
+    const waitMs = 250 - (nowTs - contextUsageLastSentAtRef.current)
+    if (waitMs <= 0) {
+      if (contextUsageSendTimerRef.current != null) {
+        window.clearTimeout(contextUsageSendTimerRef.current)
+        contextUsageSendTimerRef.current = null
+      }
+      flushPending()
+      return
+    }
+
+    if (contextUsageSendTimerRef.current != null) return
+    contextUsageSendTimerRef.current = window.setTimeout(() => {
+      contextUsageSendTimerRef.current = null
+      flushPending()
+    }, waitMs)
+  }, [api, chatContextUsage])
+
+  useEffect(() => {
+    return () => {
+      if (contextUsageSendTimerRef.current != null) {
+        window.clearTimeout(contextUsageSendTimerRef.current)
+        contextUsageSendTimerRef.current = null
+      }
+      contextUsagePendingRef.current = null
+    }
+  }, [])
 
   const formatAiErrorForUser = useCallback((raw: string): { message: string; shouldAlert: boolean } => {
     const text = String(raw ?? '').trim()
@@ -1549,7 +2875,12 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     el.style.height = `${el.scrollHeight}px`
   }, [editingMessageId, editingMessageContent])
 
-  const send = useCallback(async (override?: { text?: string; image?: string | null; source?: 'manual' | 'asr' }) => {
+  const send = useCallback(async (override?: {
+    text?: string
+    image?: string | null
+    source?: 'manual' | 'asr'
+    baseMessages?: ChatMessageRecord[]
+  }) => {
     const source = override?.source ?? 'manual'
     const text = (override?.text ?? input).trim()
     const image = source === 'manual' ? (override?.image ?? pendingImage) : (override?.image ?? null)
@@ -1588,7 +2919,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       image: image || undefined,
       createdAt: Date.now(),
     }
-    const nextMessages = [...messages, userMessage]
+    const baseMessages = override?.baseMessages ?? messages
+    const nextMessages = [...baseMessages, userMessage]
     setMessages(nextMessages)
     if (source === 'manual') {
       setInput('')
@@ -1616,6 +2948,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         const plain = m.content.trim().length > 0 ? m.content : '[图片]'
         return { role: 'user', content: plain }
       })
+      chatHistory = chatHistory.filter((m) => !(m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length === 0))
 
       await api.addChatMessage(currentSessionId, userMessage)
 
@@ -1623,20 +2956,53 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const orch = settingsRef.current?.orchestrator
       const plannerEnabledNow = orch?.plannerEnabled ?? false
       const plannerModeNow = orch?.plannerMode ?? 'auto'
-      const pendingBefore = plannerPendingRef.current
+      const toolCallingEnabledNow = orch?.toolCallingEnabled ?? false
       const shouldTryPlanner =
         plannerEnabledNow &&
-        (plannerModeNow === 'always' || pendingBefore || looksLikeToolTaskRequest(text))
+        toolCallingEnabledNow &&
+        (plannerModeNow === 'always' || plannerModeNow === 'auto') &&
+        (text ?? '').trim().length > 0
 
-      if (shouldTryPlanner && (text ?? '').trim().length > 0) {
+      if (shouldTryPlanner) {
         try {
+          const toolSettingsNow = settingsRef.current?.tools
+          const builtinToolNames = getBuiltinToolDefinitions().map((t) => t.name)
+
+          let mcpToolNames: string[] = []
+          try {
+            const mcp = await api.getMcpState()
+            const servers = Array.isArray(mcp.servers) ? mcp.servers : []
+            mcpToolNames = servers.flatMap((s) => {
+              const tools = Array.isArray(s.tools) ? s.tools : []
+              return tools.map((t) => (typeof t?.toolName === 'string' ? t.toolName : '')).filter(Boolean)
+            })
+          } catch {
+            mcpToolNames = []
+          }
+
+          const plannerToolNames = Array.from(new Set([...builtinToolNames, ...mcpToolNames].map((t) => t.trim()).filter(Boolean))).filter(
+            (t) => isToolEnabled(t, toolSettingsNow),
+          )
+          const plannerToolSet = new Set(plannerToolNames)
+
           const plannerHistory: ChatMessage[] = sliceTail(nextMessages, 12).map((m) => ({
             role: m.role === 'user' ? 'user' : 'assistant',
             content: m.content,
           }))
 
           const planRes = await aiService.chat(
-            [{ role: 'system', content: buildPlannerSystemPrompt() }, ...plannerHistory],
+            [
+              {
+                role: 'system',
+                content: buildPlannerSystemPrompt({
+                  systemPrompt: settingsRef.current?.ai?.systemPrompt,
+                  toolNames: plannerToolNames,
+                  expressions: toolAnimRef.current.expressions ?? [],
+                  motions: toolAnimRef.current.motionGroups ?? [],
+                }),
+              },
+              ...plannerHistory,
+            ],
             { signal: abort.signal },
           )
 
@@ -1661,9 +3027,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             }
 
             if (decision?.type === 'create_task') {
-              const runnable = (decision.task.steps ?? []).some(
-                (s) => typeof s.tool === 'string' && TASK_PLANNER_TOOLS.includes(s.tool as (typeof TASK_PLANNER_TOOLS)[number]),
-              )
+              const runnable = (decision.task.steps ?? []).some((s) => typeof s.tool === 'string' && plannerToolSet.has(s.tool))
               if (!runnable) throw new Error('规划器未生成可执行步骤（没有可用 tool）')
 
               const inferQueue = (): TaskCreateArgs['queue'] => {
@@ -1676,43 +3040,97 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                 return 'other'
               }
 
-              const taskArgs: TaskCreateArgs = { ...decision.task, queue: inferQueue() }
-              const created = await api.createTask(taskArgs)
+              const queue = inferQueue()
+
+              const created = await api.createTask({ ...decision.task, queue })
+
               taskOriginSessionRef.current.set(created.id, currentSessionId)
-              taskFinalAnnouncedRef.current.delete(created.id)
+              taskLastSyncedReplyRef.current.delete(created.id)
 
               plannerPendingRef.current = false
-              const replyBase = decision.assistantReply || `好的，我开始执行：${created.title}`
-              const reply = replyBase.replace(/{{\s*task\.id\s*}}/g, created.id).trim() || `已创建任务：${created.title}`
+
+              // 统一为“单消息 turn 容器”：前置对话 + ToolUse 卡片 +（任务完成后追加的最终回复）
+              const prefaceRaw = String(decision.assistantReply ?? '').trim()
+              const prefaceText = prefaceRaw ? normalizeAssistantDisplayText(prefaceRaw, { trim: true }) : ''
+              const prefaceTags = prefaceRaw ? extractLastLive2DTags(prefaceRaw) : { expression: undefined, motion: undefined }
+
+              const assistantId = newMessageId()
+              const blocks: ChatMessageBlock[] = [
+                ...(prefaceText ? [{ type: 'text', text: prefaceText } as const] : []),
+                { type: 'tool_use', taskId: created.id },
+                { type: 'text', text: '' },
+              ]
+
               const assistantMessage: ChatMessageRecord = {
-                id: newMessageId(),
+                id: assistantId,
                 role: 'assistant',
-                content: reply,
+                content: joinTextBlocks(blocks),
+                blocks,
+                taskId: created.id,
                 createdAt: Date.now(),
               }
+
+              taskOriginMessageRef.current.set(created.id, assistantId)
+              taskOriginBlocksRef.current.set(created.id, blocks)
+              taskLastSyncedReplyRef.current.set(created.id, assistantMessage.content)
+
               setMessages((prev) => [...prev, assistantMessage])
               await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-              if (assistantMessage.content) api.sendBubbleMessage(assistantMessage.content)
+
+              if (prefaceText) api.sendBubbleMessage(prefaceText)
+              {
+                const resolveFromList = (nameRaw: string, list: string[]): string | null => {
+                  const name = String(nameRaw ?? '').trim()
+                  if (!name) return null
+                  if (list.includes(name)) return name
+                  const lower = name.toLowerCase()
+                  return list.find((x) => x.toLowerCase() === lower) ?? null
+                }
+                const exp = prefaceTags.expression
+                  ? resolveFromList(prefaceTags.expression, toolAnimRef.current.expressions ?? [])
+                  : null
+                const motion = prefaceTags.motion ? resolveFromList(prefaceTags.motion, toolAnimRef.current.motionGroups ?? []) : null
+                if (exp) api.triggerExpression(exp)
+                if (motion) api.triggerMotion(motion, 0)
+              }
+
+              // 任务完成后：用“同一 turn 第二段 LLM 请求”生成最终回复（不把工具结果写进对话/记忆正文）
+              let systemAddon = ''
+              try {
+                const memEnabled = settingsRef.current?.memory?.enabled ?? true
+                if (!memEnabled) throw new Error('memory disabled')
+                const queryText = (text ?? '').trim()
+                if (queryText.length > 0) {
+                  const personaId = getActivePersonaId()
+                  const res = await api.retrieveMemory({
+                    personaId,
+                    query: queryText,
+                    limit: 12,
+                    maxChars: 3200,
+                    includeShared: settingsRef.current?.memory?.includeSharedOnRetrieve ?? true,
+                  })
+                  systemAddon = res.addon?.trim() ?? ''
+                }
+              } catch {
+                systemAddon = ''
+              }
+
+              const historyWithPreface = [...chatHistory, { role: 'assistant' as const, content: assistantMessage.content }]
+              const trimmed = trimChatHistoryToMaxContext(historyWithPreface, systemAddon)
+              taskFinalizeContextRef.current.set(created.id, {
+                sessionId: currentSessionId,
+                messageId: assistantId,
+                chatHistory: trimmed.history,
+                systemAddon,
+                userText: text,
+              })
               void runAutoExtractIfNeeded(currentSessionId)
               return
             }
 
             if (decision?.type === 'chat') {
               plannerPendingRef.current = false
-              const shouldUsePlannerChatReply = plannerModeNow === 'always' || pendingBefore
-              if (shouldUsePlannerChatReply && decision.assistantReply) {
-                const assistantMessage: ChatMessageRecord = {
-                  id: newMessageId(),
-                  role: 'assistant',
-                  content: decision.assistantReply,
-                  createdAt: Date.now(),
-                }
-                setMessages((prev) => [...prev, assistantMessage])
-                await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-                if (assistantMessage.content) api.sendBubbleMessage(assistantMessage.content)
-                void runAutoExtractIfNeeded(currentSessionId)
-                return
-              }
+              // 纯聊天：不使用 planner 的“代答复”，保持一次请求的流式对话体验
             }
           }
         } catch (err) {
@@ -1720,7 +3138,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         }
       }
 
-      let systemAddon = ''
+      const systemAddonParts: string[] = []
       setLastRetrieveDebug(null)
       try {
         const memEnabled = settingsRef.current?.memory?.enabled ?? true
@@ -1735,13 +3153,15 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             maxChars: 3200,
             includeShared: settingsRef.current?.memory?.includeSharedOnRetrieve ?? true,
           })
-          systemAddon = res.addon?.trim() ?? ''
+          const addon = res.addon?.trim() ?? ''
+          if (addon) systemAddonParts.push(addon)
           setLastRetrieveDebug(res.debug ?? null)
         }
       } catch (_) {
-        systemAddon = ''
         setLastRetrieveDebug(null)
       }
+
+      const systemAddon = systemAddonParts.filter(Boolean).join('\n\n')
 
       {
         const trimmed = trimChatHistoryToMaxContext(chatHistory, systemAddon)
@@ -1758,102 +3178,81 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
       if (ttsSegmented) {
         const utteranceId = newMessageId()
-        const createdAt = Date.now()
-        const assistantMessage: ChatMessageRecord = { id: utteranceId, role: 'assistant', content: '', createdAt }
-        ttsUtteranceMetaRef.current[utteranceId] = {
-          sessionId: currentSessionId,
-          assistantMessageId: utteranceId,
-          createdAt,
-          displayedSegments: 0,
-          accumulated: '',
-        }
-
-        setMessages((prev) => [...prev, assistantMessage])
-        await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-
-        api.enqueueTtsUtterance({ utteranceId, mode: 'replace', segments: [] })
+        setTtsPendingUtteranceId(utteranceId)
+        setTtsRevealedSegments((prev) => ({ ...prev, [utteranceId]: 0 }))
 
         try {
-          if (enableChatStreaming) {
-            const segmenter = createStreamingSentenceSegmenter()
-            let sentSegments = 0
+          const response = enableChatStreaming
+            ? await (async () => {
+                let acc = ''
+                const res = await aiService.chatStream(chatHistory, {
+                  signal: abort.signal,
+                  systemAddon,
+                  onDelta: (delta) => {
+                    acc += delta
+                  },
+                })
+                if (!res.error) {
+                  const merged = res.content?.trim().length ? res.content : acc
+                  return { ...res, content: merged }
+                }
+                return res
+              })()
+            : await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
 
-            const response = await aiService.chatStream(chatHistory, {
-              signal: abort.signal,
-              systemAddon,
-              onDelta: (delta) => {
-                const segs = segmenter.push(delta)
-                if (!segs.length) return
-                sentSegments += segs.length
-                api.enqueueTtsUtterance({ utteranceId, mode: 'append', segments: segs })
-              },
-            })
-
-            if (response.error) {
-              if (response.error === ABORTED_ERROR) {
-                api.finalizeTtsUtterance(utteranceId)
-                return
-              }
-              const errUi = formatAiErrorForUser(response.error)
-              setError(errUi.message)
-              if (errUi.shouldAlert) window.alert(errUi.message)
-              const nextContent = `[错误] ${response.error}`
-              setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: nextContent } : m)))
-              await api.updateChatMessage(currentSessionId, utteranceId, nextContent).catch(() => undefined)
-              api.finalizeTtsUtterance(utteranceId)
-              return
-            }
-
-            if (ttsUtteranceMetaRef.current[utteranceId]) {
-              ttsUtteranceMetaRef.current[utteranceId].fallbackContent = response.content
-            }
-
-            const tail = segmenter.flush()
-            if (tail.length) {
-              sentSegments += tail.length
-              api.enqueueTtsUtterance({ utteranceId, mode: 'append', segments: tail })
-            }
-
-            if (sentSegments === 0 && response.content) {
-              const segs = splitTextIntoSegments(response.content)
-              if (segs.length) {
-                sentSegments += segs.length
-                api.enqueueTtsUtterance({ utteranceId, mode: 'append', segments: segs })
-              }
-            }
-
-            api.finalizeTtsUtterance(utteranceId)
-            if (response.expression) api.triggerExpression(response.expression)
-            if (response.motion) api.triggerMotion(response.motion, 0)
-            return
-          }
-
-          const response = await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
           if (response.error) {
             if (response.error === ABORTED_ERROR) {
-              api.finalizeTtsUtterance(utteranceId)
+              setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
+              setTtsRevealedSegments((prev) => {
+                const next = { ...prev }
+                delete next[utteranceId]
+                return next
+              })
               return
             }
             const errUi = formatAiErrorForUser(response.error)
             setError(errUi.message)
             if (errUi.shouldAlert) window.alert(errUi.message)
-            const nextContent = `[错误] ${response.error}`
-            setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: nextContent } : m)))
-            await api.updateChatMessage(currentSessionId, utteranceId, nextContent).catch(() => undefined)
-            api.finalizeTtsUtterance(utteranceId)
+            setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
+            setTtsRevealedSegments((prev) => {
+              const next = { ...prev }
+              delete next[utteranceId]
+              return next
+            })
+            const msg: ChatMessageRecord = {
+              id: newMessageId(),
+              role: 'assistant',
+              content: `[错误] ${response.error}`,
+              createdAt: Date.now(),
+            }
+            setMessages((prev) => [...prev, msg])
+            await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
             return
           }
 
-          if (ttsUtteranceMetaRef.current[utteranceId]) {
-            ttsUtteranceMetaRef.current[utteranceId].fallbackContent = response.content
+          const content = normalizeAssistantDisplayText(response.content, { trim: true })
+          const assistantCreatedAt = Date.now()
+
+          const assistantMessage: ChatMessageRecord = {
+            id: utteranceId,
+            role: 'assistant',
+            content,
+            createdAt: assistantCreatedAt,
+          }
+          setMessages((prev) => [...prev, assistantMessage])
+          await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
+          setTtsSegmentedMessageFlags((prev) => ({ ...prev, [utteranceId]: true }))
+
+          const segs = splitTextIntoTtsSegments(content, { lang: 'zh', textSplitMethod: 'cut5' })
+          ttsUtteranceMetaRef.current[utteranceId] = {
+            sessionId: currentSessionId,
+            createdAt: assistantCreatedAt,
+            messageId: utteranceId,
+            displayedSegments: 0,
+            fallbackContent: content,
           }
 
-          const segs = splitTextIntoSegments(response.content)
-          api.enqueueTtsUtterance({
-            utteranceId,
-            mode: 'append',
-            segments: segs.length ? segs : [response.content],
-          })
+          api.enqueueTtsUtterance({ utteranceId, mode: 'replace', segments: segs.length ? segs : [content], fullText: content })
           api.finalizeTtsUtterance(utteranceId)
 
           if (response.expression) api.triggerExpression(response.expression)
@@ -1861,10 +3260,20 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           setError(msg)
-          const nextContent = `[错误] ${msg}`
-          setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: nextContent } : m)))
-          await api.updateChatMessage(currentSessionId, utteranceId, nextContent).catch(() => undefined)
-          api.finalizeTtsUtterance(utteranceId)
+          setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
+          setTtsRevealedSegments((prev) => {
+            const next = { ...prev }
+            delete next[utteranceId]
+            return next
+          })
+          const assistantMessage: ChatMessageRecord = {
+            id: newMessageId(),
+            role: 'assistant',
+            content: `[错误] ${msg}`,
+            createdAt: Date.now(),
+          }
+          setMessages((prev) => [...prev, assistantMessage])
+          await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
         }
 
         return
@@ -1877,6 +3286,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         let acc = ''
         let pending = ''
         let raf = 0
+        let lastExpression: string | undefined
+        let lastMotion: string | undefined
 
         const ensureMessageCreated = () => {
           if (created) return
@@ -1896,7 +3307,18 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           acc += pending
           pending = ''
           if (!created) ensureMessageCreated()
-          setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: acc } : m)))
+          const display = normalizeAssistantDisplayText(acc)
+          setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: display } : m)))
+
+          const tags = extractLastLive2DTags(acc)
+          if (tags.expression && tags.expression !== lastExpression) {
+            lastExpression = tags.expression
+            api.triggerExpression(tags.expression)
+          }
+          if (tags.motion && tags.motion !== lastMotion) {
+            lastMotion = tags.motion
+            api.triggerMotion(tags.motion, 0)
+          }
         }
 
         const scheduleFlush = () => {
@@ -1942,18 +3364,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           return
         }
 
+        const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
         if (created) {
-          setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: response.content } : m)))
-          await api.updateChatMessage(currentSessionId, assistantId, response.content).catch(() => undefined)
+          setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: finalContent } : m)))
+          await api.updateChatMessage(currentSessionId, assistantId, finalContent).catch(() => undefined)
         } else {
-          const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: response.content, createdAt }
+          const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: finalContent, createdAt }
           setMessages((prev) => [...prev, msg])
           await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
         }
-
-        if (response.expression) api.triggerExpression(response.expression)
-        if (response.motion) api.triggerMotion(response.motion, 0)
-        if (response.content) api.sendBubbleMessage(response.content)
+        if (finalContent) api.sendBubbleMessage(finalContent)
         void runAutoExtractIfNeeded(currentSessionId)
         return
       }
@@ -2022,29 +3442,55 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     formatAiErrorForUser,
   ])
 
-  const drainAsrQueue = useCallback(() => {
-    if (asrSendingRef.current) return
-    const next = asrSendQueueRef.current.shift()
-    if (!next) return
+  const flushAsrAutoSendQueue = useCallback(() => {
+    if (!api) return
+    if (!currentSessionId) return
+    if (asrAutoSendFlushingRef.current) return
 
-    asrSendingRef.current = true
-    void send({ text: next, image: null, source: 'asr' }).finally(() => {
-      asrSendingRef.current = false
-      drainAsrQueue()
-    })
-  }, [send])
+    const asr = settingsRef.current?.asr
+    if (!asr?.enabled) return
+    if (!asr.autoSend) return
 
-  const handleAsrText = useCallback(
-    (text: string) => {
-      const cleaned = text.trim()
+    const pending = pendingAsrAutoSendRef.current
+    if (pending.length === 0) return
+
+    asrAutoSendFlushingRef.current = true
+    const batch = pending.slice(0, pending.length)
+    pendingAsrAutoSendRef.current = []
+
+    void (async () => {
+      try {
+        for (const text of batch) {
+          const cleaned = String(text ?? '').trim()
+          if (!cleaned) continue
+          await send({ text: cleaned, source: 'asr' })
+        }
+      } finally {
+        asrAutoSendFlushingRef.current = false
+      }
+      flushAsrAutoSendQueue()
+    })()
+  }, [api, currentSessionId, send])
+
+  // ASR transcript from pet window: manual mode fills input only; autoSend mode triggers send（chat window 可隐藏）
+  useEffect(() => {
+    if (!api) return
+
+    let cancelled = false
+
+    const handleTranscript = (text: string) => {
+      const cleaned = String(text ?? '').trim()
       if (!cleaned) return
 
       const asr = settingsRef.current?.asr
       if (!asr?.enabled) return
 
       if (asr.autoSend) {
-        asrSendQueueRef.current.push(cleaned)
-        drainAsrQueue()
+        if (!currentSessionId) {
+          pendingAsrAutoSendRef.current.push(cleaned)
+          return
+        }
+        void send({ text: cleaned, source: 'asr' }).then(() => flushAsrAutoSendQueue())
         return
       }
 
@@ -2053,308 +3499,26 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         if (!base) return cleaned
         return `${prev} ${cleaned}`
       })
-    },
-    [drainAsrQueue],
-  )
-
-  const stopAsr = useCallback(() => {
-    const client = asrClientRef.current
-    if (!client) return
-    asrClientRef.current = null
-    asrStartingRef.current = false
-
-    try {
-      client.stopFeeder()
-    } catch (_) {
-      /* ignore */
     }
 
-    try {
-      client.node.disconnect()
-    } catch (_) {
-      /* ignore */
+    void (async () => {
+      const asr = settingsRef.current?.asr
+      if (!asr?.enabled) return
+      const cached = await api.takeAsrTranscript().catch(() => '')
+      if (cancelled) return
+      handleTranscript(cached)
+    })()
+
+    const off = api.onAsrTranscript(handleTranscript)
+    return () => {
+      cancelled = true
+      off()
     }
-
-    try {
-      client.sink.disconnect()
-    } catch (_) {
-      /* ignore */
-    }
-
-    try {
-      client.audioContext.close()
-    } catch (_) {
-      /* ignore */
-    }
-
-    try {
-      client.mediaStream.getTracks().forEach((t) => t.stop())
-    } catch (_) {
-      /* ignore */
-    }
-
-    try {
-      client.ws.close()
-    } catch (_) {
-      /* ignore */
-    }
-  }, [])
-
-  const sendAsrConfig = useCallback(() => {
-    const client = asrClientRef.current
-    if (!client) return
-    if (client.ws.readyState !== WebSocket.OPEN) return
-
-    const asr = settingsRef.current?.asr
-    if (!asr) return
-
-    client.ws.send(
-      JSON.stringify({
-        type: 'config',
-        sampleRate: client.sampleRate,
-        language: asr.language,
-        useItn: asr.useItn,
-        vadChunkMs: asr.vadChunkMs,
-        maxEndSilenceMs: asr.maxEndSilenceMs,
-        minSpeechMs: asr.minSpeechMs,
-        maxSpeechMs: asr.maxSpeechMs,
-        prerollMs: asr.prerollMs,
-        postrollMs: asr.postrollMs,
-        enableAgc: asr.enableAgc,
-        agcTargetRms: asr.agcTargetRms,
-        agcMaxGain: asr.agcMaxGain,
-        debug: asr.debug,
-      }),
-    )
-  }, [])
-
-  const startAsr = useCallback(async () => {
-    const asr = settingsRef.current?.asr
-    if (!asr?.enabled) return
-    if (asrClientRef.current) return
-    if (asrStartingRef.current) return
-    asrStartingRef.current = true
-
-    try {
-      if (!asr.wsUrl.trim()) {
-        setError('ASR WebSocket 地址为空')
-        return
-      }
-
-      const pickStream = async () => {
-        const deviceId = (asr.micDeviceId || '').trim()
-        const base: MediaTrackConstraints = {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        }
-
-        if (!deviceId) {
-          return navigator.mediaDevices.getUserMedia({ audio: base })
-        }
-
-        // 优先用 exact；失败时尝试 ideal；再失败回退系统默认
-        try {
-          return await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { exact: deviceId } } })
-        } catch (_e1) {
-          try {
-            return await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { ideal: deviceId } } })
-          } catch (_e2) {
-            return navigator.mediaDevices.getUserMedia({ audio: base })
-          }
-        }
-      }
-
-      const mediaStream = await pickStream()
-
-      // 使用系统默认采样率：音质更稳定；服务端会按 VAD 分块做批量重采样
-      const audioContext = new AudioContext()
-      const sampleRate = audioContext.sampleRate || 48000
-
-      const source = audioContext.createMediaStreamSource(mediaStream)
-
-      // 避免把麦克风音频直接输出到扬声器造成回声/啸叫，从而影响识别效果
-      const sink = audioContext.createGain()
-      sink.gain.value = 0
-      sink.connect(audioContext.destination)
-
-      const ws = new WebSocket(asr.wsUrl)
-      ws.binaryType = 'arraybuffer'
-
-      const bufferSize = 4096
-
-      const sendPcm = (pcm: Float32Array) => {
-        if (ws.readyState !== WebSocket.OPEN) return
-        const copy = new Float32Array(pcm.length)
-        copy.set(pcm)
-        ws.send(copy.buffer)
-      }
-
-      // Electron/桌宠 UI 负载高时，ScriptProcessor(主线程)容易丢帧导致识别变差；
-      // 优先使用 AudioWorklet(音频渲染线程)做采集缓冲，降低主线程抖动影响
-      let node: AudioNode
-      let stopFeeder: () => void
-
-      const tryCreateWorklet = async () => {
-        if (!audioContext.audioWorklet) return null
-
-        const workletCode = `
-class NdpPcmProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this._buf = new Float32Array(${bufferSize});
-    this._idx = 0;
-  }
-  process(inputs) {
-    const input = inputs[0];
-    if (input && input[0]) {
-      const ch = input[0];
-      let off = 0;
-      while (off < ch.length) {
-        const take = Math.min(ch.length - off, this._buf.length - this._idx);
-        this._buf.set(ch.subarray(off, off + take), this._idx);
-        this._idx += take;
-        off += take;
-        if (this._idx >= this._buf.length) {
-          this.port.postMessage(this._buf, [this._buf.buffer]);
-          this._buf = new Float32Array(${bufferSize});
-          this._idx = 0;
-        }
-      }
-    }
-    return true;
-  }
-}
-registerProcessor('ndp-pcm', NdpPcmProcessor);
-`
-        const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: 'text/javascript' }))
-        try {
-          await audioContext.audioWorklet.addModule(blobUrl)
-        } finally {
-          URL.revokeObjectURL(blobUrl)
-        }
-
-        const workletNode = new AudioWorkletNode(audioContext, 'ndp-pcm', {
-          numberOfInputs: 1,
-          numberOfOutputs: 1,
-          channelCount: 1,
-        })
-
-        workletNode.port.onmessage = (ev) => {
-          const data = ev.data
-          if (ws.readyState !== WebSocket.OPEN) return
-          if (data instanceof Float32Array) {
-            ws.send(data.buffer)
-            return
-          }
-          if (data instanceof ArrayBuffer) {
-            ws.send(data)
-          }
-        }
-
-        return {
-          node: workletNode as AudioNode,
-          stop: () => {
-            try {
-              workletNode.port.onmessage = null
-            } catch (_) {
-              /* ignore */
-            }
-          },
-        }
-      }
-
-      const worklet = await tryCreateWorklet()
-      if (worklet) {
-        node = worklet.node
-        stopFeeder = worklet.stop
-        source.connect(node)
-        node.connect(sink)
-      } else {
-        const processor = audioContext.createScriptProcessor(bufferSize, 1, 1)
-        processor.onaudioprocess = (e) => {
-          const input = e.inputBuffer.getChannelData(0)
-          sendPcm(input)
-        }
-        node = processor
-        stopFeeder = () => {
-          try {
-            processor.onaudioprocess = null
-          } catch (_) {
-            /* ignore */
-          }
-        }
-        source.connect(processor)
-        processor.connect(sink)
-      }
-
-      asrClientRef.current = { ws, mediaStream, audioContext, node, sink, stopFeeder, sampleRate }
-
-      ws.onopen = () => {
-        sendAsrConfig()
-      }
-      ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(String(ev.data || ''))
-          if (msg?.type === 'result') {
-            handleAsrText(String(msg.text || ''))
-          }
-        } catch (_) {
-          // ignore
-        }
-      }
-      ws.onerror = () => {
-        if (settingsRef.current?.asr?.debug) console.error('[ASR] WebSocket error')
-      }
-    } finally {
-      asrStartingRef.current = false
-    }
-  }, [handleAsrText, sendAsrConfig])
-
-  const asrEnabled = settings?.asr?.enabled ?? false
-  const asrWsUrl = settings?.asr?.wsUrl ?? ''
-  const asrMicDeviceId = settings?.asr?.micDeviceId ?? ''
-  useEffect(() => {
-    if (!asrEnabled) {
-      asrSendQueueRef.current = []
-      stopAsr()
-      return
-    }
-    void startAsr().catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err)
-      setError(`ASR 启动失败：${msg}`)
-      stopAsr()
-    })
-    return () => stopAsr()
-  }, [asrEnabled, asrWsUrl, asrMicDeviceId, startAsr, stopAsr])
-
-  const asrConfigKey = useMemo(() => {
-    const asr = settings?.asr
-    if (!asr) return ''
-    return JSON.stringify({
-      enabled: asr.enabled,
-      wsUrl: asr.wsUrl,
-      micDeviceId: asr.micDeviceId,
-      language: asr.language,
-      useItn: asr.useItn,
-      autoSend: asr.autoSend,
-      vadChunkMs: asr.vadChunkMs,
-      maxEndSilenceMs: asr.maxEndSilenceMs,
-      minSpeechMs: asr.minSpeechMs,
-      maxSpeechMs: asr.maxSpeechMs,
-      prerollMs: asr.prerollMs,
-      postrollMs: asr.postrollMs,
-      enableAgc: asr.enableAgc,
-      agcTargetRms: asr.agcTargetRms,
-      agcMaxGain: asr.agcMaxGain,
-      debug: asr.debug,
-    })
-  }, [settings?.asr])
+  }, [api, currentSessionId, flushAsrAutoSendQueue, send])
 
   useEffect(() => {
-    if (!asrEnabled) return
-    sendAsrConfig()
-  }, [asrConfigKey, asrEnabled, sendAsrConfig])
+    flushAsrAutoSendQueue()
+  }, [flushAsrAutoSendQueue])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -2715,6 +3879,23 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       const userMsg = messages[userIndex]
       if (!userMsg || userMsg.role !== 'user') return
 
+      // 重新生成：优先复用 send() 全链路（规划器 + 工具 + 流式/TTS），确保能触发工具
+      try {
+        setContextMenu(null)
+        setError(null)
+
+        const baseMessages = messages.slice(0, userIndex)
+        setMessages(baseMessages)
+        await api.setChatMessages(currentSessionId, baseMessages)
+
+        const resendText = userMsg.content === '[图片]' ? '' : userMsg.content
+        const resendImage = userMsg.image ?? null
+        await send({ text: resendText, image: resendImage, source: 'manual', baseMessages })
+        return
+      } catch (err) {
+        console.error('[Resend] fallback legacy resend:', err)
+      }
+
       const aiService = getAIService()
       if (!aiService) {
         setError('AI 服务未初始化，请先配置 AI 设置')
@@ -2788,102 +3969,81 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
 
         if (ttsSegmented) {
           const utteranceId = newMessageId()
-          const createdAt = Date.now()
-          const assistantMessage: ChatMessageRecord = { id: utteranceId, role: 'assistant', content: '', createdAt }
-          ttsUtteranceMetaRef.current[utteranceId] = {
-            sessionId: currentSessionId,
-            assistantMessageId: utteranceId,
-            createdAt,
-            displayedSegments: 0,
-            accumulated: '',
-          }
-
-          setMessages((prev) => [...prev, assistantMessage])
-          await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-
-          api.enqueueTtsUtterance({ utteranceId, mode: 'replace', segments: [] })
+          setTtsPendingUtteranceId(utteranceId)
+          setTtsRevealedSegments((prev) => ({ ...prev, [utteranceId]: 0 }))
 
           try {
-            if (enableChatStreaming) {
-              const segmenter = createStreamingSentenceSegmenter()
-              let sentSegments = 0
+            const response = enableChatStreaming
+              ? await (async () => {
+                  let acc = ''
+                  const res = await aiService.chatStream(chatHistory, {
+                    signal: abort.signal,
+                    systemAddon,
+                    onDelta: (delta) => {
+                      acc += delta
+                    },
+                  })
+                  if (!res.error) {
+                    const merged = res.content?.trim().length ? res.content : acc
+                    return { ...res, content: merged }
+                  }
+                  return res
+                })()
+              : await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
 
-              const response = await aiService.chatStream(chatHistory, {
-                signal: abort.signal,
-                systemAddon,
-                onDelta: (delta) => {
-                  const segs = segmenter.push(delta)
-                  if (!segs.length) return
-                  sentSegments += segs.length
-                  api.enqueueTtsUtterance({ utteranceId, mode: 'append', segments: segs })
-                },
-              })
-
-              if (response.error) {
-                if (response.error === ABORTED_ERROR) {
-                  api.finalizeTtsUtterance(utteranceId)
-                  return
-                }
-                const errUi = formatAiErrorForUser(response.error)
-                setError(errUi.message)
-                if (errUi.shouldAlert) window.alert(errUi.message)
-                const nextContent = `[错误] ${response.error}`
-                setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: nextContent } : m)))
-                await api.updateChatMessage(currentSessionId, utteranceId, nextContent).catch(() => undefined)
-                api.finalizeTtsUtterance(utteranceId)
-                return
-              }
-
-              if (ttsUtteranceMetaRef.current[utteranceId]) {
-                ttsUtteranceMetaRef.current[utteranceId].fallbackContent = response.content
-              }
-
-              const tail = segmenter.flush()
-              if (tail.length) {
-                sentSegments += tail.length
-                api.enqueueTtsUtterance({ utteranceId, mode: 'append', segments: tail })
-              }
-
-              if (sentSegments === 0 && response.content) {
-                const segs = splitTextIntoSegments(response.content)
-                if (segs.length) {
-                  sentSegments += segs.length
-                  api.enqueueTtsUtterance({ utteranceId, mode: 'append', segments: segs })
-                }
-              }
-
-              api.finalizeTtsUtterance(utteranceId)
-              if (response.expression) api.triggerExpression(response.expression)
-              if (response.motion) api.triggerMotion(response.motion, 0)
-              return
-            }
-
-            const response = await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
             if (response.error) {
               if (response.error === ABORTED_ERROR) {
-                api.finalizeTtsUtterance(utteranceId)
+                setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
+                setTtsRevealedSegments((prev) => {
+                  const next = { ...prev }
+                  delete next[utteranceId]
+                  return next
+                })
                 return
               }
               const errUi = formatAiErrorForUser(response.error)
               setError(errUi.message)
               if (errUi.shouldAlert) window.alert(errUi.message)
-              const nextContent = `[错误] ${response.error}`
-              setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: nextContent } : m)))
-              await api.updateChatMessage(currentSessionId, utteranceId, nextContent).catch(() => undefined)
-              api.finalizeTtsUtterance(utteranceId)
+              setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
+              setTtsRevealedSegments((prev) => {
+                const next = { ...prev }
+                delete next[utteranceId]
+                return next
+              })
+              const msg: ChatMessageRecord = {
+                id: newMessageId(),
+                role: 'assistant',
+                content: `[错误] ${response.error}`,
+                createdAt: Date.now(),
+              }
+              setMessages((prev) => [...prev, msg])
+              await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
               return
             }
 
-            if (ttsUtteranceMetaRef.current[utteranceId]) {
-              ttsUtteranceMetaRef.current[utteranceId].fallbackContent = response.content
+            const content = normalizeAssistantDisplayText(response.content, { trim: true })
+            const assistantCreatedAt = Date.now()
+
+            const assistantMessage: ChatMessageRecord = {
+              id: utteranceId,
+              role: 'assistant',
+              content,
+              createdAt: assistantCreatedAt,
+            }
+            setMessages((prev) => [...prev, assistantMessage])
+            await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
+            setTtsSegmentedMessageFlags((prev) => ({ ...prev, [utteranceId]: true }))
+
+            const segs = splitTextIntoTtsSegments(content, { lang: 'zh', textSplitMethod: 'cut5' })
+            ttsUtteranceMetaRef.current[utteranceId] = {
+              sessionId: currentSessionId,
+              createdAt: assistantCreatedAt,
+              messageId: utteranceId,
+              displayedSegments: 0,
+              fallbackContent: content,
             }
 
-            const segs = splitTextIntoSegments(response.content)
-            api.enqueueTtsUtterance({
-              utteranceId,
-              mode: 'append',
-              segments: segs.length ? segs : [response.content],
-            })
+            api.enqueueTtsUtterance({ utteranceId, mode: 'replace', segments: segs.length ? segs : [content], fullText: content })
             api.finalizeTtsUtterance(utteranceId)
 
             if (response.expression) api.triggerExpression(response.expression)
@@ -2891,10 +4051,20 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             setError(msg)
-            const nextContent = `[错误] ${msg}`
-            setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: nextContent } : m)))
-            await api.updateChatMessage(currentSessionId, utteranceId, nextContent).catch(() => undefined)
-            api.finalizeTtsUtterance(utteranceId)
+            setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
+            setTtsRevealedSegments((prev) => {
+              const next = { ...prev }
+              delete next[utteranceId]
+              return next
+            })
+            const assistantMessage: ChatMessageRecord = {
+              id: newMessageId(),
+              role: 'assistant',
+              content: `[错误] ${msg}`,
+              createdAt: Date.now(),
+            }
+            setMessages((prev) => [...prev, assistantMessage])
+            await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
           }
 
           return
@@ -2907,6 +4077,8 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
           let acc = ''
           let pending = ''
           let raf = 0
+          let lastExpression: string | undefined
+          let lastMotion: string | undefined
 
           const ensureMessageCreated = () => {
             if (created) return
@@ -2926,7 +4098,18 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
             acc += pending
             pending = ''
             if (!created) ensureMessageCreated()
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: acc } : m)))
+            const display = normalizeAssistantDisplayText(acc)
+            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: display } : m)))
+
+            const tags = extractLastLive2DTags(acc)
+            if (tags.expression && tags.expression !== lastExpression) {
+              lastExpression = tags.expression
+              api.triggerExpression(tags.expression)
+            }
+            if (tags.motion && tags.motion !== lastMotion) {
+              lastMotion = tags.motion
+              api.triggerMotion(tags.motion, 0)
+            }
           }
 
           const scheduleFlush = () => {
@@ -2971,18 +4154,17 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
             return
           }
 
+          const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
           if (created) {
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: response.content } : m)))
-            await api.updateChatMessage(currentSessionId, assistantId, response.content).catch(() => undefined)
+            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: finalContent } : m)))
+            await api.updateChatMessage(currentSessionId, assistantId, finalContent).catch(() => undefined)
           } else {
-            const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: response.content, createdAt }
+            const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: finalContent, createdAt }
             setMessages((prev) => [...prev, msg])
             await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
           }
 
-          if (response.expression) api.triggerExpression(response.expression)
-          if (response.motion) api.triggerMotion(response.motion, 0)
-          if (response.content) api.sendBubbleMessage(response.content)
+          if (finalContent) api.sendBubbleMessage(finalContent)
           void runAutoExtractIfNeeded(currentSessionId)
           return
         }
@@ -3042,6 +4224,7 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       getActivePersonaId,
       interrupt,
       messages,
+      send,
       newMessageId,
       refreshSessions,
       settings?.ai?.enableChatStreaming,
@@ -3086,6 +4269,12 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
         closeOverlays()
       }}
     >
+      <ContextUsageOrb
+        enabled={chatOrbEnabled}
+        usage={chatContextUsage}
+        position={{ x: chatOrbX, y: chatOrbY }}
+        onPositionChange={(next) => api?.setChatUiSettings({ contextOrbX: next.x, contextOrbY: next.y })}
+      />
       <header className="ndp-chat-header">
         <button className="ndp-session-name" onClick={() => setShowSessionList((v) => !v)} title="对话管理">
           对话管理：{currentSession?.name ?? '新对话'}
@@ -3143,6 +4332,29 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
           >
             <option value="auto">auto</option>
             <option value="always">always</option>
+          </select>
+          <label
+            className="ndp-chat-mem-toggle"
+            title="工具系统：让模型直接选择并调用工具执行（更通用，但会更频繁调用 LLM）"
+          >
+            <input
+              type="checkbox"
+              checked={toolCallingEnabled}
+              onChange={(e) => void toggleToolCallingEnabled(e.target.checked)}
+              disabled={!plannerEnabled}
+            />
+            工具Agent
+          </label>
+          <select
+            className="ndp-select ndp-chat-mem-select"
+            value={toolCallingMode}
+            onChange={(e) => void setToolCallingMode(e.target.value as 'auto' | 'native' | 'text')}
+            disabled={!plannerEnabled || !toolCallingEnabled}
+            title="auto=优先原生tools，失败降级文本协议；native=强制原生；text=强制文本协议（更稳）"
+          >
+            <option value="auto">auto</option>
+            <option value="native">native</option>
+            <option value="text">text</option>
           </select>
         </div>
         <div className="ndp-chat-membar-right">
@@ -3249,6 +4461,141 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
           const profile = settings?.chatProfile
           const isUser = m.role === 'user'
           const avatar = isUser ? profile?.userAvatar : profile?.assistantAvatar
+          const ttsSegmentedUi = (settings?.tts?.enabled ?? false) && (settings?.tts?.segmented ?? false)
+          const isSegmentedAssistant = !isUser && ttsSegmentedUi && !!ttsSegmentedMessageFlags[m.id]
+
+          const renderToolUseNode = (taskId: string): React.ReactNode => {
+            const t = tasks.find((x) => x.id === taskId) ?? null
+            if (!t) return null
+            const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
+            const steps = Array.isArray(t.steps) ? t.steps : []
+
+            const statusForStep = (s: TaskStepRecord | undefined): string => {
+              const st = String(s?.status ?? '').trim()
+              if (st === 'running') return 'running'
+              if (st === 'done') return 'done'
+              if (st === 'failed') return 'error'
+              if (st === 'skipped') return 'disconnected'
+              return 'pending'
+            }
+
+            const pickActiveRun = (): (typeof runs)[number] => {
+              for (let i = runs.length - 1; i >= 0; i -= 1) {
+                if (runs[i].status === 'running') return runs[i]
+              }
+              return runs[runs.length - 1]
+            }
+
+            const currentStep = steps.length > 0 ? steps[Math.max(0, Math.min(t.currentStepIndex, steps.length - 1))] : undefined
+            const lastFinishedStep =
+              steps.length > 0 && t.currentStepIndex > 0 ? steps[Math.max(0, Math.min(t.currentStepIndex - 1, steps.length - 1))] : undefined
+            const active = runs.length > 0 ? pickActiveRun() : undefined
+            const label =
+              active?.toolName ||
+              String(currentStep?.tool ?? '').trim() ||
+              String(lastFinishedStep?.tool ?? '').trim() ||
+              t.toolsUsed?.[t.toolsUsed.length - 1] ||
+              'tool'
+            const progress =
+              steps.length > 0 ? `${Math.min(t.currentStepIndex + 1, steps.length)}/${steps.length}` : runs.length > 0 ? `${runs.length}` : ''
+            const open = typeof toolUseOpenByTaskId[taskId] === 'boolean' ? toolUseOpenByTaskId[taskId] : true
+
+            return (
+              <details
+                className="ndp-tooluse"
+                open={open}
+                onToggle={(e) => {
+                  const next = (e.currentTarget as HTMLDetailsElement).open
+                  setToolUseOpenByTaskId((prev) => (prev[taskId] === next ? prev : { ...prev, [taskId]: next }))
+                }}
+              >
+                <summary className="ndp-tooluse-summary">
+                  <span className={`ndp-tooluse-pill ndp-tooluse-pill-${t.status}`}>
+                    DeskPet · ToolUse: {label}
+                    {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
+                  </span>
+                </summary>
+                <div className="ndp-tooluse-body">
+                  {runs.length > 0
+                    ? runs.map((r) => (
+                        <div key={r.id} className="ndp-tooluse-run">
+                          <div className="ndp-tooluse-run-title">
+                            <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${r.status}`}>{r.status}</span>
+                            <span className="ndp-tooluse-run-name">{r.toolName}</span>
+                          </div>
+                          {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
+                          {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
+                          {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
+                        </div>
+                      ))
+                    : steps.map((s, idx) => {
+                        const toolName = String(s.tool ?? '').trim()
+                        const name = toolName || s.title
+                        const input = String(s.input ?? '').trim()
+                        const output = String(s.output ?? '').trim()
+                        const error = String(s.error ?? '').trim()
+                        const statusKey = statusForStep(s)
+                        const statusText = String(s.status ?? '').trim() || 'pending'
+
+                        return (
+                          <div key={s.id || `${t.id}-step-${idx}`} className="ndp-tooluse-run">
+                            <div className="ndp-tooluse-run-title">
+                              <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${statusKey}`}>{statusText}</span>
+                              <span className="ndp-tooluse-run-name">{name}</span>
+                            </div>
+                            {input ? <div className="ndp-tooluse-run-io">in: {input}</div> : null}
+                            {output ? <div className="ndp-tooluse-run-io">out: {output}</div> : null}
+                            {error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {error}</div> : null}
+                          </div>
+                        )
+                      })}
+                </div>
+              </details>
+            )
+          }
+
+          const blocks = !isUser ? normalizeMessageBlocks(m) : []
+          const hasToolBlock = !isUser && blocks.some((b) => b.type === 'tool_use')
+
+          const imageNode = m.image ? (
+            <img className="ndp-msg-image" src={m.image} alt="attachment" onClick={() => window.open(m.image, '_blank')} />
+          ) : null
+
+          if (isSegmentedAssistant && !hasToolBlock && editingMessageId !== m.id) {
+            const segments = splitTextIntoTtsSegments(m.content, { lang: 'zh', textSplitMethod: 'cut5' })
+            const revealCount =
+              typeof ttsRevealedSegments[m.id] === 'number' ? ttsRevealedSegments[m.id] : segments.length
+            const visible = segments.slice(0, Math.max(0, Math.min(segments.length, revealCount)))
+            if (visible.length === 0) return null
+
+            return (
+              <div
+                key={m.id}
+                className="ndp-msg-row ndp-msg-row-pet"
+                onContextMenu={(e) => handleMessageContextMenu(e, m.id)}
+                title={new Date(m.createdAt).toLocaleString()}
+              >
+                <div className="ndp-avatar ndp-avatar-clickable" onClick={() => pickAvatar('assistant')} title="点击更换头像">
+                  {avatar ? <img src={avatar} alt="assistant" /> : <span>宠</span>}
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {visible.map((seg, i) => {
+                    const displaySeg = trimTrailingCommaForSegment(seg)
+                    const isLast = i === visible.length - 1
+                    return (
+                      <div key={`${m.id}-${i}`} className="ndp-msg ndp-msg-pet">
+                        <div className="ndp-msg-content">
+                          {displaySeg}
+                          {isLast ? imageNode : null}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          }
 
           return (
             <div
@@ -3289,15 +4636,29 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
                   </div>
                 ) : (
                   <div className="ndp-msg-content">
-                    {m.content}
-                    {m.image ? (
-                      <img
-                        className="ndp-msg-image"
-                        src={m.image}
-                        alt="attachment"
-                        onClick={() => window.open(m.image, '_blank')}
-                      />
-                    ) : null}
+                    {isUser || blocks.length === 0
+                      ? m.content
+                      : blocks.map((b, idx) => {
+                          if (b.type === 'text') {
+                            const text = String(b.text ?? '')
+                            if (!text) return null
+                            return <div key={`${m.id}-b-${idx}`}>{text}</div>
+                          }
+                          if (b.type === 'status') {
+                            const text = String(b.text ?? '').trim()
+                            if (!text) return null
+                            return (
+                              <div key={`${m.id}-b-${idx}`} className="ndp-muted">
+                                {text}
+                              </div>
+                            )
+                          }
+                          if (b.type === 'tool_use') {
+                            return <div key={`${m.id}-b-${idx}`}>{renderToolUseNode(b.taskId)}</div>
+                          }
+                          return null
+                        })}
+                    {imageNode}
                   </div>
                 )}
               </div>
@@ -3310,6 +4671,20 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
             </div>
           )
         })}
+        {(settings?.tts?.enabled ?? false) && (settings?.tts?.segmented ?? false) && ttsPendingUtteranceId ? (
+          <div className="ndp-msg-row ndp-msg-row-pet" title="生成中…">
+            <div className="ndp-avatar ndp-avatar-clickable" onClick={() => pickAvatar('assistant')} title="点击更换头像">
+              {settings?.chatProfile?.assistantAvatar ? (
+                <img src={settings.chatProfile.assistantAvatar} alt="assistant" />
+              ) : (
+                <span>宠</span>
+              )}
+            </div>
+            <div className="ndp-msg ndp-msg-pet">
+              <div className="ndp-msg-content ndp-muted">思考中…</div>
+            </div>
+          </div>
+        ) : null}
         <div ref={messagesEndRef} />
       </main>
 
@@ -3438,7 +4813,7 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
 function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
   const { api, settings } = props
   const [activeTab, setActiveTab] = useState<
-    'live2d' | 'bubble' | 'taskPanel' | 'ai' | 'persona' | 'chat' | 'tts' | 'asr'
+    'live2d' | 'bubble' | 'taskPanel' | 'ai' | 'tools' | 'persona' | 'chat' | 'tts' | 'asr'
   >('live2d')
   const [availableModels, setAvailableModels] = useState<Live2DModelInfo[]>([])
   const [isLoadingModels, setIsLoadingModels] = useState(true)
@@ -3545,6 +4920,12 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
           AI 设置
         </button>
         <button
+          className={`ndp-tab-btn ${activeTab === 'tools' ? 'active' : ''}`}
+          onClick={() => setActiveTab('tools')}
+        >
+          工具中心
+        </button>
+        <button
           className={`ndp-tab-btn ${activeTab === 'persona' ? 'active' : ''}`}
           onClick={() => setActiveTab('persona')}
         >
@@ -3586,7 +4967,8 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
         )}
         {activeTab === 'bubble' && <BubbleSettingsTab api={api} bubbleSettings={bubbleSettings} />}
         {activeTab === 'taskPanel' && <TaskPanelSettingsTab api={api} taskPanelSettings={settings?.taskPanel} />}
-        {activeTab === 'ai' && <AISettingsTab api={api} aiSettings={aiSettings} />}
+        {activeTab === 'ai' && <AISettingsTab api={api} aiSettings={aiSettings} orchestrator={settings?.orchestrator} />}
+        {activeTab === 'tools' && <ToolsSettingsTab api={api} settings={settings} />}
         {activeTab === 'persona' && <PersonaSettingsTab api={api} settings={settings} />}
         {activeTab === 'chat' && <ChatUiSettingsTab api={api} chatUi={chatUi} />}
         {activeTab === 'tts' && <TtsSettingsTab api={api} ttsSettings={ttsSettings} />}
@@ -3599,6 +4981,861 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
           重置默认
         </button>
       </footer>
+    </div>
+  )
+}
+
+function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
+  const { api, settings } = props
+  const toolSettings = settings?.tools
+  const mcpSettings = settings?.mcp
+
+  const [query, setQuery] = useState('')
+  const [tasks, setTasks] = useState<TaskRecord[]>([])
+  const [subTab, setSubTab] = useState<'builtin' | 'mcp'>('builtin')
+  const [mcpState, setMcpState] = useState<McpStateSnapshot | null>(null)
+
+  useEffect(() => {
+    if (!api) return
+    let disposed = false
+
+    api
+      .listTasks()
+      .then((res) => {
+        if (disposed) return
+        setTasks(Array.isArray(res.items) ? res.items : [])
+      })
+      .catch((err) => console.error('[Tools] listTasks failed:', err))
+
+    const off = api.onTasksChanged((payload) => setTasks(Array.isArray(payload.items) ? payload.items : []))
+    return () => {
+      disposed = true
+      off()
+    }
+  }, [api])
+
+  useEffect(() => {
+    if (!api) return
+    let disposed = false
+
+    api
+      .getMcpState()
+      .then((snap) => {
+        if (disposed) return
+        setMcpState(snap)
+      })
+      .catch((err) => console.error('[MCP] getMcpState failed:', err))
+
+    const off = api.onMcpChanged((snap) => setMcpState(snap))
+    return () => {
+      disposed = true
+      off()
+    }
+  }, [api])
+
+  const allDefs = useMemo(() => getBuiltinToolDefinitions(), [])
+  const effectiveToolSettings = useMemo(() => {
+    return toolSettings ?? { enabled: true, groups: {}, tools: {} }
+  }, [toolSettings])
+
+  const latestRunByTool = useMemo(() => {
+    const out = new Map<
+      string,
+      { status: 'running' | 'done' | 'error'; startedAt: number; endedAt?: number; error?: string; taskId: string; taskTitle: string }
+    >()
+
+    for (const t of tasks) {
+      const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
+      for (const r of runs) {
+        const toolName = typeof r?.toolName === 'string' ? r.toolName : ''
+        if (!toolName) continue
+        const startedAt = typeof r.startedAt === 'number' ? r.startedAt : 0
+        const prev = out.get(toolName)
+        if (!prev || startedAt > prev.startedAt) {
+          out.set(toolName, {
+            status: r.status,
+            startedAt,
+            endedAt: r.endedAt,
+            error: r.error,
+            taskId: t.id,
+            taskTitle: t.title,
+          })
+        }
+      }
+    }
+    return out
+  }, [tasks])
+
+  const normalizedQuery = query.trim().toLowerCase()
+  const visibleDefs = useMemo(() => {
+    if (!normalizedQuery) return allDefs
+    return allDefs.filter((d) => {
+      const hay = `${d.name}\n${d.callName}\n${d.description}\n${d.tags?.join(' ') ?? ''}`.toLowerCase()
+      return hay.includes(normalizedQuery)
+    })
+  }, [allDefs, normalizedQuery])
+
+  const groups = useMemo(() => {
+    const map = new Map<string, typeof visibleDefs>()
+    for (const d of visibleDefs) {
+      const g = getToolGroupId(d.name)
+      const arr = map.get(g)
+      if (arr) arr.push(d)
+      else map.set(g, [d])
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+  }, [visibleDefs])
+
+  const totalCount = allDefs.length
+  const enabledCount = allDefs.filter((d) => isToolEnabled(d.name, effectiveToolSettings)).length
+
+  const updateToolSettings = useCallback(
+    async (patch: Partial<AppSettings['tools']>) => {
+      if (!api) return
+      try {
+        await api.setToolSettings(patch)
+      } catch (err) {
+        console.error('[Tools] setToolSettings failed:', err)
+      }
+    },
+    [api],
+  )
+
+  const updateMcpSettings = useCallback(
+    async (patch: Partial<AppSettings['mcp']>) => {
+      if (!api) return
+      try {
+        await api.setMcpSettings(patch)
+      } catch (err) {
+        console.error('[MCP] setMcpSettings failed:', err)
+      }
+    },
+    [api],
+  )
+
+  const onToggleGlobal = useCallback(
+    (next: boolean) => {
+      void updateToolSettings({ enabled: next })
+    },
+    [updateToolSettings],
+  )
+
+  const onToggleGroup = useCallback(
+    (groupId: string, next: boolean) => {
+      const nextGroups = { ...(effectiveToolSettings.groups ?? {}) }
+      nextGroups[groupId] = next
+      void updateToolSettings({ groups: nextGroups })
+    },
+    [effectiveToolSettings.groups, updateToolSettings],
+  )
+
+  const onResetGroup = useCallback(
+    (groupId: string) => {
+      const nextGroups = { ...(effectiveToolSettings.groups ?? {}) }
+      delete nextGroups[groupId]
+      void updateToolSettings({ groups: nextGroups })
+    },
+    [effectiveToolSettings.groups, updateToolSettings],
+  )
+
+  const onToggleTool = useCallback(
+    (toolName: string, next: boolean) => {
+      const nextTools = { ...(effectiveToolSettings.tools ?? {}) }
+      nextTools[toolName] = next
+      void updateToolSettings({ tools: nextTools })
+    },
+    [effectiveToolSettings.tools, updateToolSettings],
+  )
+
+  const onResetTool = useCallback(
+    (toolName: string) => {
+      const nextTools = { ...(effectiveToolSettings.tools ?? {}) }
+      delete nextTools[toolName]
+      void updateToolSettings({ tools: nextTools })
+    },
+    [effectiveToolSettings.tools, updateToolSettings],
+  )
+
+  const mcpEnabled = mcpSettings?.enabled ?? false
+  const mcpServersRaw = mcpSettings?.servers
+  const mcpServers = useMemo(() => {
+    return Array.isArray(mcpServersRaw) ? mcpServersRaw : []
+  }, [mcpServersRaw])
+  const mcpStateById = useMemo(() => {
+    const map = new Map<string, (McpStateSnapshot['servers'][number] | null)>()
+    const servers = Array.isArray(mcpState?.servers) ? mcpState!.servers : []
+    for (const s of servers) {
+      if (!s || typeof s.id !== 'string') continue
+      map.set(s.id, s)
+    }
+    return map
+  }, [mcpState])
+
+  const parseArgsText = useCallback((text: string): string[] => {
+    return text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+  }, [])
+
+  const formatArgsText = useCallback((args: string[] | undefined | null): string => {
+    return Array.isArray(args) ? args.filter((v) => typeof v === 'string' && v.trim()).join('\n') : ''
+  }, [])
+
+  const parseEnvText = useCallback((text: string): Record<string, string> => {
+    const out: Record<string, string> = {}
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim()
+      if (!line) continue
+      if (line.startsWith('#')) continue
+      const eq = line.indexOf('=')
+      if (eq <= 0) continue
+      const key = line.slice(0, eq).trim()
+      const value = line.slice(eq + 1).trim()
+      if (!key) continue
+      out[key] = value
+    }
+    return out
+  }, [])
+
+  const formatEnvText = useCallback((env: Record<string, string> | undefined | null): string => {
+    if (!env) return ''
+    return Object.entries(env)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n')
+  }, [])
+
+  const updateMcpServer = useCallback(
+    (idx: number, patch: Partial<McpServerConfig>) => {
+      const next = mcpServers.map((s, i) => (i === idx ? { ...s, ...patch } : s))
+      void updateMcpSettings({ servers: next })
+    },
+    [mcpServers, updateMcpSettings],
+  )
+
+  const removeMcpServer = useCallback(
+    (idx: number) => {
+      const next = mcpServers.filter((_, i) => i !== idx)
+      void updateMcpSettings({ servers: next })
+    },
+    [mcpServers, updateMcpSettings],
+  )
+
+  const addMcpServer = useCallback(() => {
+    const used = new Set(mcpServers.map((s) => (s?.id ?? '').trim()).filter(Boolean))
+    let id = 'server'
+    if (used.has(id)) {
+      for (let i = 2; i < 9999; i += 1) {
+        const candidate = `server-${i}`
+        if (!used.has(candidate)) {
+          id = candidate
+          break
+        }
+      }
+    }
+
+    const next: McpServerConfig = {
+      id,
+      enabled: true,
+      label: '',
+      transport: 'stdio',
+      command: '',
+      args: [],
+      cwd: '',
+      env: {},
+    }
+    void updateMcpSettings({ servers: [...mcpServers, next] })
+  }, [mcpServers, updateMcpSettings])
+
+  const [mcpImportText, setMcpImportText] = useState('')
+  const [mcpImportError, setMcpImportError] = useState<string | null>(null)
+
+  const buildMcpExportText = useCallback((servers: McpServerConfig[]) => {
+    const mcpServers: Record<
+      string,
+      { command: string; args: string[]; cwd?: string; env?: Record<string, string> }
+    > = {}
+
+    for (const s of servers) {
+      const id = (s?.id ?? '').trim()
+      if (!id) continue
+      mcpServers[id] = {
+        command: s.command ?? '',
+        args: Array.isArray(s.args) ? s.args : [],
+        cwd: s.cwd || undefined,
+        env: s.env && Object.keys(s.env).length ? s.env : undefined,
+      }
+    }
+
+    return JSON.stringify({ mcpServers }, null, 2)
+  }, [])
+
+  const parseMcpImport = useCallback((text: string): { servers: McpServerConfig[] } => {
+    const raw = (text ?? '').trim()
+    if (!raw) throw new Error('请输入 JSON')
+
+    const obj = JSON.parse(raw) as unknown
+
+    const acceptObjectServers = (value: unknown): McpServerConfig[] => {
+      const serversObj = typeof value === 'object' && value && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+      if (!serversObj) return []
+
+      const out: McpServerConfig[] = []
+      for (const [idRaw, cfgRaw] of Object.entries(serversObj)) {
+        const id = String(idRaw ?? '').trim()
+        if (!id) continue
+        const cfg = typeof cfgRaw === 'object' && cfgRaw && !Array.isArray(cfgRaw) ? (cfgRaw as Record<string, unknown>) : null
+        if (!cfg) continue
+
+        const command = typeof cfg.command === 'string' ? cfg.command : ''
+        const args = Array.isArray(cfg.args) ? cfg.args.filter((x) => typeof x === 'string') : []
+        const cwd = typeof cfg.cwd === 'string' ? cfg.cwd : ''
+        const env =
+          typeof cfg.env === 'object' && cfg.env && !Array.isArray(cfg.env)
+            ? Object.fromEntries(Object.entries(cfg.env).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+            : {}
+
+        out.push({
+          id,
+          enabled: cfg.enabled === false ? false : true,
+          label: typeof cfg.label === 'string' ? cfg.label : id,
+          transport: 'stdio',
+          command,
+          args,
+          cwd,
+          env,
+        })
+      }
+      return out
+    }
+
+    const acceptArrayServers = (value: unknown): McpServerConfig[] => {
+      if (!Array.isArray(value)) return []
+      const out: McpServerConfig[] = []
+      for (const it of value) {
+        const cfg = typeof it === 'object' && it && !Array.isArray(it) ? (it as Record<string, unknown>) : null
+        if (!cfg) continue
+        const id = typeof cfg.id === 'string' ? cfg.id.trim() : ''
+        if (!id) continue
+        const command = typeof cfg.command === 'string' ? cfg.command : ''
+        const args = Array.isArray(cfg.args) ? cfg.args.filter((x) => typeof x === 'string') : []
+        const cwd = typeof cfg.cwd === 'string' ? cfg.cwd : ''
+        const env =
+          typeof cfg.env === 'object' && cfg.env && !Array.isArray(cfg.env)
+            ? Object.fromEntries(Object.entries(cfg.env).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+            : {}
+
+        out.push({
+          id,
+          enabled: cfg.enabled === false ? false : true,
+          label: typeof cfg.label === 'string' ? cfg.label : id,
+          transport: 'stdio',
+          command,
+          args,
+          cwd,
+          env,
+        })
+      }
+      return out
+    }
+
+    // 支持两种格式：
+    // 1) { "mcpServers": { "id": { command,args,cwd,env } } }
+    // 2) { "servers": [ {id,enabled,label,transport,command,args,cwd,env} ] } / 直接 array
+    const fromObject = acceptObjectServers((obj as { mcpServers?: unknown }).mcpServers)
+    const fromServersArray = acceptArrayServers((obj as { servers?: unknown }).servers)
+    const fromDirectArray = acceptArrayServers(obj)
+
+    const servers = fromObject.length ? fromObject : fromServersArray.length ? fromServersArray : fromDirectArray
+
+    if (!servers.length) throw new Error('未解析到任何 MCP Server（支持 {mcpServers:{...}} 或 {servers:[...]}）')
+    return { servers }
+  }, [])
+
+  const onMcpImportReplace = useCallback(() => {
+    try {
+      const parsed = parseMcpImport(mcpImportText)
+      setMcpImportError(null)
+      void updateMcpSettings({ servers: parsed.servers })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setMcpImportError(msg)
+    }
+  }, [mcpImportText, parseMcpImport, updateMcpSettings])
+
+  const onMcpImportMerge = useCallback(() => {
+    try {
+      const parsed = parseMcpImport(mcpImportText)
+      const map = new Map(mcpServers.map((s) => [String(s.id), s] as const))
+      for (const s of parsed.servers) map.set(String(s.id), s)
+      const next = Array.from(map.values())
+      setMcpImportError(null)
+      void updateMcpSettings({ servers: next })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setMcpImportError(msg)
+    }
+  }, [mcpImportText, mcpServers, parseMcpImport, updateMcpSettings])
+
+  const onMcpExportToTextarea = useCallback(() => {
+    setMcpImportError(null)
+    setMcpImportText(buildMcpExportText(mcpServers))
+  }, [buildMcpExportText, mcpServers])
+
+  return (
+    <div className="ndp-settings-section">
+      <h3>工具中心</h3>
+
+      <div className="ndp-setting-item">
+        <label>工具总开关</label>
+        <div className="ndp-row">
+          <input
+            type="checkbox"
+            checked={effectiveToolSettings.enabled}
+            onChange={(e) => onToggleGlobal(e.currentTarget.checked)}
+            disabled={!api}
+          />
+          <div className="ndp-setting-hint">关闭后：Planner/Agent/执行器都不会使用任何工具</div>
+        </div>
+      </div>
+
+      <div className="ndp-toolcenter-subtabs">
+        <button className={`ndp-btn ${subTab === 'builtin' ? 'active' : ''}`} onClick={() => setSubTab('builtin')}>
+          内置工具
+        </button>
+        <button className={`ndp-btn ${subTab === 'mcp' ? 'active' : ''}`} onClick={() => setSubTab('mcp')}>
+          MCP
+        </button>
+      </div>
+
+      {subTab === 'builtin' ? (
+        <>
+          <div className="ndp-setting-item">
+            <label>搜索</label>
+            <div className="ndp-row">
+              <input
+                className="ndp-input"
+                value={query}
+                onChange={(e) => setQuery(e.currentTarget.value)}
+                placeholder="按名称/描述/tags 搜索…"
+              />
+              <div className="ndp-setting-hint">
+                启用：{enabledCount}/{totalCount}
+              </div>
+            </div>
+          </div>
+
+          <div className="ndp-toolcenter-list">
+            {groups.map(([groupId, defs]) => {
+              const groupOverride = (effectiveToolSettings.groups ?? {})[groupId]
+              const groupEffective = effectiveToolSettings.enabled && (typeof groupOverride === 'boolean' ? groupOverride : true)
+              const groupEnabledCount = defs.filter((d) => isToolEnabled(d.name, effectiveToolSettings)).length
+
+              return (
+                <details key={groupId} className="ndp-toolcenter-group" open={normalizedQuery ? true : undefined}>
+                  <summary className="ndp-toolcenter-group-summary">
+                    <div className="ndp-toolcenter-group-left">
+                      <span className="ndp-toolcenter-group-name">{groupId}</span>
+                      <span className="ndp-setting-hint">
+                        {groupEnabledCount}/{defs.length}
+                      </span>
+                    </div>
+
+                    <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
+                      <label className="ndp-toolcenter-toggle" title="分组开关（可覆盖总开关以外的默认）">
+                        <input
+                          type="checkbox"
+                          checked={groupEffective}
+                          onChange={(e) => onToggleGroup(groupId, e.currentTarget.checked)}
+                          disabled={!api || !effectiveToolSettings.enabled}
+                        />
+                        <span>启用</span>
+                      </label>
+                      {typeof groupOverride === 'boolean' ? (
+                        <button className="ndp-btn ndp-btn-mini" onClick={() => onResetGroup(groupId)} disabled={!api}>
+                          重置
+                        </button>
+                      ) : null}
+                    </div>
+                  </summary>
+
+                  <div className="ndp-toolcenter-group-body">
+                    {defs
+                      .slice()
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map((d) => {
+                        const toolOverride = (effectiveToolSettings.tools ?? {})[d.name]
+                        const toolEnabled = isToolEnabled(d.name, effectiveToolSettings)
+                        const last = latestRunByTool.get(d.name) ?? null
+
+                        return (
+                          <details key={d.name} className={`ndp-toolcenter-tool ${toolEnabled ? '' : 'ndp-toolcenter-tool-disabled'}`}>
+                            <summary className="ndp-toolcenter-tool-summary">
+                              <div className="ndp-toolcenter-tool-left">
+                                <span className="ndp-toolcenter-tool-name">{d.name}</span>
+                                <span className="ndp-setting-hint">{d.risk}/{d.cost}</span>
+                                {last ? (
+                                  <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${last.status}`}>
+                                    {last.status}
+                                  </span>
+                                ) : (
+                                  <span className="ndp-setting-hint">未调用</span>
+                                )}
+                              </div>
+
+                              <div className="ndp-toolcenter-tool-actions" onClick={(e) => e.stopPropagation()}>
+                                <label className="ndp-toolcenter-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={toolEnabled}
+                                    onChange={(e) => onToggleTool(d.name, e.currentTarget.checked)}
+                                    disabled={!api || !effectiveToolSettings.enabled}
+                                  />
+                                  <span>启用</span>
+                                </label>
+                                {typeof toolOverride === 'boolean' ? (
+                                  <button className="ndp-btn ndp-btn-mini" onClick={() => onResetTool(d.name)} disabled={!api}>
+                                    重置
+                                  </button>
+                                ) : null}
+                              </div>
+                            </summary>
+
+                            <div className="ndp-toolcenter-tool-body">
+                              <div className="ndp-toolcenter-desc">{d.description}</div>
+                              {Array.isArray(d.tags) && d.tags.length ? (
+                                <div className="ndp-setting-hint">tags: {d.tags.join(', ')}</div>
+                              ) : null}
+
+                              <div className="ndp-toolcenter-meta">
+                                <div className="ndp-setting-hint">callName: {d.callName}</div>
+                                <div className="ndp-setting-hint">version: {d.version}</div>
+                              </div>
+
+                              {last ? (
+                                <div className="ndp-toolcenter-last">
+                                  <div className="ndp-setting-hint">
+                                    最近一次：{new Date(last.startedAt).toLocaleString()}（任务：{last.taskTitle}）
+                                  </div>
+                                  {last.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {last.error}</div> : null}
+                                </div>
+                              ) : null}
+
+                              <details className="ndp-toolcenter-sub">
+                                <summary className="ndp-toolcenter-sub-summary">inputSchema</summary>
+                                <pre className="ndp-toolcenter-pre">{JSON.stringify(d.inputSchema ?? {}, null, 2)}</pre>
+                              </details>
+
+                              <details className="ndp-toolcenter-sub">
+                                <summary className="ndp-toolcenter-sub-summary">examples</summary>
+                                <div className="ndp-toolcenter-examples">
+                                  {(Array.isArray(d.examples) ? d.examples : []).map((ex, idx) => (
+                                    <div key={`${d.name}-ex-${idx}`} className="ndp-toolcenter-example">
+                                      <div className="ndp-toolcenter-example-title">{ex.title}</div>
+                                      <pre className="ndp-toolcenter-pre">{JSON.stringify(ex.input ?? {}, null, 2)}</pre>
+                                    </div>
+                                  ))}
+                                  {!d.examples?.length ? <div className="ndp-setting-hint">无</div> : null}
+                                </div>
+                              </details>
+                            </div>
+                          </details>
+                        )
+                      })}
+                  </div>
+                </details>
+              )
+            })}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="ndp-setting-item">
+            <label>MCP 总开关</label>
+            <div className="ndp-row">
+              <input
+                type="checkbox"
+                checked={mcpEnabled}
+                onChange={(e) => void updateMcpSettings({ enabled: e.currentTarget.checked })}
+                disabled={!api}
+              />
+              <div className="ndp-setting-hint">
+                开启后：连接成功的 MCP Server 会把工具暴露到 Agent（仍受“工具总开关/分组/单工具”影响）
+              </div>
+            </div>
+          </div>
+
+          <details className="ndp-toolcenter-group" open={false}>
+            <summary className="ndp-toolcenter-group-summary">
+              <div className="ndp-toolcenter-group-left">
+                <span className="ndp-toolcenter-group-name">一键导入/导出（JSON）</span>
+                <span className="ndp-setting-hint">兼容 {`{ "mcpServers": { ... } }`}</span>
+              </div>
+              <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
+                <button className="ndp-btn ndp-btn-mini" onClick={onMcpExportToTextarea} disabled={!api}>
+                  导出到文本框
+                </button>
+              </div>
+            </summary>
+
+            <div className="ndp-toolcenter-group-body">
+              <textarea
+                className="ndp-input ndp-textarea"
+                value={mcpImportText}
+                onChange={(e) => setMcpImportText(e.currentTarget.value)}
+                placeholder={`{
+  "mcpServers": {
+    "exa": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "exa-mcp-server@latest"],
+      "env": { "EXA_API_KEY": "..." }
+    }
+  }
+}`}
+              />
+              {mcpImportError ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {mcpImportError}</div> : null}
+              <div className="ndp-row">
+                <button className="ndp-btn" onClick={onMcpImportReplace} disabled={!api}>
+                  覆盖导入
+                </button>
+                <button className="ndp-btn" onClick={onMcpImportMerge} disabled={!api}>
+                  合并导入（按 id 更新/新增）
+                </button>
+                <div className="ndp-setting-hint">导入后会触发自动重连；server id 会在保存时自动规范化并去重。</div>
+              </div>
+            </div>
+          </details>
+
+          <div className="ndp-setting-item">
+            <div className="ndp-row" style={{ justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>MCP Servers</div>
+                <div className="ndp-setting-hint">仅支持 stdio；修改 command/args/cwd/env 后会自动重连。</div>
+              </div>
+              <button className="ndp-btn" onClick={addMcpServer} disabled={!api}>
+                + 添加
+              </button>
+            </div>
+          </div>
+
+          <div className="ndp-toolcenter-list">
+            {mcpServers.length ? null : <div className="ndp-setting-hint">暂无 MCP Server，点击“+ 添加”创建一个。</div>}
+
+            {mcpServers.map((cfg, idx) => {
+              const cfgId = (cfg?.id ?? '').trim() || `server-${idx + 1}`
+              const state = mcpStateById.get(cfgId) ?? null
+              const status = state?.status ?? 'disconnected'
+              const tools = Array.isArray(state?.tools) ? state!.tools : []
+              const enabledToolCount = tools.filter((t) => isToolEnabled(t.toolName, effectiveToolSettings)).length
+              const groupId = `mcp.${cfgId}`
+              const groupOverride = (effectiveToolSettings.groups ?? {})[groupId]
+              const groupEffective = effectiveToolSettings.enabled && (typeof groupOverride === 'boolean' ? groupOverride : true)
+
+              return (
+                <details key={`${cfgId}-${idx}`} className="ndp-toolcenter-group">
+                  <summary className="ndp-toolcenter-group-summary">
+                    <div className="ndp-toolcenter-group-left">
+                      <span className="ndp-toolcenter-group-name">{cfg.label?.trim() || cfgId}</span>
+                      <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${status}`}>{status}</span>
+                      <span className="ndp-setting-hint">
+                        工具：{enabledToolCount}/{tools.length}
+                      </span>
+                    </div>
+
+                    <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
+                      <label className="ndp-toolcenter-toggle" title="MCP Server 开关（关闭会断开连接并隐藏工具）">
+                        <input
+                          type="checkbox"
+                          checked={cfg.enabled !== false}
+                          onChange={(e) => updateMcpServer(idx, { enabled: e.currentTarget.checked })}
+                          disabled={!api}
+                        />
+                        <span>启用</span>
+                      </label>
+                      <button className="ndp-btn ndp-btn-mini" onClick={() => removeMcpServer(idx)} disabled={!api}>
+                        删除
+                      </button>
+                    </div>
+                  </summary>
+
+                  <div className="ndp-toolcenter-group-body">
+                    <div className="ndp-setting-item">
+                      <label>Server ID（mcp.&lt;serverId&gt;.*）</label>
+                      <div className="ndp-row">
+                        <input
+                          className="ndp-input"
+                          defaultValue={cfgId}
+                          placeholder="例如：local-tools"
+                          onBlur={(e) => updateMcpServer(idx, { id: e.currentTarget.value.trim() || cfgId })}
+                          disabled={!api}
+                        />
+                        <div className="ndp-setting-hint">仅允许字母/数字/_/-；变更会自动规范化。</div>
+                      </div>
+                    </div>
+
+                    <div className="ndp-setting-item">
+                      <label>label（可选）</label>
+                      <div className="ndp-row">
+                        <input
+                          className="ndp-input"
+                          defaultValue={cfg.label ?? ''}
+                          placeholder="显示名称"
+                          onBlur={(e) => updateMcpServer(idx, { label: e.currentTarget.value })}
+                          disabled={!api}
+                        />
+                        <div className="ndp-setting-hint">用于工具中心显示，不影响 toolName。</div>
+                      </div>
+                    </div>
+
+                    <div className="ndp-setting-item">
+                      <label>command</label>
+                      <div className="ndp-row">
+                        <input
+                          className="ndp-input"
+                          defaultValue={cfg.command ?? ''}
+                          placeholder="例如：node"
+                          onBlur={(e) => updateMcpServer(idx, { command: e.currentTarget.value })}
+                          disabled={!api}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="ndp-setting-item">
+                      <label>args（每行一个）</label>
+                      <textarea
+                        className="ndp-input ndp-textarea"
+                        defaultValue={formatArgsText(cfg.args)}
+                        placeholder="例如：path/to/server.js"
+                        onBlur={(e) => updateMcpServer(idx, { args: parseArgsText(e.currentTarget.value) })}
+                        disabled={!api}
+                      />
+                    </div>
+
+                    <div className="ndp-setting-item">
+                      <label>cwd（可选）</label>
+                      <div className="ndp-row">
+                        <input
+                          className="ndp-input"
+                          defaultValue={cfg.cwd ?? ''}
+                          placeholder="工作目录（空=默认）"
+                          onBlur={(e) => updateMcpServer(idx, { cwd: e.currentTarget.value })}
+                          disabled={!api}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="ndp-setting-item">
+                      <label>env（KEY=VALUE，每行一个，可选）</label>
+                      <textarea
+                        className="ndp-input ndp-textarea"
+                        defaultValue={formatEnvText(cfg.env)}
+                        placeholder={'# 例如：\nOPENAI_API_KEY=xxxx\nHTTP_PROXY=http://127.0.0.1:7890'}
+                        onBlur={(e) => updateMcpServer(idx, { env: parseEnvText(e.currentTarget.value) })}
+                        disabled={!api}
+                      />
+                    </div>
+
+                    <div className="ndp-setting-item">
+                      <label>工具分组开关：{groupId}</label>
+                      <div className="ndp-row">
+                        <label className="ndp-toolcenter-toggle" title="分组开关（可覆盖总开关以外的默认）">
+                          <input
+                            type="checkbox"
+                            checked={groupEffective}
+                            onChange={(e) => onToggleGroup(groupId, e.currentTarget.checked)}
+                            disabled={!api || !effectiveToolSettings.enabled}
+                          />
+                          <span>启用</span>
+                        </label>
+                        {typeof groupOverride === 'boolean' ? (
+                          <button className="ndp-btn ndp-btn-mini" onClick={() => onResetGroup(groupId)} disabled={!api}>
+                            重置
+                          </button>
+                        ) : null}
+                        <div className="ndp-setting-hint">关闭分组会隐藏该 server 下所有工具。</div>
+                      </div>
+                    </div>
+
+                    {state?.lastError ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {state.lastError}</div> : null}
+
+                    {Array.isArray(state?.stderrTail) && state.stderrTail.length ? (
+                      <details className="ndp-toolcenter-sub">
+                        <summary className="ndp-toolcenter-sub-summary">stderr（最近 {state.stderrTail.length} 行）</summary>
+                        <pre className="ndp-toolcenter-pre">{state.stderrTail.join('\n')}</pre>
+                      </details>
+                    ) : null}
+
+                    <details className="ndp-toolcenter-sub" open={tools.length ? undefined : false}>
+                      <summary className="ndp-toolcenter-sub-summary">
+                        tools（{enabledToolCount}/{tools.length}）
+                      </summary>
+                      <div className="ndp-toolcenter-list">
+                        {tools
+                          .slice()
+                          .sort((a, b) => a.toolName.localeCompare(b.toolName))
+                          .map((t) => {
+                            const toolOverride = (effectiveToolSettings.tools ?? {})[t.toolName]
+                            const toolEnabled = isToolEnabled(t.toolName, effectiveToolSettings)
+
+                            return (
+                              <details
+                                key={t.toolName}
+                                className={`ndp-toolcenter-tool ${toolEnabled ? '' : 'ndp-toolcenter-tool-disabled'}`}
+                              >
+                                <summary className="ndp-toolcenter-tool-summary">
+                                  <div className="ndp-toolcenter-tool-left">
+                                    <span className="ndp-toolcenter-tool-name">{t.toolName}</span>
+                                    <span className="ndp-setting-hint">{t.callName}</span>
+                                  </div>
+                                  <div className="ndp-toolcenter-tool-actions" onClick={(e) => e.stopPropagation()}>
+                                    <label className="ndp-toolcenter-toggle">
+                                      <input
+                                        type="checkbox"
+                                        checked={toolEnabled}
+                                        onChange={(e) => onToggleTool(t.toolName, e.currentTarget.checked)}
+                                        disabled={!api || !effectiveToolSettings.enabled}
+                                      />
+                                      <span>启用</span>
+                                    </label>
+                                    {typeof toolOverride === 'boolean' ? (
+                                      <button className="ndp-btn ndp-btn-mini" onClick={() => onResetTool(t.toolName)} disabled={!api}>
+                                        重置
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </summary>
+
+                                <div className="ndp-toolcenter-tool-body">
+                                  {t.description ? <div className="ndp-toolcenter-desc">{t.description}</div> : null}
+                                  <div className="ndp-toolcenter-meta">
+                                    <div className="ndp-setting-hint">callName: {t.callName}</div>
+                                    <div className="ndp-setting-hint">name: {t.name}</div>
+                                  </div>
+
+                                  <details className="ndp-toolcenter-sub">
+                                    <summary className="ndp-toolcenter-sub-summary">inputSchema</summary>
+                                    <pre className="ndp-toolcenter-pre">{JSON.stringify(t.inputSchema ?? {}, null, 2)}</pre>
+                                  </details>
+                                  {t.outputSchema ? (
+                                    <details className="ndp-toolcenter-sub">
+                                      <summary className="ndp-toolcenter-sub-summary">outputSchema</summary>
+                                      <pre className="ndp-toolcenter-pre">{JSON.stringify(t.outputSchema ?? {}, null, 2)}</pre>
+                                    </details>
+                                  ) : null}
+                                </div>
+                              </details>
+                            )
+                          })}
+                      </div>
+                    </details>
+                  </div>
+                </details>
+              )
+            })}
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -4534,6 +6771,9 @@ function BubbleSettingsTab(props: {
   const autoHideDelay = bubbleSettings?.autoHideDelay ?? 5000
   const clickPhrases = bubbleSettings?.clickPhrases ?? []
   const clickPhrasesText = clickPhrases.join('\n')
+  const contextOrbEnabled = bubbleSettings?.contextOrbEnabled ?? false
+  const contextOrbX = bubbleSettings?.contextOrbX ?? 12
+  const contextOrbY = bubbleSettings?.contextOrbY ?? 16
 
   // Sync phrases text with settings
   useEffect(() => {
@@ -4684,6 +6924,32 @@ function BubbleSettingsTab(props: {
         <p className="ndp-setting-hint">气泡显示后自动消失的时间，0 表示需要手动关闭</p>
       </div>
 
+      <h3>上下文情况</h3>
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={contextOrbEnabled}
+            onChange={(e) => api?.setBubbleSettings({ contextOrbEnabled: e.target.checked })}
+          />
+          <span>显示上下文小球</span>
+        </label>
+        <p className="ndp-setting-hint">在桌宠窗口显示一个可拖动的小球，鼠标悬停可查看上下文占用。</p>
+        <div className="ndp-setting-actions">
+          <button
+            className="ndp-btn"
+            onClick={() => api?.setBubbleSettings({ contextOrbX: 12, contextOrbY: 16 })}
+            disabled={!contextOrbEnabled}
+            title="重置到默认位置"
+          >
+            重置位置
+          </button>
+          <span className="ndp-setting-hint" style={{ marginLeft: 10 }}>
+            当前位置：{Math.round(contextOrbX)}% / {Math.round(contextOrbY)}%
+          </span>
+        </div>
+      </div>
+
       <h3>自定义台词</h3>
 
       {/* Custom Click Phrases */}
@@ -4761,6 +7027,9 @@ function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatUi: AppS
   const bubbleRadius = chatUi?.bubbleRadius ?? 14
   const backgroundImage = chatUi?.backgroundImage ?? ''
   const backgroundImageOpacity = chatUi?.backgroundImageOpacity ?? 0.6
+  const contextOrbEnabled = chatUi?.contextOrbEnabled ?? false
+  const contextOrbX = chatUi?.contextOrbX ?? 6
+  const contextOrbY = chatUi?.contextOrbY ?? 14
   const backgroundImageInputRef = useRef<HTMLInputElement>(null)
 
   const clampInt = (v: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(v)))
@@ -4985,6 +7254,32 @@ function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatUi: AppS
           <span>{bubbleRadius}px</span>
         </div>
       </div>
+
+      <h3>上下文情况</h3>
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={contextOrbEnabled}
+            onChange={(e) => api?.setChatUiSettings({ contextOrbEnabled: e.target.checked })}
+          />
+          <span>显示上下文小球</span>
+        </label>
+        <p className="ndp-setting-hint">在聊天窗口显示一个可拖动的小球，鼠标悬停可查看上下文占用。</p>
+        <div className="ndp-setting-actions">
+          <button
+            className="ndp-btn"
+            onClick={() => api?.setChatUiSettings({ contextOrbX: 6, contextOrbY: 14 })}
+            disabled={!contextOrbEnabled}
+            title="重置到默认位置"
+          >
+            重置位置
+          </button>
+          <span className="ndp-setting-hint" style={{ marginLeft: 10 }}>
+            当前位置：{Math.round(contextOrbX)}% / {Math.round(contextOrbY)}%
+          </span>
+        </div>
+      </div>
     </div>
   )
 }
@@ -5000,7 +7295,7 @@ function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSettings: Ap
   const promptText = ttsSettings?.promptText ?? ''
   const streaming = ttsSettings?.streaming ?? true
   const segmented = ttsSettings?.segmented ?? false
-  const pauseMs = Math.max(0, Math.min(5000, ttsSettings?.pauseMs ?? 280))
+  const pauseMs = Math.max(0, Math.min(60000, ttsSettings?.pauseMs ?? 280))
 
   const [options, setOptions] = useState<
     | {
@@ -5165,7 +7460,7 @@ function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSettings: Ap
           <input
             type="range"
             min="0"
-            max="1200"
+            max="60000"
             step="20"
             value={pauseMs}
             onChange={(e) => api?.setTtsSettings({ pauseMs: parseInt(e.target.value) })}
@@ -5175,7 +7470,7 @@ function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSettings: Ap
             style={{ width: 96 }}
             type="number"
             min={0}
-            max={5000}
+            max={60000}
             step={20}
             value={pauseMs}
             onChange={(e) => api?.setTtsSettings({ pauseMs: parseInt(e.target.value || '0') })}
@@ -5195,9 +7490,13 @@ function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSettings: Ap
   const enabled = asrSettings?.enabled ?? false
   const wsUrl = asrSettings?.wsUrl ?? 'ws://127.0.0.1:8766/ws'
   const micDeviceId = asrSettings?.micDeviceId ?? ''
+  const captureBackend = (asrSettings?.captureBackend ?? 'script') as 'auto' | 'script' | 'worklet'
   const language = asrSettings?.language ?? 'auto'
   const useItn = asrSettings?.useItn ?? true
   const autoSend = asrSettings?.autoSend ?? false
+  const mode = (asrSettings?.mode ?? 'continuous') as 'continuous' | 'hotkey'
+  const hotkey = asrSettings?.hotkey ?? 'F8'
+  const showSubtitle = asrSettings?.showSubtitle ?? true
 
   const vadChunkMs = Math.max(40, Math.min(800, asrSettings?.vadChunkMs ?? 200))
   const maxEndSilenceMs = Math.max(80, Math.min(4000, asrSettings?.maxEndSilenceMs ?? 800))
@@ -5281,6 +7580,20 @@ function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSettings: Ap
       </div>
 
       <div className="ndp-setting-item">
+        <label>采集方式</label>
+        <select
+          className="ndp-select"
+          value={captureBackend}
+          onChange={(e) => api?.setAsrSettings({ captureBackend: e.target.value as AppSettings['asr']['captureBackend'] })}
+        >
+          <option value="script">ScriptProcessor（更稳定，推荐）</option>
+          <option value="worklet">AudioWorklet（更低延迟）</option>
+          <option value="auto">自动（优先 worklet）</option>
+        </select>
+        <p className="ndp-setting-hint">如果识别结果出现大量“🎼”等富文本标记或明显异常，优先切到 ScriptProcessor</p>
+      </div>
+
+      <div className="ndp-setting-item">
         <label>选择麦克风</label>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <select
@@ -5328,6 +7641,35 @@ function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSettings: Ap
           <span>标点/ITN（更像输入法）</span>
         </label>
         <p className="ndp-setting-hint">开启后会自动补标点、数字等格式化，通常更可读</p>
+      </div>
+
+      <h3>启动方式</h3>
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input type="radio" name="asrMode" checked={mode === 'continuous'} onChange={() => api?.setAsrSettings({ mode: 'continuous' })} />
+          <span>持续录音（无需按键）</span>
+        </label>
+        <label className="ndp-checkbox-label" style={{ marginTop: 8 }}>
+          <input type="radio" name="asrMode" checked={mode === 'hotkey'} onChange={() => api?.setAsrSettings({ mode: 'hotkey' })} />
+          <span>按键录音（按一下开始，再按一下结束）</span>
+        </label>
+
+        {mode === 'hotkey' && (
+          <div style={{ marginTop: 10 }}>
+            <label>录音快捷键</label>
+            <input type="text" className="ndp-input" value={hotkey} onChange={(e) => api?.setAsrSettings({ hotkey: e.target.value })} />
+            <p className="ndp-setting-hint">示例：F8 / Ctrl+Alt+V / A（全局快捷键，可能和系统/软件冲突）</p>
+          </div>
+        )}
+      </div>
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input type="checkbox" checked={showSubtitle} onChange={(e) => api?.setAsrSettings({ showSubtitle: e.target.checked })} />
+          <span>桌宠窗口显示识别字幕</span>
+        </label>
+        <p className="ndp-setting-hint">字幕显示在桌宠（Live2D）左侧，用于确认识别到的文本。</p>
       </div>
 
       <h3>识别结果处理</h3>
@@ -5539,8 +7881,9 @@ function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSettings: Ap
 function AISettingsTab(props: {
   api: ReturnType<typeof getApi>
   aiSettings: AppSettings['ai'] | undefined
+  orchestrator: AppSettings['orchestrator'] | undefined
 }) {
-  const { api, aiSettings } = props
+  const { api, aiSettings, orchestrator } = props
 
   const apiKey = aiSettings?.apiKey ?? ''
   const baseUrl = aiSettings?.baseUrl ?? 'https://api.openai.com/v1'
@@ -5551,6 +7894,15 @@ function AISettingsTab(props: {
   const systemPrompt = aiSettings?.systemPrompt ?? ''
   const enableVision = aiSettings?.enableVision ?? false
   const enableChatStreaming = aiSettings?.enableChatStreaming ?? false
+
+  const toolMode = orchestrator?.toolCallingMode ?? 'auto'
+  const toolUseCustomAi = orchestrator?.toolUseCustomAi ?? false
+  const toolAiApiKey = orchestrator?.toolAiApiKey ?? ''
+  const toolAiBaseUrl = orchestrator?.toolAiBaseUrl ?? ''
+  const toolAiModel = orchestrator?.toolAiModel ?? ''
+  const toolAiTemperature = orchestrator?.toolAiTemperature ?? 0.2
+  const toolAiMaxTokens = orchestrator?.toolAiMaxTokens ?? 900
+  const toolAiTimeoutMs = orchestrator?.toolAiTimeoutMs ?? 60000
 
   // Format large numbers for display
   const formatTokens = (n: number) => {
@@ -5678,13 +8030,126 @@ function AISettingsTab(props: {
         <p className="ndp-setting-hint">对话历史的最大 token 数量</p>
       </div>
 
+      <h3>工具(Agent) 设置</h3>
+
+      <div className="ndp-setting-item">
+        <label>工具执行模式</label>
+        <select
+          className="ndp-select"
+          value={toolMode}
+          onChange={(e) => api?.setOrchestratorSettings({ toolCallingMode: e.target.value as 'auto' | 'native' | 'text' })}
+        >
+          <option value="auto">auto（优先原生tools，失败降级文本协议）</option>
+          <option value="native">native（强制原生 tools/tool_calls）</option>
+          <option value="text">text（强制文本协议 TOOL_REQUEST，最稳）</option>
+        </select>
+        <p className="ndp-setting-hint">
+          Gemini/部分代理的 OpenAI-compat 原生 tools 可能要求 thought_signature，容易出错；选 text 可绕开此类兼容坑。
+        </p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={toolUseCustomAi}
+            onChange={(e) => api?.setOrchestratorSettings({ toolUseCustomAi: e.target.checked })}
+          />
+          <span>工具/Agent 使用单独的 API</span>
+        </label>
+        <p className="ndp-setting-hint">开启后，工具任务会优先使用下面的 API 配置；否则沿用上面的“API 设置”。</p>
+      </div>
+
+      {toolUseCustomAi && (
+        <>
+          <div className="ndp-setting-item">
+            <label>工具 API Key</label>
+            <input
+              type="password"
+              className="ndp-input"
+              value={toolAiApiKey}
+              placeholder="(可留空，沿用主 API Key)"
+              onChange={(e) => api?.setOrchestratorSettings({ toolAiApiKey: e.target.value })}
+            />
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>工具 API Base URL</label>
+            <input
+              type="text"
+              className="ndp-input"
+              value={toolAiBaseUrl}
+              placeholder="例如 https://generativelanguage.googleapis.com/v1beta/openai/"
+              onChange={(e) => api?.setOrchestratorSettings({ toolAiBaseUrl: e.target.value })}
+            />
+            <p className="ndp-setting-hint">
+              Gemini 官方 OpenAI 兼容基址：<code>https://generativelanguage.googleapis.com/v1beta/openai/</code>
+            </p>
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>工具模型名称</label>
+            <input
+              type="text"
+              className="ndp-input"
+              value={toolAiModel}
+              placeholder="例如 gemini-2.5-flash / gpt-4o-mini"
+              onChange={(e) => api?.setOrchestratorSettings({ toolAiModel: e.target.value })}
+            />
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>工具温度 (Temperature)</label>
+            <div className="ndp-range-input">
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                value={toolAiTemperature}
+                onChange={(e) => api?.setOrchestratorSettings({ toolAiTemperature: parseFloat(e.target.value) })}
+              />
+              <span>{toolAiTemperature.toFixed(1)}</span>
+            </div>
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>工具最大输出 (maxTokens)</label>
+            <div className="ndp-range-input">
+              <input
+                type="range"
+                min="128"
+                max="8192"
+                step="64"
+                value={toolAiMaxTokens}
+                onChange={(e) => api?.setOrchestratorSettings({ toolAiMaxTokens: parseInt(e.target.value) })}
+              />
+              <span>{toolAiMaxTokens}</span>
+            </div>
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>工具超时 (ms)</label>
+            <input
+              type="number"
+              className="ndp-input"
+              value={toolAiTimeoutMs}
+              min={2000}
+              max={180000}
+              step={500}
+              onChange={(e) => api?.setOrchestratorSettings({ toolAiTimeoutMs: parseInt(e.target.value) })}
+            />
+          </div>
+        </>
+      )}
+
       {/* System Prompt */}
       <div className="ndp-setting-item">
         <label>系统提示词</label>
         <textarea
           className="ndp-textarea"
           value={systemPrompt}
-          placeholder="你是一个可爱的桌面宠物助手..."
+          placeholder="在这里填写桌宠的人设（system prompt）"
           rows={4}
           onChange={(e) => api?.setAISettings({ systemPrompt: e.target.value })}
         />

@@ -19,6 +19,11 @@ export type BubbleSettings = {
   showOnChat: boolean // AI 回复时展示气泡
   autoHideDelay: number // 自动隐藏延迟（ms，0 表示仅手动关闭）
   clickPhrases: string[] // 点击桌宠的随机话术
+
+  // M3.5：上下文情况小球（可拖动，hover 查看占用）
+  contextOrbEnabled: boolean
+  contextOrbX: number // 0-100，从左侧起的百分比
+  contextOrbY: number // 0-100，从顶部起的百分比
 }
 
 export type TaskPanelSettings = {
@@ -29,6 +34,78 @@ export type TaskPanelSettings = {
 export type OrchestratorSettings = {
   plannerEnabled: boolean // 是否启用“对话→任务规划器（LLM Planner）”
   plannerMode: 'auto' | 'always' // auto=仅在检测到“想做事”时触发；always=每条消息都走 planner 再决定
+  toolCallingEnabled: boolean // 是否启用“工具系统”（LLM 可创建并执行工具任务）
+  toolCallingMode: 'auto' | 'native' | 'text' // auto=优先原生tools，失败降级文本协议；native=强制原生；text=强制文本协议
+
+  toolUseCustomAi: boolean // 是否为“工具/Agent”使用单独的 LLM API
+  toolAiApiKey: string
+  toolAiBaseUrl: string
+  toolAiModel: string
+  toolAiTemperature: number // 0.0 - 2.0
+  toolAiMaxTokens: number // 最大输出 token
+  toolAiTimeoutMs: number // 超时毫秒
+}
+
+export type ToolSettings = {
+  // å…¨å±€å·¥å…·å¼€å…³ï¼šå…³é—­åŽï¼Œæ‰€æœ‰å·¥å…·éƒ½ä¼šè¢«æ‹’ç»æ‰§è¡Œï¼ˆåŒ…æ‹¬ä»»åŠ¡æ­¥éª¤/agent.run å·¥å…·è°ƒç”¨ï¼‰
+  enabled: boolean
+  // åˆ†ç»„å¼€å…³ï¼škey ä¸º toolName çš„å‰ç¼€ï¼ˆå¦‚ browser/cli/file/llm/delayï¼‰
+  groups: Record<string, boolean>
+  // å•å·¥å…·å¼€å…³ï¼škey ä¸º toolNameï¼ˆå¦‚ browser.openï¼‰
+  tools: Record<string, boolean>
+}
+
+export type McpTransport = 'stdio'
+
+export type McpServerConfig = {
+  id: string // 唯一 ID（仅允许字母/数字/_/-）
+  enabled: boolean
+  label?: string
+  transport: McpTransport
+  command: string
+  args: string[]
+  cwd?: string
+  env?: Record<string, string>
+}
+
+export type McpSettings = {
+  enabled: boolean
+  servers: McpServerConfig[]
+}
+
+export type McpServerStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
+
+export type McpToolSummary = {
+  serverId: string
+  toolName: string // mcp.<serverId>.<toolName>
+  callName: string
+  name: string
+  title?: string
+  description?: string
+  inputSchema: Record<string, unknown>
+  outputSchema?: Record<string, unknown>
+}
+
+export type McpServerState = {
+  id: string
+  enabled: boolean
+  label?: string
+  transport: McpTransport
+  command: string
+  args: string[]
+  cwd?: string
+  status: McpServerStatus
+  pid?: number | null
+  lastError?: string
+  stderrTail?: string[]
+  tools: McpToolSummary[]
+  updatedAt: number
+}
+
+export type McpStateSnapshot = {
+  enabled: boolean
+  servers: McpServerState[]
+  updatedAt: number
 }
 
 export type WindowBounds = {
@@ -64,6 +141,22 @@ export type ChatUiSettings = {
   bubbleRadius: number
   backgroundImage: string // data URL (base64) or empty string
   backgroundImageOpacity: number // 0.0 - 1.0
+
+  // M3.5：上下文情况小球（可拖动，hover 查看占用）
+  contextOrbEnabled: boolean
+  contextOrbX: number // 0-100
+  contextOrbY: number // 0-100
+}
+
+export type ContextUsageSnapshot = {
+  usedTokens: number
+  maxContextTokens: number
+  outputReserveTokens?: number
+  systemPromptTokens?: number
+  addonTokens?: number
+  historyTokens?: number
+  trimmedCount?: number
+  updatedAt?: number
 }
 
 export type TtsSettings = {
@@ -83,9 +176,13 @@ export type AsrSettings = {
   enabled: boolean
   wsUrl: string // 例如 ws://127.0.0.1:8766/ws
   micDeviceId: string // 麦克风设备 ID（空字符串=系统默认）
+  captureBackend?: 'auto' | 'script' | 'worklet' // 采集链路：auto=优先 worklet；script=强制 ScriptProcessor；worklet=强制 AudioWorklet
   language: 'auto' | 'zn' | 'en' | 'yue' | 'ja' | 'ko' | 'nospeech'
   useItn: boolean
   autoSend: boolean // 识别完直接发送给 LLM，否则只填入输入框
+  mode: 'continuous' | 'hotkey' // 持续录音 / 按键录音（系统快捷键切换）
+  hotkey: string // Electron accelerator，例如 F8 / CommandOrControl+Alt+V
+  showSubtitle: boolean // 是否在桌宠窗口显示识别字幕（Live2D 左侧）
   vadChunkMs: number // 流式 VAD 输入分块（ms），越小越低延迟
   maxEndSilenceMs: number // 尾部静音判停（ms），过低易截断，过高停得慢
   minSpeechMs: number // 最短语音段（ms），过低易把噪声也识别
@@ -100,11 +197,19 @@ export type AsrSettings = {
 
 export type ChatRole = 'user' | 'assistant'
 
+// 一个消息气泡（turn 容器）内部的分块：用于在同一条消息内插入 ToolUse 等 UI
+export type ChatMessageBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; taskId: string }
+  | { type: 'status'; text: string }
+
 export type ChatMessageRecord = {
   id: string
   role: ChatRole
   content: string
   image?: string // data URL (base64)
+  taskId?: string // 关联任务：用于在聊天中渲染可折叠的 ToolUse 详情（不写入正文）
+  blocks?: ChatMessageBlock[] // turn 容器：按顺序渲染 text/tool_use/status 等块（不写入 LLM 上下文时只取 text）
   createdAt: number
   updatedAt?: number
 }
@@ -156,6 +261,8 @@ export type AppSettings = {
   bubble: BubbleSettings
   taskPanel: TaskPanelSettings
   orchestrator: OrchestratorSettings
+  tools: ToolSettings
+  mcp: McpSettings
   ai: AISettings
   chatProfile: ChatProfile
   chatUi: ChatUiSettings
@@ -492,6 +599,24 @@ export type TaskRecord = {
   steps: TaskStepRecord[]
   currentStepIndex: number
   toolsUsed: string[]
+  // Agent 在“对话正文”里应该展示的最终回复（不包含执行日志）
+  finalReply?: string
+  // Agent 运行中的逐步累积回复（用于“工具执行中”的实时显示）
+  draftReply?: string
+  // Live2D：由 LLM 输出的 [表情:...] / [动作:...] 标签提取出的动作指令（正文不显示该标签）
+  live2dExpression?: string
+  live2dMotion?: string
+  // 工具调用过程（用于聊天里可折叠展示）
+  toolRuns?: Array<{
+    id: string
+    toolName: string
+    status: 'running' | 'done' | 'error'
+    inputPreview?: string
+    outputPreview?: string
+    error?: string
+    startedAt: number
+    endedAt?: number
+  }>
   lastError?: string
 }
 

@@ -144,10 +144,13 @@ export class WindowManager {
     return win
   }
 
-  ensureChatWindow(): BrowserWindow {
+  ensureChatWindow(opts?: { show?: boolean; focus?: boolean }): BrowserWindow {
+    const show = opts?.show ?? true
+    const focus = opts?.focus ?? show
+
     if (this.chatWindow && !this.chatWindow.isDestroyed()) {
-      this.chatWindow.show()
-      this.chatWindow.focus()
+      if (show) this.chatWindow.show()
+      if (focus) this.chatWindow.focus()
       return this.chatWindow
     }
 
@@ -155,7 +158,7 @@ export class WindowManager {
     const win = new BrowserWindow({
       ...bounds,
       title: 'NeoDeskPet - Chat',
-      show: true,
+      show,
       frame: false,
       autoHideMenuBar: true,
       webPreferences: {
@@ -166,6 +169,8 @@ export class WindowManager {
     this.attachPersistHandlers(win, 'chat')
     this.loadWindow(win, 'chat')
     this.chatWindow = win
+
+    if (show && focus) win.focus()
 
     win.on('closed', () => {
       this.chatWindow = null

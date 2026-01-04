@@ -1,0 +1,71 @@
+.ndp-context-orb {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  cursor: grab;
+  pointer-events: auto;
+  z-index: 60;
+}
+
+.ndp-context-orb:active {
+  cursor: grabbing;
+}
+
+.ndp-context-orb-ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: 999px;
+  background: conic-gradient(rgba(34, 197, 94, 0.95) var(--ndp-context-pct, 0%), rgba(255, 255, 255, 0.18) 0);
+  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.28));
+}
+
+.ndp-context-orb-inner {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(20, 20, 24, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.ndp-context-orb-tooltip {
+  position: absolute;
+  top: -8px;
+  left: 22px;
+  transform: translateY(-100%);
+  width: max-content;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(20, 20, 24, 0.78);
+  color: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+  z-index: 61;
+  pointer-events: none;
+}
+
+.ndp-context-orb-tooltip-title {
+  font-size: 12px;
+  font-weight: 650;
+  opacity: 0.9;
+  margin-bottom: 6px;
+}
+
+.ndp-context-orb-tooltip-line {
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.ndp-context-orb-tooltip-strong {
+  font-weight: 750;
+  font-size: 18px;
+  line-height: 1.15;
+  margin-top: 2px;
+}
+

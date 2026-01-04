@@ -1,9 +1,30 @@
 import type { TtsSettings } from '../../electron/types'
+import { getApi } from '../neoDeskPetApi'
 
 type LoadedWeights = {
   baseUrl: string
   gpt: string
   sovits: string
+}
+
+function getOriginLabel(rawUrl: string): string {
+  const text = String(rawUrl ?? '').trim()
+  if (!text) return ''
+  try {
+    return new URL(text).origin
+  } catch {
+    return text
+  }
+}
+
+function formatTtsRequestError(baseUrl: string, message: string): string {
+  const origin = getOriginLabel(baseUrl)
+  const msg = String(message ?? '').trim()
+  const lower = msg.toLowerCase()
+  const isFetchFailed = lower === 'failed to fetch' || lower === 'fetch failed'
+  if (!msg) return origin ? `TTS 请求失败（${origin}）` : 'TTS 请求失败'
+  if (isFetchFailed) return origin ? `无法连接到 TTS 服务（${origin}）：${msg}` : `无法连接到 TTS 服务：${msg}`
+  return origin ? `TTS 请求失败（${origin}）：${msg}` : `TTS 请求失败：${msg}`
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -79,10 +100,43 @@ export class TtsPlayer {
   private streamDone = true
   private firstPlayFired = false
   private onFirstPlay: (() => void) | null = null
+  private onChunkStart: ((payload: { offsetSec: number; durationSec: number }) => void) | null = null
   private onEnded: (() => void) | null = null
   private timeDomainBuffer: Uint8Array<ArrayBuffer> | null = null
+  private playStartTime: number | null = null
+  private chunkStartTimers: number[] = []
+  private activeHttpStreamId: string | null = null
+  private streamUnsubscribers: Array<() => void> = []
 
   stop(): void {
+    // 先清掉定时器/IPC 监听，避免 stop() 后还有“分句推进”之类的回调冒出来
+    for (const id of this.chunkStartTimers) {
+      try {
+        window.clearTimeout(id)
+      } catch {
+        // ignore
+      }
+    }
+    this.chunkStartTimers = []
+
+    for (const unsub of this.streamUnsubscribers) {
+      try {
+        unsub()
+      } catch {
+        // ignore
+      }
+    }
+    this.streamUnsubscribers = []
+
+    const api = getApi()
+    if (this.activeHttpStreamId && api?.ttsHttpStreamCancel) {
+      const sid = this.activeHttpStreamId
+      this.activeHttpStreamId = null
+      void api.ttsHttpStreamCancel(sid).catch(() => undefined)
+    } else {
+      this.activeHttpStreamId = null
+    }
+
     if (this.abortController) {
       this.abortController.abort()
       this.abortController = null
@@ -99,8 +153,10 @@ export class TtsPlayer {
     this.activeSources = []
     this.nextPlayTime = 0
     this.firstPlayFired = false
+    this.playStartTime = null
     if (onEnded) onEnded()
     this.onFirstPlay = null
+    this.onChunkStart = null
     this.onEnded = null
   }
 
@@ -118,6 +174,13 @@ export class TtsPlayer {
   }
 
   private async httpGetJson(url: string): Promise<unknown> {
+    const api = getApi()
+    if (api?.ttsHttpGetJson) {
+      const res = await api.ttsHttpGetJson(url)
+      if (!res.ok) throw new Error(res.error || `HTTP ${res.status}`)
+      return res.json
+    }
+
     const res = await fetch(url, { cache: 'no-store' })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
@@ -159,7 +222,27 @@ export class TtsPlayer {
 
     const now = this.audioContext.currentTime
     if (this.nextPlayTime < now) this.nextPlayTime = now
-    src.start(this.nextPlayTime)
+
+    const startAt = this.nextPlayTime
+    if (this.playStartTime === null) this.playStartTime = startAt
+    src.start(startAt)
+
+    // 分句同步：按“音频块开始播放”推进 UI（不做强对齐，只保证顺序和大致节奏）
+    const onChunkStart = this.onChunkStart
+    if (onChunkStart && this.playStartTime !== null) {
+      const offsetSec = startAt - this.playStartTime
+      const delayMs = Math.max(0, (startAt - now) * 1000)
+      const timerId = window.setTimeout(() => {
+        try {
+          // stop() 后会把 onChunkStart 置空，这里二次检查避免“幽灵回调”
+          if (!this.onChunkStart) return
+          onChunkStart({ offsetSec, durationSec: audioBuffer.duration })
+        } catch {
+          // ignore
+        }
+      }, delayMs)
+      this.chunkStartTimers.push(timerId)
+    }
 
     if (!this.firstPlayFired) {
       this.firstPlayFired = true
@@ -174,6 +257,7 @@ export class TtsPlayer {
       this.activeSources = this.activeSources.filter((s) => s !== src)
       if (this.activeSources.length === 0) {
         this.nextPlayTime = 0
+        this.playStartTime = null
         if (this.streamDone && this.onEnded) {
           const onEnded = this.onEnded
           this.onEnded = null
@@ -203,7 +287,11 @@ export class TtsPlayer {
   async speak(
     text: string,
     settings: TtsSettings,
-    callbacks?: { onFirstPlay?: () => void; onEnded?: () => void },
+    callbacks?: {
+      onFirstPlay?: () => void
+      onChunkStart?: (payload: { offsetSec: number; durationSec: number }) => void
+      onEnded?: () => void
+    },
   ): Promise<void> {
     const trimmed = text.trim()
     if (!trimmed) return
@@ -213,6 +301,7 @@ export class TtsPlayer {
     this.streamDone = false
     this.firstPlayFired = false
     this.onFirstPlay = callbacks?.onFirstPlay ?? null
+    this.onChunkStart = callbacks?.onChunkStart ?? null
     this.onEnded = callbacks?.onEnded ?? null
 
     const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
@@ -232,8 +321,204 @@ export class TtsPlayer {
       prompt_text: settings.promptText.trim(),
       text_split_method: 'cut5',
       speed_factor: clampNumber(settings.speedFactor, 0.5, 2.0),
+      // GPT-SoVITS 的 fragment_interval 会在每个分段后追加静音（秒），用于实现“分句停顿”
+      ...(settings.segmented
+        ? { fragment_interval: Math.max(0.01, Math.min(60, clampNumber(settings.pauseMs, 0, 60000) / 1000)) }
+        : {}),
       streaming_mode: settings.streaming,
       media_type: 'wav',
+    }
+
+    // 通过主进程代理请求本地 TTS 服务，避免 renderer 直接 fetch 引发 CORS/预检导致的 Failed to fetch
+    const api = getApi()
+
+    // streaming_mode=true 时，优先走主进程流式转发，才能做到“边生成边播放”
+    if (
+      settings.streaming &&
+      api?.ttsHttpStreamStart &&
+      api?.ttsHttpStreamCancel &&
+      api?.onTtsHttpStreamChunk &&
+      api?.onTtsHttpStreamDone &&
+      api?.onTtsHttpStreamError
+    ) {
+      const ctx = await this.ensureAudioContext()
+
+      const queue: Uint8Array[] = []
+      let streamEnded = false
+      let streamError: string | null = null
+      let wake: (() => void) | null = null
+      const notify = () => {
+        if (!wake) return
+        const w = wake
+        wake = null
+        w()
+      }
+
+      const { streamId } = await api.ttsHttpStreamStart({
+        url: `${baseUrl}/tts`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+        timeoutMs: 180000,
+      })
+      this.activeHttpStreamId = streamId
+
+      const unsubChunk = api.onTtsHttpStreamChunk((payload) => {
+        if (payload.streamId !== streamId) return
+        queue.push(payload.chunk)
+        notify()
+      })
+      const unsubDone = api.onTtsHttpStreamDone((payload) => {
+        if (payload.streamId !== streamId) return
+        streamEnded = true
+        notify()
+      })
+      const unsubError = api.onTtsHttpStreamError((payload) => {
+        if (payload.streamId !== streamId) return
+        const msg =
+          payload.error ||
+          (typeof payload.status === 'number'
+            ? `HTTP ${payload.status}${payload.statusText ? `: ${payload.statusText}` : ''}`
+            : '') ||
+          'TTS stream error'
+        streamError = msg
+        streamEnded = true
+        notify()
+      })
+      this.streamUnsubscribers.push(unsubChunk, unsubDone, unsubError)
+
+      let headerReceived = false
+      let wavHeader: Uint8Array<ArrayBufferLike> | null = null
+      let audioDataBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
+      let chunkSize = 32000
+
+      try {
+        for (;;) {
+          if (this.abortController?.signal.aborted) break
+
+          if (queue.length === 0) {
+            if (streamEnded) break
+            await new Promise<void>((resolve) => {
+              wake = resolve
+            })
+            continue
+          }
+
+          const value = queue.shift()
+          if (!value) continue
+          audioDataBuffer = concatUint8(audioDataBuffer, value)
+
+          if (!headerReceived && audioDataBuffer.length >= 44) {
+            const maybeHeader = audioDataBuffer.slice(0, 44)
+            if (isWavHeader(maybeHeader)) {
+              wavHeader = maybeHeader
+              audioDataBuffer = audioDataBuffer.slice(44)
+              headerReceived = true
+              const byteRate = getWavByteRate(maybeHeader)
+              chunkSize = Math.max(4096, Math.floor(byteRate * 0.5))
+            }
+          }
+
+          while (headerReceived && wavHeader && audioDataBuffer.length >= chunkSize) {
+            const chunk = audioDataBuffer.slice(0, chunkSize)
+            audioDataBuffer = audioDataBuffer.slice(chunkSize)
+
+            const wavData = createWavFromChunk(wavHeader, chunk)
+            try {
+              const audioBuffer = await ctx.decodeAudioData(toArrayBuffer(wavData))
+              this.playDecodedBuffer(audioBuffer)
+            } catch {
+              // ignore chunk decode failures
+            }
+          }
+        }
+
+        this.streamDone = true
+
+        if (headerReceived && wavHeader && audioDataBuffer.length > 0) {
+          const wavData = createWavFromChunk(wavHeader, audioDataBuffer)
+          try {
+            const audioBuffer = await ctx.decodeAudioData(toArrayBuffer(wavData))
+            this.playDecodedBuffer(audioBuffer)
+          } catch {
+            // ignore
+          }
+        } else if (!headerReceived && audioDataBuffer.length > 0) {
+          // 兜底：如果没有识别到 wav header，就尝试把整包当成音频解码
+          try {
+            const audioBuffer = await ctx.decodeAudioData(toArrayBuffer(audioDataBuffer))
+            this.playDecodedBuffer(audioBuffer)
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!this.abortController?.signal.aborted && streamError) {
+          throw new Error(formatTtsRequestError(baseUrl, streamError))
+        }
+        return
+      } finally {
+        if (this.activeHttpStreamId === streamId) this.activeHttpStreamId = null
+        for (const unsub of this.streamUnsubscribers) {
+          try {
+            unsub()
+          } catch {
+            // ignore
+          }
+        }
+        this.streamUnsubscribers = []
+        void api.ttsHttpStreamCancel(streamId).catch(() => undefined)
+      }
+    }
+
+    if (api?.ttsHttpRequestArrayBuffer) {
+      const proxyRes = await api.ttsHttpRequestArrayBuffer({
+        url: `${baseUrl}/tts`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+        timeoutMs: 180000,
+      })
+
+      if (!proxyRes.ok) {
+        let msg = proxyRes.error || `HTTP ${proxyRes.status}`
+        if ((proxyRes.contentType || '').includes('application/json') && proxyRes.arrayBuffer.byteLength > 0) {
+          try {
+            const text = new TextDecoder('utf-8').decode(new Uint8Array(proxyRes.arrayBuffer))
+            const data = JSON.parse(text) as { message?: string }
+            if (data?.message) msg = data.message
+          } catch {
+            // ignore
+          }
+        }
+        throw new Error(formatTtsRequestError(baseUrl, msg))
+      }
+
+      const ctx = await this.ensureAudioContext()
+      const raw = new Uint8Array(proxyRes.arrayBuffer)
+      let decoded: AudioBuffer | null = null
+
+      // streaming_mode=true 时，返回的 wav header 可能没有正确的 data size；这里重新封装一次以提高兼容性
+      if (raw.length >= 44) {
+        const header = raw.slice(0, 44)
+        const body = raw.slice(44)
+        if (isWavHeader(header)) {
+          try {
+            const wavData = createWavFromChunk(header, body)
+            decoded = await ctx.decodeAudioData(toArrayBuffer(wavData))
+          } catch {
+            decoded = null
+          }
+        }
+      }
+
+      if (!decoded) {
+        decoded = await ctx.decodeAudioData(proxyRes.arrayBuffer.slice(0))
+      }
+
+      this.playDecodedBuffer(decoded)
+      this.streamDone = true
+      return
     }
 
     if (!settings.streaming) {
@@ -245,7 +530,7 @@ export class TtsPlayer {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error((data as { message?: string })?.message || `HTTP ${res.status}`)
+        throw new Error(formatTtsRequestError(baseUrl, (data as { message?: string })?.message || `HTTP ${res.status}`))
       }
       const ctx = await this.ensureAudioContext()
       const buf = await res.arrayBuffer()
@@ -263,9 +548,9 @@ export class TtsPlayer {
     })
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
-      throw new Error((data as { message?: string })?.message || `HTTP ${res.status}`)
+      throw new Error(formatTtsRequestError(baseUrl, (data as { message?: string })?.message || `HTTP ${res.status}`))
     }
-    if (!res.body) throw new Error('TTS 响应无数据流')
+    if (!res.body) throw new Error(formatTtsRequestError(baseUrl, 'TTS 响应无数据流（response.body 不存在）'))
 
     const ctx = await this.ensureAudioContext()
     const reader = res.body.getReader()
