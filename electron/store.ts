@@ -76,6 +76,7 @@ const defaultOrchestratorSettings: OrchestratorSettings = {
   toolAiTemperature: 0.2,
   toolAiMaxTokens: 900,
   toolAiTimeoutMs: 60000,
+  toolAgentMaxTurns: 8,
 }
 
 const defaultToolSettings: ToolSettings = {
@@ -145,6 +146,7 @@ const defaultChatUi: ChatUiSettings = {
 const defaultMemorySettings = {
   enabled: true,
   includeSharedOnRetrieve: true,
+  vectorDedupeThreshold: 0.9,
   autoExtractEnabled: false,
   autoExtractEveryEffectiveMessages: 20,
   autoExtractMaxEffectiveMessages: 60,
@@ -341,9 +343,22 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   return merged
 }
 
+function safeJsonDeserialize(raw: string): AppSettings {
+  const cleaned = String(raw ?? '').replace(/^\uFEFF/, '')
+  try {
+    return JSON.parse(cleaned) as AppSettings
+  } catch (err) {
+    // 防止配置文件损坏导致应用无法启动：回退为空对象，让 defaults 接管。
+    console.error('[Store] invalid JSON in neodeskpet-settings, fallback to defaults:', err)
+    return {} as AppSettings
+  }
+}
+
 const store = new Store<AppSettings>({
   name: 'neodeskpet-settings',
   defaults: defaultSettings,
+  clearInvalidConfig: true,
+  deserialize: safeJsonDeserialize,
   // Migration: handle old AI settings format
   migrations: {
     '0.2.0': (store) => {

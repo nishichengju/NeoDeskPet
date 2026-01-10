@@ -68,6 +68,7 @@ import type {
 } from './types'
 import { MemoryService } from './memoryService'
 import { McpManager } from './mcpManager'
+import { appendDebugLog, clearDebugLog, getDebugLogPath, initDebugLog, isDebugLogEnabled } from './debugLog'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -162,6 +163,18 @@ function broadcastMcpChanged(payload?: McpStateSnapshot) {
 }
 
 function registerIpc() {
+  // Debug log（用于定位“流式工具调用最后一刻回退/工具卡堆叠”等恶性问题）
+  ipcMain.handle('debug:getPath', () => getDebugLogPath())
+  ipcMain.handle('debug:clear', () => {
+    clearDebugLog()
+    return { ok: true, path: getDebugLogPath() }
+  })
+  ipcMain.on('debug:append', (_event, payload: unknown) => {
+    const p = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const event = typeof p.event === 'string' ? p.event : 'unknown'
+    appendDebugLog('renderer', event, p.data)
+  })
+
   ipcMain.handle('settings:get', () => getSettings())
   ipcMain.handle('settings:setAlwaysOnTop', (_event, value: boolean) => {
     windowManager.setAlwaysOnTop(value)
@@ -357,12 +370,14 @@ function registerIpc() {
       }
 
       let userContent = ''
+      let userMessageId = ''
       if (includeUser) {
         const idx = session.messages.findIndex((m) => m.id === message.id)
         for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
           const m = session.messages[i]
           if (m.role === 'user') {
             userContent = m.content
+            userMessageId = m.id
             break
           }
         }
@@ -374,14 +389,20 @@ function registerIpc() {
       const turnContent = parts.join('\n').trim()
       if (!turnContent) return session
 
-      memoryService?.ingestChatMessage({
-        personaId,
-        sessionId,
-        messageId: message.id,
-        role: message.role,
-        content: turnContent,
-        createdAt: message.createdAt,
-      })
+      const ingestMessageId = userMessageId ? `turn:${userMessageId}` : message.id
+      const settings = getSettings()
+      void (memoryService?.ingestChatMessage(
+        {
+          personaId,
+          sessionId,
+          messageId: ingestMessageId,
+          role: message.role,
+          content: turnContent,
+          createdAt: message.createdAt,
+        },
+        settings.memory,
+        settings.ai,
+      ) ?? Promise.resolve()).catch(() => {})
     } catch (_) {
       /* ignore */
     }
@@ -406,12 +427,14 @@ function registerIpc() {
       }
 
       let userContent = ''
+      let userMessageId = ''
       if (includeUser) {
         const idx = session.messages.findIndex((m) => m.id === msg.id)
         for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
           const m = session.messages[i]
           if (m.role === 'user') {
             userContent = m.content
+            userMessageId = m.id
             break
           }
         }
@@ -423,14 +446,20 @@ function registerIpc() {
       const turnContent = parts.join('\n').trim()
       if (!turnContent) return session
 
-      memoryService?.ingestChatMessage({
-        personaId,
-        sessionId,
-        messageId: msg.id,
-        role: msg.role,
-        content: turnContent,
-        createdAt: msg.createdAt,
-      })
+      const ingestMessageId = userMessageId ? `turn:${userMessageId}` : msg.id
+      const settings = getSettings()
+      void (memoryService?.ingestChatMessage(
+        {
+          personaId,
+          sessionId,
+          messageId: ingestMessageId,
+          role: msg.role,
+          content: turnContent,
+          createdAt: msg.createdAt,
+        },
+        settings.memory,
+        settings.ai,
+      ) ?? Promise.resolve()).catch(() => {})
     } catch (_) {
       /* ignore */
     }
@@ -455,12 +484,14 @@ function registerIpc() {
       }
 
       let userContent = ''
+      let userMessageId = ''
       if (includeUser) {
         const idx = session.messages.findIndex((m) => m.id === msg.id)
         for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
           const m = session.messages[i]
           if (m.role === 'user') {
             userContent = m.content
+            userMessageId = m.id
             break
           }
         }
@@ -472,14 +503,20 @@ function registerIpc() {
       const turnContent = parts.join('\n').trim()
       if (!turnContent) return session
 
-      memoryService?.ingestChatMessage({
-        personaId,
-        sessionId,
-        messageId: msg.id,
-        role: msg.role,
-        content: turnContent,
-        createdAt: msg.createdAt,
-      })
+      const ingestMessageId = userMessageId ? `turn:${userMessageId}` : msg.id
+      const settings = getSettings()
+      void (memoryService?.ingestChatMessage(
+        {
+          personaId,
+          sessionId,
+          messageId: ingestMessageId,
+          role: msg.role,
+          content: turnContent,
+          createdAt: msg.createdAt,
+        },
+        settings.memory,
+        settings.ai,
+      ) ?? Promise.resolve()).catch(() => {})
     } catch (_) {
       /* ignore */
     }
@@ -545,9 +582,10 @@ function registerIpc() {
     if (!memoryService) return { total: 0, items: [] }
     return memoryService.listMemory(args)
   })
-  ipcMain.handle('memory:upsertManual', (_event, args: MemoryUpsertManualArgs): MemoryRecord => {
+  ipcMain.handle('memory:upsertManual', async (_event, args: MemoryUpsertManualArgs): Promise<MemoryRecord> => {
     if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.upsertManualMemory(args)
+    const settings = getSettings()
+    return memoryService.upsertManualMemory(args, settings.memory, settings.ai)
   })
   ipcMain.handle('memory:update', (_event, args: MemoryUpdateArgs): MemoryRecord => {
     if (!memoryService) throw new Error('Memory service not ready')
@@ -1100,6 +1138,14 @@ app.on('will-quit', () => {
 })
 
 app.whenReady().then(() => {
+  initDebugLog({
+    userDataDir: app.getPath('userData'),
+    enabled: !app.isPackaged,
+  })
+  if (isDebugLogEnabled()) {
+    console.info(`[DebugLog] enabled, path=${getDebugLogPath()}`)
+  }
+
   try {
     memoryService = new MemoryService(app.getPath('userData'))
   } catch (err) {

@@ -164,7 +164,8 @@ function normalizeMessageBlocks(m: ChatMessageRecord): ChatMessageBlock[] {
       if (t === 'tool_use') {
         const taskId = typeof (b as { taskId?: unknown }).taskId === 'string' ? String((b as { taskId?: unknown }).taskId) : ''
         if (!taskId.trim()) return null
-        return { type: 'tool_use', taskId }
+        const runId = typeof (b as { runId?: unknown }).runId === 'string' ? String((b as { runId?: unknown }).runId) : undefined
+        return { type: 'tool_use', taskId, ...(runId?.trim() ? { runId } : {}) }
       }
       if (t === 'status') {
         const text = typeof (b as { text?: unknown }).text === 'string' ? String((b as { text?: unknown }).text) : ''
@@ -189,6 +190,89 @@ function joinTextBlocks(blocks: ChatMessageBlock[]): string {
     .map((b) => String((b as { text: string }).text ?? '').trim())
     .filter(Boolean)
   return parts.join('\n\n')
+}
+
+function normalizeInterleavedTextSegment(text: string): string {
+  return String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/^\n+/g, '')
+    .replace(/\n+$/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
+function computeAppendDelta(prev: string, next: string): string {
+  const p = String(prev ?? '')
+  const n = String(next ?? '')
+  if (!p) return n
+  if (n.startsWith(p)) return n.slice(p.length)
+  const pTrimEnd = p.replace(/\s+$/, '')
+  if (pTrimEnd && n.startsWith(pTrimEnd)) return n.slice(pTrimEnd.length)
+  return ''
+}
+
+function mergeLeadingPunctuationAcrossToolBoundary(segments: string[], runIds: string[]): string[] {
+  // 体验优化：流式时工具卡片可能“抢先”插入，导致少量尾缀（如“吗？”）被分到工具卡后面。
+  // 这里把“极短的疑问/语气/标点前缀”回贴到前一段文本，让阅读更自然。
+  const segs = Array.isArray(segments) ? [...segments] : ['']
+  const ids = Array.isArray(runIds) ? runIds : []
+  if (ids.length === 0 || segs.length < ids.length + 1) return segs
+
+  const stripLeft = (s: string) => String(s ?? '').replace(/^[ \t\r\n]+/g, '')
+  const endsWithPunc = (s: string) => /[，,。.!！?？…]\s*$/.test(String(s ?? ''))
+
+  // 允许搬运的“短前缀”：2字以内语气词 + 可选标点；或连续标点
+  const pickLead = (s: string): { lead: string; rest: string } => {
+    const trimmed = stripLeft(s)
+    if (!trimmed) return { lead: '', rest: '' }
+
+    const m1 = trimmed.match(/^([吗嘛呢吧呀啊]{1,2}[？?！!。.]?)/u)
+    if (m1?.[1]) {
+      const lead = m1[1]
+      return { lead, rest: trimmed.slice(lead.length) }
+    }
+
+    const m2 = trimmed.match(/^([，,。.!！?？…]{1,3})/u)
+    if (m2?.[1]) {
+      const lead = m2[1]
+      return { lead, rest: trimmed.slice(lead.length) }
+    }
+
+    return { lead: '', rest: trimmed }
+  }
+
+  for (let i = 0; i < ids.length; i += 1) {
+    const before = String(segs[i] ?? '')
+    const after = String(segs[i + 1] ?? '')
+    if (!before.trim()) continue
+    if (!after.trim()) continue
+    if (endsWithPunc(before)) continue
+
+    const { lead, rest } = pickLead(after)
+    if (!lead) continue
+    if (lead.length > 4) continue
+
+    segs[i] = before + lead
+    segs[i + 1] = rest
+  }
+
+  return segs
+}
+
+function pickRicherToolBlocks(a: ChatMessageBlock[], b: ChatMessageBlock[]): ChatMessageBlock[] {
+  const score = (blocks: ChatMessageBlock[]): number => {
+    let tool = 0
+    let run = 0
+    for (const x of blocks) {
+      if (x.type !== 'tool_use') continue
+      tool += 1
+      const rid = (x as { runId?: string }).runId
+      if (typeof rid === 'string' && rid.trim()) run += 1
+    }
+    return run * 1000 + tool * 10 + blocks.length
+  }
+  return score(b) > score(a) ? b : a
 }
 
 function buildToolResultSystemAddon(task: TaskRecord): string {
@@ -235,6 +319,21 @@ function trimTrailingCommaForSegment(text: string): string {
   const raw = String(text ?? '')
   const trimmed = raw.replace(/[，,]\s*$/u, '').trimEnd()
   return trimmed || raw
+}
+
+function isLikelyTtsSentenceBoundary(text: string): boolean {
+  const raw = String(text ?? '')
+  const trimmed = raw.replace(/\s+$/g, '')
+  if (!trimmed) return false
+  const last = trimmed[trimmed.length - 1]
+  return last === '\n' || /[。！？!?…]/u.test(last)
+}
+
+function countStableTtsSegments(text: string, segments: string[], forceAll: boolean): number {
+  if (segments.length === 0) return 0
+  if (forceAll) return segments.length
+  if (isLikelyTtsSentenceBoundary(text)) return segments.length
+  return Math.max(0, segments.length - 1)
 }
 
 type PlannerDecision =
@@ -419,26 +518,14 @@ function PetWindow() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const settingsRef = useRef<AppSettings | null>(null)
   const ttsPlayerRef = useRef<TtsPlayer | null>(null)
+  const bubbleTtsQueueRef = useRef<string[]>([])
+  const bubbleTtsRunningRef = useRef(false)
   const ttsQueueRef = useRef<
-    { utteranceId: string; segments: string[]; fullText?: string; finalized: boolean; started: boolean } | null
+    { utteranceId: string; segments: string[]; finalized: boolean; playIndex: number } | null
   >(null)
   const ttsQueueWakeRef = useRef<(() => void) | null>(null)
   const ttsQueueRunningRef = useRef(false)
   const ttsActiveUtteranceRef = useRef<string | null>(null)
-  const ttsSyncRef = useRef<
-    | {
-        utteranceId: string
-        segments: string[]
-        nextIndex: number
-        heardVoice: boolean
-        inSilence: boolean
-        silenceMs: number
-        lastTickAt: number
-        silenceThreshold: number
-        minSilenceMs: number
-      }
-    | null
-  >(null)
   const [mouthOpen, setMouthOpen] = useState(0)
   const [bubblePayload, setBubblePayload] = useState<
     | { text: string; startAt: number | null; mode: 'typing' | 'append'; autoHideDelay?: number }
@@ -1069,13 +1156,60 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
 
       const showBubble = s.bubble?.showOnChat ?? false
       const tts = s.tts ? { ...s.tts, segmented: false } : s.tts
+      const useQueue = Boolean(tts?.enabled) && !(s.tts?.segmented ?? false)
 
-      const startTypingNow = () => {
+      const startTypingNow = (text: string) => {
         if (!showBubble) return
-        setBubblePayload({ text: message, startAt: Date.now(), mode: 'typing' })
+        setBubblePayload({ text, startAt: Date.now(), mode: 'typing' })
       }
 
       if (tts?.enabled) {
+        if (useQueue) {
+          bubbleTtsQueueRef.current.push(message)
+          if (bubbleTtsQueueRef.current.length > 20) {
+            bubbleTtsQueueRef.current = bubbleTtsQueueRef.current.slice(-20)
+          }
+
+          if (bubbleTtsRunningRef.current) return
+          bubbleTtsRunningRef.current = true
+
+          void (async () => {
+            try {
+              while (bubbleTtsQueueRef.current.length > 0) {
+                const next = bubbleTtsQueueRef.current.shift()
+                const text = typeof next === 'string' ? next : ''
+                if (!text.trim()) continue
+
+                if (showBubble) setBubblePayload({ text, startAt: null, mode: 'typing' })
+                if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
+                const player = ttsPlayerRef.current
+                if (!player) continue
+
+                await new Promise<void>((resolve) => {
+                  void player
+                    .speak(text, tts, {
+                      onFirstPlay: () => {
+                        if (showBubble) setBubblePayload({ text, startAt: Date.now(), mode: 'typing' })
+                      },
+                      onEnded: () => {
+                        setMouthOpen(0)
+                        resolve()
+                      },
+                    })
+                    .catch(() => {
+                      // TTS 失败时也要能正常显示气泡
+                      startTypingNow(text)
+                      resolve()
+                    })
+                })
+              }
+            } finally {
+              bubbleTtsRunningRef.current = false
+            }
+          })()
+          return
+        }
+
         if (showBubble) setBubblePayload({ text: message, startAt: null, mode: 'typing' })
         if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
 
@@ -1088,18 +1222,20 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
           })
           .catch(() => {
             // TTS 失败时也要能正常显示气泡
-            startTypingNow()
+            startTypingNow(message)
           })
         return
       }
 
-      startTypingNow()
+      startTypingNow(message)
     })
   }, [api])
 
   // Listen for segmented TTS utterances from chat window
   useEffect(() => {
     if (!api) return
+
+    const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms))
 
     const wakeQueue = () => {
       if (!ttsQueueWakeRef.current) return
@@ -1108,81 +1244,111 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       w()
     }
 
-    const startIfReady = () => {
-      const current = ttsQueueRef.current
-      const s = settingsRef.current
-      if (!current || !s?.tts?.enabled || !s.tts.segmented) return
-      if (!current.finalized) return
-      if (ttsQueueRunningRef.current || current.started) return
-
-      const utteranceId = current.utteranceId
-      const segments = current.segments.map((x) => String(x ?? '').trim()).filter(Boolean)
-      if (segments.length === 0) {
-        api.reportTtsUtteranceFailed({ utteranceId, error: 'TTS 分句为空' })
-        ttsQueueRef.current = null
-        return
-      }
-      const textForTts = String(current.fullText ?? segments.join('')).trim()
-      if (!textForTts) {
-        api.reportTtsUtteranceFailed({ utteranceId, error: 'TTS 文本为空' })
-        ttsQueueRef.current = null
-        return
-      }
-
+    const runQueue = async () => {
+      if (ttsQueueRunningRef.current) return
       ttsQueueRunningRef.current = true
-      current.started = true
-      ttsActiveUtteranceRef.current = utteranceId
+      try {
+        while (ttsQueueRef.current) {
+          const current = ttsQueueRef.current
+          const s = settingsRef.current
+          if (!current || !s?.tts?.enabled || !s.tts.segmented) return
 
-      const showBubble = settingsRef.current?.bubble?.showOnChat ?? false
-      if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
-      const player = ttsPlayerRef.current
-      if (!player) return
-
-      const ttsSettings = { ...s.tts, streaming: true }
-      const pauseMs = Math.max(0, Math.min(60000, Math.floor(ttsSettings.pauseMs ?? 280)))
-
-      // 静音检测阈值：依赖 fragment_interval 插入的“明显静音”来判定下一句开始
-      ttsSyncRef.current = {
-        utteranceId,
-        segments,
-        nextIndex: 0,
-        heardVoice: false,
-        inSilence: false,
-        silenceMs: 0,
-        lastTickAt: Date.now(),
-        silenceThreshold: 0.006,
-        minSilenceMs: Math.max(120, Math.floor(pauseMs * 0.6)),
-      }
-
-      void player
-        .speak(textForTts, ttsSettings, {
-          onFirstPlay: () => {
-            // 真实“开口”由 analyser 检测触发；这里仅保证 bubble UI 可先进入“等待状态”
-            if (showBubble) setBubblePayload(null)
-          },
-          onEnded: () => {
-            if (ttsActiveUtteranceRef.current === utteranceId) {
-              ttsActiveUtteranceRef.current = null
+          if (current.playIndex >= current.segments.length) {
+            if (current.finalized) {
+              const utteranceId = current.utteranceId
+              if (ttsActiveUtteranceRef.current === utteranceId) ttsActiveUtteranceRef.current = null
+              ttsQueueRef.current = null
+              setMouthOpen(0)
+              setBubblePayload(null)
               api.reportTtsUtteranceEnded({ utteranceId })
+              wakeQueue()
+              return
             }
-            ttsSyncRef.current = null
-            ttsQueueRef.current = null
-            ttsQueueRunningRef.current = false
-            setMouthOpen(0)
-            setBubblePayload(null)
-            wakeQueue()
-          },
-        })
-        .catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err)
-          if (ttsActiveUtteranceRef.current === utteranceId) ttsActiveUtteranceRef.current = null
-          api.reportTtsUtteranceFailed({ utteranceId, error: msg })
-          ttsSyncRef.current = null
-          ttsQueueRef.current = null
-          ttsQueueRunningRef.current = false
-          setMouthOpen(0)
-          wakeQueue()
-        })
+
+            await new Promise<void>((resolve) => {
+              ttsQueueWakeRef.current = resolve
+            })
+            continue
+          }
+
+          const utteranceId = current.utteranceId
+          const segmentIndex = current.playIndex
+          current.playIndex = segmentIndex + 1
+          const raw = String(current.segments[segmentIndex] ?? '')
+          const segText = raw.trim()
+          if (!segText) continue
+
+          if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
+          const player = ttsPlayerRef.current
+          if (!player) continue
+
+          ttsActiveUtteranceRef.current = utteranceId
+
+          const showBubble = s.bubble?.showOnChat ?? false
+          const bubbleDelay = s.bubble?.autoHideDelay ?? 5000
+          const ttsSettings = { ...s.tts, streaming: true, segmented: false }
+          const pauseMs = Math.max(0, Math.min(60000, Math.floor(s.tts.pauseMs ?? 0)))
+
+          if (showBubble) setBubblePayload({ text: segText, startAt: null, mode: 'append', autoHideDelay: bubbleDelay })
+
+          let ended = false
+          let voiceReported = false
+
+          const reportVoiceStart = () => {
+            if (voiceReported) return
+            voiceReported = true
+            const spoken = trimTrailingCommaForSegment(segText)
+            try {
+              api.reportTtsSegmentStarted({ utteranceId, segmentIndex, text: spoken })
+            } catch {
+              /* ignore */
+            }
+            if (showBubble) {
+              setBubblePayload({ text: spoken, startAt: Date.now(), mode: 'append', autoHideDelay: bubbleDelay })
+            }
+          }
+
+          await new Promise<void>((resolve) => {
+            void player
+              .speak(segText, ttsSettings, {
+                onFirstPlay: () => {
+                  const startedAt = Date.now()
+                  const threshold = 0.006
+                  const tick = () => {
+                    if (ended) return
+                    if (ttsActiveUtteranceRef.current !== utteranceId) return
+                    const level = player.getLevel()
+                    if (level >= threshold || Date.now() - startedAt > 1200) {
+                      reportVoiceStart()
+                      return
+                    }
+                    window.requestAnimationFrame(tick)
+                  }
+                  window.requestAnimationFrame(tick)
+                },
+                onEnded: () => {
+                  ended = true
+                  resolve()
+                },
+              })
+              .catch((err) => {
+                ended = true
+                const msg = err instanceof Error ? err.message : String(err)
+                try {
+                  api.reportTtsUtteranceFailed({ utteranceId, error: msg })
+                } catch {
+                  /* ignore */
+                }
+                resolve()
+              })
+          })
+
+          reportVoiceStart()
+          if (pauseMs > 0) await sleep(pauseMs)
+        }
+      } finally {
+        ttsQueueRunningRef.current = false
+      }
     }
 
     const unsubEnqueue = api.onTtsEnqueue((payload) => {
@@ -1199,17 +1365,14 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
         if (prev && prev.utteranceId !== payload.utteranceId) {
           api.reportTtsUtteranceEnded({ utteranceId: prev.utteranceId })
         }
-        ttsSyncRef.current = null
         ttsActiveUtteranceRef.current = null
         ttsPlayerRef.current?.stop()
         setMouthOpen(0)
-        ttsQueueRunningRef.current = false
         ttsQueueRef.current = {
           utteranceId: payload.utteranceId,
           segments: [],
-          fullText: typeof payload.fullText === 'string' ? payload.fullText : undefined,
           finalized: false,
-          started: false,
+          playIndex: 0,
         }
         setBubblePayload(null)
         wakeQueue()
@@ -1218,12 +1381,9 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       const current = ttsQueueRef.current
       if (!current || current.utteranceId !== payload.utteranceId) return
 
-      if (typeof payload.fullText === 'string' && payload.fullText.trim()) {
-        current.fullText = payload.fullText
-      }
       if (payload.segments?.length) current.segments.push(...payload.segments)
       wakeQueue()
-      startIfReady()
+      void runQueue()
     })
 
     const unsubFinalize = api.onTtsFinalize((utteranceId) => {
@@ -1231,7 +1391,7 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       if (!current || current.utteranceId !== utteranceId) return
       current.finalized = true
       wakeQueue()
-      startIfReady()
+      void runQueue()
     })
 
     return () => {
@@ -1248,8 +1408,8 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
         api.reportTtsUtteranceEnded({ utteranceId })
       }
 
+      bubbleTtsQueueRef.current = []
       ttsActiveUtteranceRef.current = null
-      ttsSyncRef.current = null
       ttsQueueRef.current = null
       ttsQueueRunningRef.current = false
       ttsPlayerRef.current?.stop()
@@ -1277,60 +1437,6 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
         return Math.abs(next - prev) < 0.01 ? prev : next
       })
 
-      // 分句同步：按“每句开始播放”触发 UI（依赖 fragment_interval 插入的静音）
-      try {
-        const sync = ttsSyncRef.current
-        if (player && sync && ttsActiveUtteranceRef.current === sync.utteranceId) {
-          const now = Date.now()
-          const dt = Math.max(0, now - sync.lastTickAt)
-          sync.lastTickAt = now
-
-          const isSilent = level < sync.silenceThreshold
-
-          if (!sync.heardVoice) {
-            // 首句：等真正“开口”再触发（避免音频前置静音导致提前显示）
-              if (!isSilent && sync.segments.length > 0) {
-                sync.heardVoice = true
-                const idx = 0
-                const text = trimTrailingCommaForSegment(sync.segments[idx])
-                api?.reportTtsSegmentStarted({ utteranceId: sync.utteranceId, segmentIndex: idx, text })
-                const showBubble = settingsRef.current?.bubble?.showOnChat ?? false
-                if (showBubble) {
-                  const bubbleDelay = settingsRef.current?.bubble?.autoHideDelay ?? 5000
-                  setBubblePayload({ text, startAt: Date.now(), mode: 'append', autoHideDelay: bubbleDelay })
-              }
-              sync.nextIndex = 1
-              sync.inSilence = false
-              sync.silenceMs = 0
-            }
-          } else if (sync.nextIndex < sync.segments.length) {
-            if (isSilent) {
-              if (!sync.inSilence) {
-                sync.inSilence = true
-                sync.silenceMs = 0
-              }
-              sync.silenceMs += dt
-            } else {
-              if (sync.inSilence && sync.silenceMs >= sync.minSilenceMs) {
-                const idx = sync.nextIndex
-                const text = trimTrailingCommaForSegment(sync.segments[idx])
-                api?.reportTtsSegmentStarted({ utteranceId: sync.utteranceId, segmentIndex: idx, text })
-                const showBubble = settingsRef.current?.bubble?.showOnChat ?? false
-                if (showBubble) {
-                  const bubbleDelay = settingsRef.current?.bubble?.autoHideDelay ?? 5000
-                  setBubblePayload({ text, startAt: Date.now(), mode: 'append', autoHideDelay: bubbleDelay })
-                }
-                sync.nextIndex = idx + 1
-              }
-              sync.inSilence = false
-              sync.silenceMs = 0
-            }
-          }
-        }
-      } catch {
-        // ignore
-      }
-
       raf = window.requestAnimationFrame(tick)
     }
 
@@ -1344,7 +1450,19 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
   const taskPanelX = settings?.taskPanel?.positionX ?? 50
   const taskPanelY = settings?.taskPanel?.positionY ?? 78
   // 仅展示“进行中”任务：failed/done/canceled 不应长期挂在面板里（否则用户会误以为还在跑且无法终止）
-  const visibleTasks = tasks.filter((t) => t.status === 'pending' || t.status === 'running' || t.status === 'paused')
+  const visibleTasks = tasks.filter((t) => {
+    const active = t.status === 'pending' || t.status === 'running' || t.status === 'paused'
+    if (!active) return false
+
+    // chat 来源的 agent.run：在聊天里看到第一张工具卡后再让面板出现，避免“任务面板抢跑”造成割裂观感。
+    const isChatAgentRun = t.queue === 'chat' && typeof t.why === 'string' && t.why.includes('agent.run')
+    if (isChatAgentRun) {
+      const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
+      if (runs.length === 0) return false
+    }
+
+    return true
+  })
 
   // Get model URL directly from settings
   const modelJsonUrl = settings?.live2dModelFile ?? '/live2d/Haru/Haru.model3.json'
@@ -1576,7 +1694,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessageRecord[]>([])
   const [tasks, setTasks] = useState<TaskRecord[]>([])
-  const [toolUseOpenByTaskId, setToolUseOpenByTaskId] = useState<Record<string, boolean>>({})
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
@@ -1620,10 +1737,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const plannerPendingRef = useRef(false)
   const pendingAsrAutoSendRef = useRef<string[]>([])
   const asrAutoSendFlushingRef = useRef(false)
+  const tasksRef = useRef<TaskRecord[]>([])
   const taskOriginSessionRef = useRef<Map<string, string>>(new Map())
   const taskOriginMessageRef = useRef<Map<string, string>>(new Map())
   const taskOriginBlocksRef = useRef<Map<string, ChatMessageBlock[]>>(new Map())
-  const taskLastSyncedReplyRef = useRef<Map<string, string>>(new Map())
+  const taskToolUseSplitRef = useRef<Map<string, { runIds: string[]; segments: string[]; lastDisplay: string }>>(new Map())
+  const taskUiDebugSigRef = useRef<Map<string, string>>(new Map())
+  const taskBubbleTtsProgressRef = useRef<Map<string, { spokenFrozen: number; spokeFinal: boolean }>>(new Map())
   const taskFinalizeContextRef = useRef<
     Map<
       string,
@@ -1642,6 +1762,17 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const contextUsageSendTimerRef = useRef<number | null>(null)
   const [contextRetrieveAddon, setContextRetrieveAddon] = useState<string>('')
   const contextRetrieveAddonReqIdRef = useRef(0)
+
+  const debugLog = useCallback(
+    (event: string, data?: unknown) => {
+      try {
+        api?.appendDebugLog(event, data)
+      } catch {
+        // ignore
+      }
+    },
+    [api],
+  )
 
   const getActivePersonaId = useCallback((): string => {
     const pid = settingsRef.current?.activePersonaId
@@ -1895,6 +2026,10 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   }, [isLoading])
 
   useEffect(() => {
+    tasksRef.current = tasks
+  }, [tasks])
+
+  useEffect(() => {
     if (!api) return
 
     const unsubSegmentStarted = api.onTtsSegmentStarted((payload) => {
@@ -1949,7 +2084,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       unsubUtteranceFailed()
       unsubUtteranceEnded()
     }
-  }, [api, currentSessionId, runAutoExtractIfNeeded])
+  }, [api, currentSessionId, debugLog, runAutoExtractIfNeeded])
 
   // Load settings
   useEffect(() => {
@@ -2029,6 +2164,23 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const reloadCurrentSessionMessages = useCallback(async () => {
     if (!api || !currentSessionId) return
     if (isLoadingRef.current) return
+
+    // 有进行中的任务（尤其是 agent.run 流式）时，避免用持久化 session 覆盖 UI，防止“点一下文本就没了只剩工具标签”。
+    const hasActiveTask = (() => {
+      const ids: string[] = []
+      for (const [tid, sid] of taskOriginSessionRef.current.entries()) {
+        if (sid === currentSessionId) ids.push(tid)
+      }
+      if (ids.length === 0) return false
+      const list = tasksRef.current
+      return ids.some((tid) => {
+        const t = list.find((x) => x.id === tid) ?? null
+        const st = String(t?.status ?? '').trim()
+        return st === 'pending' || st === 'running' || st === 'paused'
+      })
+    })()
+    if (hasActiveTask) return
+
     const session = await api.getChatSession(currentSessionId).catch(() => null)
     if (!session) return
     setMessages(session.messages)
@@ -2172,7 +2324,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     async (enabled: boolean) => {
       if (!api) return
       try {
-        await api.setOrchestratorSettings({ plannerEnabled: enabled })
+        // “工具”总开关：关闭时强制同时关闭 ToolAgent，避免 UI 关闭后仍在后台走 agent.run
+        await api.setOrchestratorSettings(enabled ? { plannerEnabled: true } : { plannerEnabled: false, toolCallingEnabled: false })
         if (!enabled) plannerPendingRef.current = false
       } catch (err) {
         console.error(err)
@@ -2246,18 +2399,40 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         if (!sessionId || !messageId) continue
 
         const isFinal = t.status === 'done' || t.status === 'failed' || t.status === 'canceled'
-        if (!isFinal) continue
 
         const finalizeCtx = taskFinalizeContextRef.current.get(t.id) ?? null
         if (finalizeCtx) {
+          if (!isFinal) continue
           if (taskFinalizingRef.current.has(t.id)) continue
           taskFinalizingRef.current.add(t.id)
 
           void (async () => {
+            const loadFinalizeBaseBlocks = async (): Promise<ChatMessageBlock[]> => {
+              const fromRef = normalizeMessageBlocks({ blocks: taskOriginBlocksRef.current.get(t.id) ?? [] } as ChatMessageRecord)
+              try {
+                const session = await api.getChatSession(sessionId)
+                const msg = (session.messages ?? []).find((m) => m.id === messageId) ?? null
+                if (!msg) return fromRef
+                const fromStore = normalizeMessageBlocks(msg)
+                return pickRicherToolBlocks(fromRef, fromStore)
+              } catch {
+                return fromRef
+              }
+            }
+
+            const baseBlocks = await loadFinalizeBaseBlocks()
+            debugLog('chat:finalize.start', {
+              taskId: t.id,
+              sessionId,
+              messageId,
+              status: t.status,
+              baseBlocks: baseBlocks.map((b) =>
+                b.type === 'tool_use' ? { type: 'tool_use', taskId: b.taskId, runId: (b as { runId?: string }).runId } : { type: b.type },
+              ),
+            })
             const aiService = getAIService()
             if (!aiService) {
               const errText = '[错误] AI 服务未初始化'
-              const baseBlocks = taskOriginBlocksRef.current.get(t.id) ?? []
               const nextBlocks = baseBlocks.map((b) => ({ ...b }))
               const lastTextIdx = (() => {
                 for (let i = nextBlocks.length - 1; i >= 0; i -= 1) {
@@ -2278,7 +2453,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               return
             }
 
-            const baseBlocks = taskOriginBlocksRef.current.get(t.id) ?? []
             const buildBlocksWithFinal = (finalText: string): ChatMessageBlock[] => {
               const copied = Array.isArray(baseBlocks) ? baseBlocks.map((b) => ({ ...b })) : []
               const lastTextIdx = (() => {
@@ -2306,18 +2480,38 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             const enableChatStreaming = settingsRef.current?.ai?.enableChatStreaming ?? false
 
             if (enableChatStreaming) {
+              const ttsSegmented = (settingsRef.current?.tts?.enabled ?? false) && (settingsRef.current?.tts?.segmented ?? false)
+              const ttsUtteranceId = ttsSegmented ? `taskfinal-${messageId}-${Date.now().toString(36)}` : null
+              let ttsSentSegments = 0
+
               let acc = ''
               let pending = ''
               let raf = 0
               let lastExpression: string | undefined
               let lastMotion: string | undefined
 
+              const enqueueStableTts = (displayFinal: string, forceAll: boolean) => {
+                if (!ttsUtteranceId) return
+                const segs = splitTextIntoTtsSegments(displayFinal, { lang: 'zh', textSplitMethod: 'cut5' })
+                const stableCount = countStableTtsSegments(displayFinal, segs, forceAll)
+                if (stableCount <= ttsSentSegments) return
+                const nextSegs = segs.slice(ttsSentSegments, stableCount)
+                if (nextSegs.length === 0) return
+                api.enqueueTtsUtterance({
+                  utteranceId: ttsUtteranceId,
+                  mode: ttsSentSegments === 0 ? 'replace' : 'append',
+                  segments: nextSegs,
+                  fullText: undefined,
+                })
+                ttsSentSegments = stableCount
+              }
+
               const flush = () => {
                 if (!pending) return
                 acc += pending
                 pending = ''
 
-                const displayFinal = normalizeAssistantDisplayText(acc)
+                const displayFinal = normalizeInterleavedTextSegment(normalizeAssistantDisplayText(acc))
                 const nextBlocks = buildBlocksWithFinal(displayFinal)
                 const nextContent = joinTextBlocks(nextBlocks)
 
@@ -2326,6 +2520,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                     prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)),
                   )
                 }
+
+                enqueueStableTts(displayFinal, false)
 
                 const tags = extractLastLive2DTags(acc)
                 if (tags.expression && tags.expression !== lastExpression) {
@@ -2373,16 +2569,29 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                 return
               }
 
-              const finalText = normalizeAssistantDisplayText(acc, { trim: true })
+              const finalText = normalizeInterleavedTextSegment(normalizeAssistantDisplayText(acc, { trim: true }))
+              enqueueStableTts(finalText, true)
+              if (ttsUtteranceId) {
+                api.finalizeTtsUtterance(ttsUtteranceId)
+              }
               const finalBlocks = buildBlocksWithFinal(finalText)
               const finalContent = joinTextBlocks(finalBlocks)
               if (sessionId === currentSessionId) {
                 setMessages((prev) =>
                   prev.map((m) => (m.id === messageId ? { ...m, content: finalContent, blocks: finalBlocks } : m)),
                 )
-                if (finalText) api.sendBubbleMessage(finalText)
+                if (finalText && !ttsUtteranceId) api.sendBubbleMessage(finalText)
               }
 
+              debugLog('chat:finalize.done', {
+                taskId: t.id,
+                sessionId,
+                messageId,
+                finalLen: finalText.length,
+                finalBlocks: finalBlocks.map((b) =>
+                  b.type === 'tool_use' ? { type: 'tool_use', taskId: b.taskId, runId: (b as { runId?: string }).runId } : { type: b.type },
+                ),
+              })
               await api.updateChatMessageRecord(sessionId, messageId, { content: finalContent, blocks: finalBlocks }).catch(() => undefined)
               void runAutoExtractIfNeeded(sessionId)
               return
@@ -2425,56 +2634,159 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               taskOriginSessionRef.current.delete(t.id)
               taskOriginMessageRef.current.delete(t.id)
               taskOriginBlocksRef.current.delete(t.id)
-              taskLastSyncedReplyRef.current.delete(t.id)
+              taskToolUseSplitRef.current.delete(t.id)
             })
 
           continue
         }
 
         // 兼容旧链路（agent.run 等）：直接使用任务 finalReply/draftReply 回填
-        const finalRaw = String((t.finalReply ?? t.draftReply ?? t.lastError) ?? '').trim()
-        const last = taskLastSyncedReplyRef.current.get(t.id) ?? ''
-        if (finalRaw && last !== finalRaw) {
-          taskLastSyncedReplyRef.current.set(t.id, finalRaw)
-          const { displayText, expression, motion } = extractLive2DTags(finalRaw)
+        const rawText = String((isFinal ? (t.finalReply ?? t.draftReply ?? t.lastError) : (t.draftReply ?? t.lastError ?? t.finalReply)) ?? '')
+        const { displayText: displayTextRaw, expression, motion } = extractLive2DTags(rawText)
+        const displayText = normalizeInterleavedTextSegment(displayTextRaw)
 
-          const baseBlocks = taskOriginBlocksRef.current.get(t.id) ?? []
-          const nextBlocks: ChatMessageBlock[] = (() => {
-            const copied = Array.isArray(baseBlocks) ? baseBlocks.map((b) => ({ ...b })) : []
-            const lastTextIdx = (() => {
-              for (let i = copied.length - 1; i >= 0; i -= 1) {
-                if (copied[i].type === 'text') return i
-              }
-              return -1
-            })()
-            if (lastTextIdx >= 0) copied[lastTextIdx] = { type: 'text', text: displayText }
-            else copied.push({ type: 'text', text: displayText })
-            return copied
-          })()
+        const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
+        const runIdsNow = runs.map((r) => String(r.id ?? '').trim()).filter(Boolean)
 
-          const nextContent = joinTextBlocks(nextBlocks)
+        let split = taskToolUseSplitRef.current.get(t.id) ?? { runIds: [], segments: [''], lastDisplay: '' }
 
-          if (sessionId === currentSessionId) {
-            setMessages((prev) =>
-              prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)),
-            )
+        const knownIdsNow = new Set(runIdsNow)
+        const hasOrphan = split.runIds.some((id) => !knownIdsNow.has(id)) || split.segments.length !== split.runIds.length + 1
+        if (hasOrphan) {
+          split = { runIds: [], segments: [''], lastDisplay: '' }
+          taskBubbleTtsProgressRef.current.delete(t.id)
+        } else {
+          split = { runIds: [...split.runIds], segments: [...split.segments], lastDisplay: String(split.lastDisplay ?? '') }
+        }
+
+        // 工具卡片不延迟：一旦发现新 toolRun，就立即插入到 turn 的 blocks 里（否则会出现“最后一刻工具卡才冒出来”的割裂感）。
+        const prevRunIds = split.runIds
+        const isPrefix = prevRunIds.every((id, i) => runIdsNow[i] === id)
+        if (!isPrefix) {
+          // 极少数情况：runId 顺序变化或被重置（例如任务重跑/存档异常），此时重置分块边界。
+          split = {
+            runIds: [...runIdsNow],
+            segments: new Array(runIdsNow.length + 1).fill(''),
+            lastDisplay: split.lastDisplay,
+          }
+          taskBubbleTtsProgressRef.current.delete(t.id)
+        } else if (runIdsNow.length > prevRunIds.length) {
+          for (let i = prevRunIds.length; i < runIdsNow.length; i += 1) {
+            split.runIds.push(runIdsNow[i])
+            // 冻结当前文本段，新增一个“工具后的新段落”
+            if (split.segments.length < split.runIds.length) split.segments.push('')
+            split.segments.push('')
+          }
+        }
+
+        {
+          const frozenPrefix = split.segments.slice(0, Math.max(0, split.segments.length - 1)).join('')
+          const tail = frozenPrefix && displayText.startsWith(frozenPrefix) ? displayText.slice(frozenPrefix.length) : displayText
+          const lastIdx = Math.max(0, split.segments.length - 1)
+          const prevTail = String(split.segments[lastIdx] ?? '')
+          if (tail.startsWith(prevTail)) split.segments[lastIdx] = tail
+          else if (!prevTail || computeAppendDelta(prevTail, tail)) split.segments[lastIdx] = tail
+          else split.segments[lastIdx] = tail
+        }
+        split.lastDisplay = displayText
+
+        const hasAnyText = displayText.trim().length > 0
+        const segsForBlocks = mergeLeadingPunctuationAcrossToolBoundary(split.segments, split.runIds)
+        const nextBlocks: ChatMessageBlock[] = (() => {
+          const blocks: ChatMessageBlock[] = []
+
+          if (!hasAnyText && split.runIds.length > 0 && !isFinal) {
+            blocks.push({ type: 'status', text: '正在调用工具…' })
+          }
+
+          for (let i = 0; i < split.runIds.length + 1; i += 1) {
+            const seg = String(segsForBlocks[i] ?? '')
+            const normalizedSeg = normalizeInterleavedTextSegment(seg)
+            if (normalizedSeg.trim().length > 0) blocks.push({ type: 'text', text: normalizedSeg })
+            if (i < split.runIds.length) blocks.push({ type: 'tool_use', taskId: t.id, runId: split.runIds[i] })
+          }
+          if (blocks.length === 0) blocks.push({ type: 'text', text: '' })
+          return blocks
+        })()
+
+        const nextContent = joinTextBlocks(nextBlocks)
+        taskOriginBlocksRef.current.set(t.id, nextBlocks)
+        taskToolUseSplitRef.current.set(t.id, split)
+
+        {
+          const segLens = split.segments.map((s) => String(s ?? '').length).join(',')
+          const sig = `${isFinal ? '1' : '0'}|${t.status}|${split.runIds.join(',')}|${segLens}|${displayText.length}|${nextBlocks
+            .map((b) => (b.type === 'tool_use' ? `u:${String((b as { runId?: string }).runId ?? '')}` : b.type))
+            .join(',')}`
+          const prevSig = taskUiDebugSigRef.current.get(t.id) ?? ''
+          if (sig !== prevSig) {
+            taskUiDebugSigRef.current.set(t.id, sig)
+            debugLog('chat:task.blocks', {
+              taskId: t.id,
+              status: t.status,
+              isFinal,
+              draftLen: displayText.length,
+              runIds: split.runIds,
+              segmentsLen: split.segments.map((s) => String(s ?? '').length),
+              blocks: nextBlocks.slice(0, 40).map((b) =>
+                b.type === 'tool_use'
+                  ? { type: 'tool_use', taskId: b.taskId, runId: (b as { runId?: string }).runId }
+                  : { type: b.type },
+              ),
+            })
+          }
+        }
+
+        if (sessionId === currentSessionId) {
+          setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)))
+
+          const tts = settingsRef.current?.tts
+          const bubbleTtsEnabled = Boolean(tts?.enabled) && !(tts?.segmented ?? false)
+          if (bubbleTtsEnabled) {
+            const prev = taskBubbleTtsProgressRef.current.get(t.id) ?? { spokenFrozen: 0, spokeFinal: false }
+            const nextProg = { ...prev }
+
+            // 1) runId 增加时，前一段文本会被冻结；此时立刻播报该段（前置话术/工具间话术）
+            const frozenCount = split.runIds.length
+            for (let i = nextProg.spokenFrozen; i < frozenCount; i += 1) {
+              const seg = normalizeInterleavedTextSegment(String(segsForBlocks[i] ?? ''))
+              if (seg.trim()) api.sendBubbleMessage(seg)
+            }
+            nextProg.spokenFrozen = Math.max(nextProg.spokenFrozen, frozenCount)
+
+            // 2) 任务结束时，只播报“最后一段”（工具后的最终回复），避免把前置话术重复念一遍
+            if (isFinal && !nextProg.spokeFinal) {
+              const lastSeg = normalizeInterleavedTextSegment(String(segsForBlocks[frozenCount] ?? ''))
+              if (lastSeg.trim()) api.sendBubbleMessage(lastSeg)
+              nextProg.spokeFinal = true
+            }
+
+            taskBubbleTtsProgressRef.current.set(t.id, nextProg)
+          } else if (isFinal) {
+            // 未开启普通 TTS（或启用分句模式），保持原行为：仅在最终时把完整自然语言发给气泡
             if (displayText) api.sendBubbleMessage(displayText)
+          }
+
+          if (isFinal) {
             if (expression) api.triggerExpression(expression)
             if (motion) api.triggerMotion(motion, 0)
           }
-
-          api.updateChatMessageRecord(sessionId, messageId, { content: nextContent, blocks: nextBlocks }).catch(() => undefined)
         }
 
-        taskOriginSessionRef.current.delete(t.id)
-        taskOriginMessageRef.current.delete(t.id)
-        taskOriginBlocksRef.current.delete(t.id)
-        taskLastSyncedReplyRef.current.delete(t.id)
+        // 只在任务结束时落盘，避免频繁写入导致记忆/索引重复摄入
+        if (isFinal) {
+          api.updateChatMessageRecord(sessionId, messageId, { content: nextContent, blocks: nextBlocks }).catch(() => undefined)
+          taskOriginSessionRef.current.delete(t.id)
+          taskOriginMessageRef.current.delete(t.id)
+          taskOriginBlocksRef.current.delete(t.id)
+          taskToolUseSplitRef.current.delete(t.id)
+          taskBubbleTtsProgressRef.current.delete(t.id)
+        }
       }
     })
 
     return () => off()
-  }, [api, currentSessionId, runAutoExtractIfNeeded])
+  }, [api, currentSessionId, debugLog, runAutoExtractIfNeeded])
 
   const closeOverlays = useCallback(() => {
     setContextMenu(null)
@@ -2616,6 +2928,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           limit: 12,
           maxChars: 3200,
           includeShared,
+          reinforce: false,
         })
         .then((res) => {
           if (contextRetrieveAddonReqIdRef.current !== nowId) return
@@ -2957,6 +3270,105 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const plannerEnabledNow = orch?.plannerEnabled ?? false
       const plannerModeNow = orch?.plannerMode ?? 'auto'
       const toolCallingEnabledNow = orch?.toolCallingEnabled ?? false
+      const toolCallingModeNow = orch?.toolCallingMode ?? 'auto'
+
+      // VCP 全流式工具对话：开启工具系统时，统一走 agent.run 任务，避免“先非流式（planner）再流式（finalize）”的割裂。
+      // 注意：UI 的“工具”总开关是 plannerEnabled；关闭后必须确保任何 Planner/Agent/执行器都不会使用工具。
+      const shouldRunToolAgent = plannerEnabledNow && toolCallingEnabledNow && (text ?? '').trim().length > 0
+      if (shouldRunToolAgent) {
+        try {
+          const toPlainText = (content: unknown): string => {
+            if (typeof content === 'string') return content
+            if (Array.isArray(content)) {
+              // OpenAI vision parts: [{type:'text',text:'...'} , {type:'image_url',...}]
+              const parts = content as Array<Record<string, unknown>>
+              return parts
+                .map((p) => (p?.type === 'text' && typeof p.text === 'string' ? p.text : ''))
+                .filter(Boolean)
+                .join('\n')
+            }
+            return ''
+          }
+
+          const request = (text ?? '').trim()
+          // ToolAgent 也要注入“召回记忆”，否则用户会看到“尚无召回记录/完全不召回”的错觉。
+          // 注意：召回开关取自全局 memory.enabled + 当前 persona.retrieveEnabled。
+          let memoryAddon = ''
+          setLastRetrieveDebug(null)
+          try {
+            const memEnabled = settingsRef.current?.memory?.enabled ?? true
+            if (!memEnabled || !retrieveEnabled) throw new Error('recall disabled')
+            const queryText = request
+            if (queryText.length > 0) {
+              const personaId = getActivePersonaId()
+              const res = await api.retrieveMemory({
+                personaId,
+                query: queryText,
+                limit: 12,
+                maxChars: 3200,
+                includeShared: settingsRef.current?.memory?.includeSharedOnRetrieve ?? true,
+              })
+              memoryAddon = res.addon?.trim() ?? ''
+              setLastRetrieveDebug(res.debug ?? null)
+            }
+          } catch {
+            memoryAddon = ''
+            setLastRetrieveDebug(null)
+          }
+
+          const history = sliceTail(chatHistory, 12)
+            .slice(0, -1)
+            .map((m) => ({ role: m.role, content: toPlainText(m.content).trim() }))
+            .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.length > 0)
+
+          const title = request.length > 40 ? `${request.slice(0, 40)}…` : request
+
+          const created = await api.createTask({
+            queue: 'chat',
+            title: title || '对话',
+            why: '对话工具代理（agent.run）',
+            steps: [
+              {
+                title: '对话/工具',
+                tool: 'agent.run',
+                input: JSON.stringify({ request: request || '[图片]', mode: toolCallingModeNow, history, context: memoryAddon }),
+              },
+            ],
+          })
+
+          taskOriginSessionRef.current.set(created.id, currentSessionId)
+          taskToolUseSplitRef.current.set(created.id, { runIds: [], segments: [''], lastDisplay: '' })
+
+          const assistantId = newMessageId()
+          // 先用轻量状态占位，避免“空消息/无反馈”；真正的文本与工具卡片由任务流式进度增量驱动更新。
+          const blocks: ChatMessageBlock[] = [{ type: 'status', text: '思考中…' }]
+          const assistantMessage: ChatMessageRecord = {
+            id: assistantId,
+            role: 'assistant',
+            content: joinTextBlocks(blocks),
+            blocks,
+            taskId: created.id,
+            createdAt: Date.now(),
+          }
+
+          taskOriginMessageRef.current.set(created.id, assistantId)
+          taskOriginBlocksRef.current.set(created.id, blocks)
+          debugLog('chat:agentRun.created', {
+            sessionId: currentSessionId,
+            taskId: created.id,
+            messageId: assistantId,
+            blocks,
+          })
+
+          setMessages((prev) => [...prev, assistantMessage])
+          await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
+          return
+        } catch (err) {
+          console.error('[ToolAgent] failed:', err)
+          // 失败时回退到原先的 planner/普通聊天链路
+        }
+      }
+
       const shouldTryPlanner =
         plannerEnabledNow &&
         toolCallingEnabledNow &&
@@ -3045,7 +3457,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               const created = await api.createTask({ ...decision.task, queue })
 
               taskOriginSessionRef.current.set(created.id, currentSessionId)
-              taskLastSyncedReplyRef.current.delete(created.id)
 
               plannerPendingRef.current = false
 
@@ -3072,7 +3483,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
               taskOriginMessageRef.current.set(created.id, assistantId)
               taskOriginBlocksRef.current.set(created.id, blocks)
-              taskLastSyncedReplyRef.current.set(created.id, assistantMessage.content)
 
               setMessages((prev) => [...prev, assistantMessage])
               await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
@@ -3430,12 +3840,14 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     api,
     canUseVision,
     currentSessionId,
+    debugLog,
     getActivePersonaId,
     input,
     messages,
     newMessageId,
     pendingImage,
     refreshSessions,
+    retrieveEnabled,
     interrupt,
     runAutoExtractIfNeeded,
     trimChatHistoryToMaxContext,
@@ -3973,37 +4385,140 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           setTtsRevealedSegments((prev) => ({ ...prev, [utteranceId]: 0 }))
 
           try {
+            const assistantCreatedAt = Date.now()
+            let created = false
+            let acc = ''
+            let pending = ''
+            let raf = 0
+            let lastExpression: string | undefined
+            let lastMotion: string | undefined
+            let sentSegments = 0
+
+            const ensureMessageCreated = (content: string) => {
+              if (created) return
+              created = true
+              const assistantMessage: ChatMessageRecord = {
+                id: utteranceId,
+                role: 'assistant',
+                content,
+                createdAt: assistantCreatedAt,
+              }
+              setMessages((prev) => [...prev, assistantMessage])
+              api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
+              setTtsSegmentedMessageFlags((prev) => ({ ...prev, [utteranceId]: true }))
+              ttsUtteranceMetaRef.current[utteranceId] = {
+                sessionId: currentSessionId,
+                createdAt: assistantCreatedAt,
+                messageId: utteranceId,
+                displayedSegments: 0,
+                fallbackContent: content,
+              }
+            }
+
+            const enqueueStableSegments = (displayText: string, forceAll: boolean) => {
+              const display = normalizeAssistantDisplayText(displayText)
+              const segs = splitTextIntoTtsSegments(display, { lang: 'zh', textSplitMethod: 'cut5' })
+              const stableCount = countStableTtsSegments(display, segs, forceAll)
+              if (stableCount <= sentSegments) {
+                if (created) {
+                  setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: display } : m)))
+                  ttsUtteranceMetaRef.current[utteranceId].fallbackContent = display
+                }
+                return
+              }
+
+              const nextSegs = segs.slice(sentSegments, stableCount)
+              if (nextSegs.length === 0) return
+
+              ensureMessageCreated(display)
+              setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: display } : m)))
+              ttsUtteranceMetaRef.current[utteranceId].fallbackContent = display
+
+              api.enqueueTtsUtterance({
+                utteranceId,
+                mode: sentSegments === 0 ? 'replace' : 'append',
+                segments: nextSegs,
+                fullText: undefined,
+              })
+              sentSegments = stableCount
+            }
+
+            const flush = () => {
+              if (!pending) return
+              acc += pending
+              pending = ''
+
+              const display = normalizeAssistantDisplayText(acc)
+
+              const tags = extractLastLive2DTags(acc)
+              if (tags.expression && tags.expression !== lastExpression) {
+                lastExpression = tags.expression
+                api.triggerExpression(tags.expression)
+              }
+              if (tags.motion && tags.motion !== lastMotion) {
+                lastMotion = tags.motion
+                api.triggerMotion(tags.motion, 0)
+              }
+
+              enqueueStableSegments(display, false)
+            }
+
+            const scheduleFlush = () => {
+              if (raf) return
+              raf = window.requestAnimationFrame(() => {
+                raf = 0
+                flush()
+              })
+            }
+
             const response = enableChatStreaming
-              ? await (async () => {
-                  let acc = ''
-                  const res = await aiService.chatStream(chatHistory, {
-                    signal: abort.signal,
-                    systemAddon,
-                    onDelta: (delta) => {
-                      acc += delta
-                    },
-                  })
-                  if (!res.error) {
-                    const merged = res.content?.trim().length ? res.content : acc
-                    return { ...res, content: merged }
-                  }
-                  return res
-                })()
+              ? await aiService.chatStream(chatHistory, {
+                  signal: abort.signal,
+                  systemAddon,
+                  onDelta: (delta) => {
+                    pending += delta
+                    scheduleFlush()
+                  },
+                })
               : await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
+
+            if (raf) {
+              window.cancelAnimationFrame(raf)
+              raf = 0
+            }
+            flush()
 
             if (response.error) {
               if (response.error === ABORTED_ERROR) {
+                try {
+                  api.stopTtsAll()
+                } catch {
+                  /* ignore */
+                }
                 setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
                 setTtsRevealedSegments((prev) => {
                   const next = { ...prev }
                   delete next[utteranceId]
                   return next
                 })
+                // aborted：保留已生成的部分（若已创建 message），但不再走分句控制
+                if (created) {
+                  setTtsSegmentedMessageFlags((prev) => {
+                    const next = { ...prev }
+                    delete next[utteranceId]
+                    return next
+                  })
+                }
                 return
               }
               const errUi = formatAiErrorForUser(response.error)
               setError(errUi.message)
               if (errUi.shouldAlert) window.alert(errUi.message)
+              try {
+                api.stopTtsAll()
+              } catch {
+                /* ignore */
+              }
               setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
               setTtsRevealedSegments((prev) => {
                 const next = { ...prev }
@@ -4021,29 +4536,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               return
             }
 
-            const content = normalizeAssistantDisplayText(response.content, { trim: true })
-            const assistantCreatedAt = Date.now()
-
-            const assistantMessage: ChatMessageRecord = {
-              id: utteranceId,
-              role: 'assistant',
-              content,
-              createdAt: assistantCreatedAt,
-            }
-            setMessages((prev) => [...prev, assistantMessage])
-            await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-            setTtsSegmentedMessageFlags((prev) => ({ ...prev, [utteranceId]: true }))
-
-            const segs = splitTextIntoTtsSegments(content, { lang: 'zh', textSplitMethod: 'cut5' })
-            ttsUtteranceMetaRef.current[utteranceId] = {
-              sessionId: currentSessionId,
-              createdAt: assistantCreatedAt,
-              messageId: utteranceId,
-              displayedSegments: 0,
-              fallbackContent: content,
+            const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
+            if (!created) {
+              ensureMessageCreated(finalContent)
+            } else {
+              setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: finalContent } : m)))
+              api.updateChatMessage(currentSessionId, utteranceId, finalContent).catch(() => undefined)
+              ttsUtteranceMetaRef.current[utteranceId].fallbackContent = finalContent
             }
 
-            api.enqueueTtsUtterance({ utteranceId, mode: 'replace', segments: segs.length ? segs : [content], fullText: content })
+            enqueueStableSegments(finalContent, true)
             api.finalizeTtsUtterance(utteranceId)
 
             if (response.expression) api.triggerExpression(response.expression)
@@ -4464,94 +4966,89 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           const ttsSegmentedUi = (settings?.tts?.enabled ?? false) && (settings?.tts?.segmented ?? false)
           const isSegmentedAssistant = !isUser && ttsSegmentedUi && !!ttsSegmentedMessageFlags[m.id]
 
-          const renderToolUseNode = (taskId: string): React.ReactNode => {
+          const renderToolUseNode = (taskId: string, runId?: string): React.ReactNode => {
             const t = tasks.find((x) => x.id === taskId) ?? null
             if (!t) return null
             const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
             const steps = Array.isArray(t.steps) ? t.steps : []
 
-            const statusForStep = (s: TaskStepRecord | undefined): string => {
-              const st = String(s?.status ?? '').trim()
-              if (st === 'running') return 'running'
-              if (st === 'done') return 'done'
-              if (st === 'failed') return 'error'
-              if (st === 'skipped') return 'disconnected'
-              return 'pending'
+            const renderRun = (r: (typeof runs)[number], idx: number): React.ReactNode => {
+              const progress = runs.length > 1 ? `${idx + 1}/${runs.length}` : ''
+              const pillStatus = r.status === 'error' ? 'failed' : r.status
+              return (
+                <details key={r.id} className="ndp-tooluse">
+                  <summary className="ndp-tooluse-summary">
+                    <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
+                      DeskPet · ToolUse: {r.toolName}
+                      {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
+                    </span>
+                  </summary>
+                  <div className="ndp-tooluse-body">
+                    <div className="ndp-tooluse-run">
+                      <div className="ndp-tooluse-run-title">
+                        <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${r.status}`}>{r.status}</span>
+                        <span className="ndp-tooluse-run-name">{r.toolName}</span>
+                      </div>
+                      {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
+                      {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
+                      {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
+                    </div>
+                  </div>
+                </details>
+              )
             }
 
-            const pickActiveRun = (): (typeof runs)[number] => {
-              for (let i = runs.length - 1; i >= 0; i -= 1) {
-                if (runs[i].status === 'running') return runs[i]
-              }
-              return runs[runs.length - 1]
+            const renderStep = (s: TaskStepRecord, idx: number): React.ReactNode => {
+              const toolName = String(s.tool ?? '').trim()
+              const name = toolName || s.title
+              const input = String(s.input ?? '').trim()
+              const output = String(s.output ?? '').trim()
+              const error = String(s.error ?? '').trim()
+              const statusText = String(s.status ?? '').trim() || 'pending'
+              const statusKey = statusText === 'failed' ? 'error' : statusText === 'skipped' ? 'disconnected' : statusText
+              const progress = steps.length > 1 ? `${idx + 1}/${steps.length}` : ''
+              const pillStatus =
+                statusText === 'failed'
+                  ? 'failed'
+                  : statusText === 'done'
+                    ? 'done'
+                    : statusText === 'running'
+                      ? 'running'
+                      : statusText === 'paused'
+                        ? 'paused'
+                        : 'pending'
+
+              return (
+                <details key={s.id || `${t.id}-step-${idx}`} className="ndp-tooluse">
+                  <summary className="ndp-tooluse-summary">
+                    <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
+                      DeskPet · ToolUse: {name}
+                      {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
+                    </span>
+                  </summary>
+                  <div className="ndp-tooluse-body">
+                    <div className="ndp-tooluse-run">
+                      <div className="ndp-tooluse-run-title">
+                        <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${statusKey}`}>{statusText}</span>
+                        <span className="ndp-tooluse-run-name">{name}</span>
+                      </div>
+                      {input ? <div className="ndp-tooluse-run-io">in: {input}</div> : null}
+                      {output ? <div className="ndp-tooluse-run-io">out: {output}</div> : null}
+                      {error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {error}</div> : null}
+                    </div>
+                  </div>
+                </details>
+              )
             }
 
-            const currentStep = steps.length > 0 ? steps[Math.max(0, Math.min(t.currentStepIndex, steps.length - 1))] : undefined
-            const lastFinishedStep =
-              steps.length > 0 && t.currentStepIndex > 0 ? steps[Math.max(0, Math.min(t.currentStepIndex - 1, steps.length - 1))] : undefined
-            const active = runs.length > 0 ? pickActiveRun() : undefined
-            const label =
-              active?.toolName ||
-              String(currentStep?.tool ?? '').trim() ||
-              String(lastFinishedStep?.tool ?? '').trim() ||
-              t.toolsUsed?.[t.toolsUsed.length - 1] ||
-              'tool'
-            const progress =
-              steps.length > 0 ? `${Math.min(t.currentStepIndex + 1, steps.length)}/${steps.length}` : runs.length > 0 ? `${runs.length}` : ''
-            const open = typeof toolUseOpenByTaskId[taskId] === 'boolean' ? toolUseOpenByTaskId[taskId] : true
+            if (runId && runs.length > 0) {
+              const idx = runs.findIndex((r) => String(r.id ?? '') === runId)
+              if (idx >= 0) return renderRun(runs[idx], idx)
+            }
 
-            return (
-              <details
-                className="ndp-tooluse"
-                open={open}
-                onToggle={(e) => {
-                  const next = (e.currentTarget as HTMLDetailsElement).open
-                  setToolUseOpenByTaskId((prev) => (prev[taskId] === next ? prev : { ...prev, [taskId]: next }))
-                }}
-              >
-                <summary className="ndp-tooluse-summary">
-                  <span className={`ndp-tooluse-pill ndp-tooluse-pill-${t.status}`}>
-                    DeskPet · ToolUse: {label}
-                    {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
-                  </span>
-                </summary>
-                <div className="ndp-tooluse-body">
-                  {runs.length > 0
-                    ? runs.map((r) => (
-                        <div key={r.id} className="ndp-tooluse-run">
-                          <div className="ndp-tooluse-run-title">
-                            <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${r.status}`}>{r.status}</span>
-                            <span className="ndp-tooluse-run-name">{r.toolName}</span>
-                          </div>
-                          {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
-                          {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
-                          {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
-                        </div>
-                      ))
-                    : steps.map((s, idx) => {
-                        const toolName = String(s.tool ?? '').trim()
-                        const name = toolName || s.title
-                        const input = String(s.input ?? '').trim()
-                        const output = String(s.output ?? '').trim()
-                        const error = String(s.error ?? '').trim()
-                        const statusKey = statusForStep(s)
-                        const statusText = String(s.status ?? '').trim() || 'pending'
-
-                        return (
-                          <div key={s.id || `${t.id}-step-${idx}`} className="ndp-tooluse-run">
-                            <div className="ndp-tooluse-run-title">
-                              <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${statusKey}`}>{statusText}</span>
-                              <span className="ndp-tooluse-run-name">{name}</span>
-                            </div>
-                            {input ? <div className="ndp-tooluse-run-io">in: {input}</div> : null}
-                            {output ? <div className="ndp-tooluse-run-io">out: {output}</div> : null}
-                            {error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {error}</div> : null}
-                          </div>
-                        )
-                      })}
-                </div>
-              </details>
-            )
+            if (runs.length > 0) return <>{runs.map((r, idx) => renderRun(r, idx))}</>
+            if (steps.length > 0) return <>{steps.map((s, idx) => renderStep(s, idx))}</>
+            return null
           }
 
           const blocks = !isUser ? normalizeMessageBlocks(m) : []
@@ -4638,26 +5135,35 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                   <div className="ndp-msg-content">
                     {isUser || blocks.length === 0
                       ? m.content
-                      : blocks.map((b, idx) => {
+                      : (() => {
+                          let toolSeen = 0
+                          let statusSeen = 0
+                          let textSeen = 0
+                          return blocks.map((b) => {
                           if (b.type === 'text') {
                             const text = String(b.text ?? '')
                             if (!text) return null
-                            return <div key={`${m.id}-b-${idx}`}>{text}</div>
+                            const key = `${m.id}-text-${toolSeen}-${textSeen++}`
+                            return <div key={key}>{text}</div>
                           }
                           if (b.type === 'status') {
                             const text = String(b.text ?? '').trim()
                             if (!text) return null
                             return (
-                              <div key={`${m.id}-b-${idx}`} className="ndp-muted">
+                              <div key={`${m.id}-status-${statusSeen++}`} className="ndp-muted">
                                 {text}
                               </div>
                             )
                           }
                           if (b.type === 'tool_use') {
-                            return <div key={`${m.id}-b-${idx}`}>{renderToolUseNode(b.taskId)}</div>
+                            const rid = (b as { runId?: string }).runId
+                            const key = rid?.trim() ? `${m.id}-tool-${rid}` : `${m.id}-tool-${b.taskId}-${toolSeen}`
+                            toolSeen += 1
+                            return <div key={key}>{renderToolUseNode(b.taskId, rid)}</div>
                           }
                           return null
-                        })}
+                        })
+                        })()}
                     {imageNode}
                   </div>
                 )}
@@ -5845,6 +6351,8 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
   const activePersonaId = settings?.activePersonaId ?? 'default'
   const memoryEnabled = settings?.memory?.enabled ?? true
   const includeSharedOnRetrieve = settings?.memory?.includeSharedOnRetrieve ?? true
+  const vectorDedupeThreshold = settings?.memory?.vectorDedupeThreshold ?? 0.9
+
   const autoExtractEnabled = settings?.memory?.autoExtractEnabled ?? false
   const autoExtractEveryEffectiveMessages = settings?.memory?.autoExtractEveryEffectiveMessages ?? 20
   const autoExtractMaxEffectiveMessages = settings?.memory?.autoExtractMaxEffectiveMessages ?? 60
@@ -6126,6 +6634,22 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
         </label>
       </div>
 
+      <h3>向量去重</h3>
+
+      <div className="ndp-setting-item">
+        <label>向量去重阈值（越高越保守）</label>
+        <input
+          className="ndp-input"
+          type="number"
+          min={0.1}
+          max={0.99}
+          step={0.01}
+          value={vectorDedupeThreshold}
+          onChange={(e) => void onSetAutoExtractSettings({ vectorDedupeThreshold: Number(e.target.value) })}
+        />
+        <p className="ndp-setting-hint">每次写入记忆时：先用 embeddings 做相似度匹配，命中相似条目就立即合并，不新增重复记录。</p>
+      </div>
+
       <h3>召回增强（M5）</h3>
 
       <div className="ndp-setting-item">
@@ -6221,9 +6745,7 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
           />
           <span>向量使用单独 API Key/BaseUrl</span>
         </label>
-        {!vectorUseCustomAi ? (
-          <p className="ndp-setting-hint">当前将使用聊天的 API Key/BaseUrl。</p>
-        ) : null}
+        {!vectorUseCustomAi ? <p className="ndp-setting-hint">当前将使用聊天的 API Key/BaseUrl。</p> : null}
       </div>
 
       {vectorUseCustomAi ? (
@@ -7903,6 +8425,7 @@ function AISettingsTab(props: {
   const toolAiTemperature = orchestrator?.toolAiTemperature ?? 0.2
   const toolAiMaxTokens = orchestrator?.toolAiMaxTokens ?? 900
   const toolAiTimeoutMs = orchestrator?.toolAiTimeoutMs ?? 60000
+  const toolAgentMaxTurns = orchestrator?.toolAgentMaxTurns ?? 8
 
   // Format large numbers for display
   const formatTokens = (n: number) => {
@@ -8046,6 +8569,22 @@ function AISettingsTab(props: {
         <p className="ndp-setting-hint">
           Gemini/部分代理的 OpenAI-compat 原生 tools 可能要求 thought_signature，容易出错；选 text 可绕开此类兼容坑。
         </p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>Agent 最大回合数 (maxTurns)</label>
+        <div className="ndp-range-input">
+          <input
+            type="range"
+            min="1"
+            max="30"
+            step="1"
+            value={toolAgentMaxTurns}
+            onChange={(e) => api?.setOrchestratorSettings({ toolAgentMaxTurns: parseInt(e.target.value) })}
+          />
+          <span>{toolAgentMaxTurns}</span>
+        </div>
+        <p className="ndp-setting-hint">命中“已达到最大回合”时可调大；建议 6~12，过大会更慢且更耗工具调用。</p>
       </div>
 
       <div className="ndp-setting-item">

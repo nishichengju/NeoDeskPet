@@ -44,6 +44,8 @@ export type OrchestratorSettings = {
   toolAiTemperature: number // 0.0 - 2.0
   toolAiMaxTokens: number // 最大输出 token
   toolAiTimeoutMs: number // 超时毫秒
+
+  toolAgentMaxTurns: number // agent.run 最大回合数（回合越多越慢/更耗工具调用）
 }
 
 export type ToolSettings = {
@@ -200,7 +202,7 @@ export type ChatRole = 'user' | 'assistant'
 // 一个消息气泡（turn 容器）内部的分块：用于在同一条消息内插入 ToolUse 等 UI
 export type ChatMessageBlock =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; taskId: string }
+  | { type: 'tool_use'; taskId: string; runId?: string } // runId=可选：指向 task.toolRuns[i].id（用于一条消息里渲染多个工具卡片）
   | { type: 'status'; text: string }
 
 export type ChatMessageRecord = {
@@ -273,6 +275,10 @@ export type AppSettings = {
 export type MemorySettings = {
   enabled: boolean // 全局记忆开关：关闭后不写入，也不参与召回
   includeSharedOnRetrieve: boolean // 检索时是否默认包含共享记忆（persona_id 为 NULL）
+
+  // 记忆写入去重：只使用向量相似度（cosine）
+  vectorDedupeThreshold?: number // 去重阈值（0~1，越高越保守）
+
   autoExtractEnabled?: boolean // 是否启用“对话超过阈值自动提炼为长期记忆”
   autoExtractEveryEffectiveMessages?: number // 每新增多少条“有效消息”触发一次
   autoExtractMaxEffectiveMessages?: number // 每次提炼时最多取最近多少条“有效消息”
@@ -536,6 +542,7 @@ export type MemoryRetrieveArgs = {
   limit?: number
   maxChars?: number
   includeShared?: boolean
+  reinforce?: boolean // 是否将本次召回计入 hit/accessCount（默认 true；用于输入框预览等场景可传 false）
 }
 
 export type MemoryRetrieveResult = {

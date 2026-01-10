@@ -156,6 +156,18 @@ function clampText(text: unknown, max: number): string {
   return trimmed.slice(0, max) + '…'
 }
 
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim().length > 0
+        ? Number(value)
+        : Number.NaN
+  if (!Number.isFinite(n)) return fallback
+  const i = Math.trunc(n)
+  return Math.max(min, Math.min(max, i))
+}
+
 function normalizeTaskRecord(value: unknown): TaskRecord | null {
   if (!value || typeof value !== 'object') return null
   const v = value as Partial<TaskRecord>
@@ -566,12 +578,13 @@ export class TaskService {
   private async runAgentRunTool(resolved: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
     const obj = typeof resolved === 'object' && resolved && !Array.isArray(resolved) ? (resolved as Record<string, unknown>) : null
     const request = typeof obj?.request === 'string' ? obj.request : typeof resolved === 'string' ? resolved : ''
-    const maxTurns = typeof obj?.maxTurns === 'number' ? Math.max(1, Math.min(12, Math.trunc(obj.maxTurns))) : 8
 
     if (!request.trim()) throw new Error('agent.run 需要 request 文本')
 
     const settings = getSettings()
     const orch = settings.orchestrator
+    const configuredMaxTurns = clampInt(orch?.toolAgentMaxTurns, 8, 1, 30)
+    const maxTurns = clampInt(obj?.maxTurns, configuredMaxTurns, 1, configuredMaxTurns)
 
     const normalizeMode = (v: unknown): 'auto' | 'native' | 'text' | null => {
       const s = typeof v === 'string' ? v.trim() : ''
@@ -1055,14 +1068,17 @@ export class TaskService {
       return lines.join('\n')
     }
 
-    const executeTextToolCall = async (toolNameRaw: string, input: ToolInput): Promise<string> => {
+    const executeTextToolCall = async (
+      toolNameRaw: string,
+      input: ToolInput,
+    ): Promise<{ output: string; images: Array<{ mimeType: string; data: string }> }> => {
       const needle = (toolNameRaw ?? '').trim()
       const def = toolByName.get(needle) ?? resolveToolDefByCallName(needle)
       if (!def) throw new Error(`未知工具：${toolNameRaw}`)
 
       const key = makeCallKey(def.name, input)
       const cached = executedCalls.get(key)
-      if (typeof cached === 'string') {
+      if (cached && typeof cached === 'object') {
         pushLog(`[Tool] ${def.name} skip duplicate`, true)
         return cached
       }
@@ -1074,15 +1090,25 @@ export class TaskService {
         it.updatedAt = now()
       })
 
+      if (def.name.startsWith('mcp.') && this.mcpManager) {
+        const res = await this.mcpManager.callToolDetailed(def.name, input)
+        const out = res.text
+        const exec = { output: out, images: res.images }
+        executedCalls.set(key, exec)
+        executedCallOrder.push({ toolName: def.name, input, output: out })
+        return exec
+      }
+
       const out = await this.executeToolByName(def.name, input, task, rt)
-      executedCalls.set(key, out)
+      const exec = { output: out, images: [] as Array<{ mimeType: string; data: string }> }
+      executedCalls.set(key, exec)
       executedCallOrder.push({ toolName: def.name, input, output: out })
-      return out
+      return exec
     }
 
     pushLog(`[Agent] request: ${clampText(request, 120)}`, true)
 
-    const executedCalls = new Map<string, string>()
+    const executedCalls = new Map<string, { output: string; images: Array<{ mimeType: string; data: string }> }>()
     const executedCallOrder: Array<{ toolName: string; input: ToolInput; output: string }> = []
 
     const stableStringify = (v: unknown): string => {
@@ -1250,12 +1276,12 @@ export class TaskService {
           try {
             const key = makeCallKey(def.name, toolInput)
             const cached = executedCalls.get(key)
-            if (typeof cached === 'string') {
+            if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${def.name} skip duplicate`, true)
-              toolOut = cached
+              toolOut = cached.output
             } else {
               toolOut = await this.executeToolByName(def.name, toolInput, task, rt)
-              executedCalls.set(key, toolOut)
+              executedCalls.set(key, { output: toolOut, images: [] })
               executedCallOrder.push({ toolName: def.name, input: toolInput, output: toolOut })
             }
           } catch (err) {
@@ -1263,7 +1289,7 @@ export class TaskService {
             toolOut = `[error] ${msg}`
             const key = makeCallKey(def.name, toolInput)
             if (!executedCalls.has(key)) {
-              executedCalls.set(key, toolOut)
+              executedCalls.set(key, { output: toolOut, images: [] })
               executedCallOrder.push({ toolName: def.name, input: toolInput, output: toolOut })
             }
             upsertToolRun({
@@ -1336,12 +1362,13 @@ export class TaskService {
           try {
             const key = makeCallKey(c.toolName, c.input ?? {})
             const cached = executedCalls.get(key)
-            if (typeof cached === 'string') {
+            if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${c.toolName} skip duplicate`, true)
-              toolOut = cached
+              toolOut = cached.output
             } else {
-              toolOut = await executeTextToolCall(c.toolName, c.input)
-              executedCalls.set(key, toolOut)
+              const exec = await executeTextToolCall(c.toolName, c.input)
+              toolOut = exec.output
+              executedCalls.set(key, exec)
               executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: toolOut })
             }
           } catch (err) {
@@ -1349,7 +1376,7 @@ export class TaskService {
             toolOut = `[error] ${msg}`
             const key = makeCallKey(c.toolName, c.input ?? {})
             if (!executedCalls.has(key)) {
-              executedCalls.set(key, toolOut)
+              executedCalls.set(key, { output: toolOut, images: [] })
               executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: toolOut })
             }
             upsertToolRun({
@@ -1379,7 +1406,15 @@ export class TaskService {
             TOOL_RESULT_END,
           ].join('\n')
 
-          messages.push({ role: 'user', content: toolResultBlock })
+          const images = executedCalls.get(makeCallKey(c.toolName, c.input ?? {}))?.images ?? []
+          if (images.length > 0) {
+            messages.push({
+              role: 'user',
+              content: [{ type: 'text', text: toolResultBlock }, ...toImageUrlParts(images)],
+            })
+          } else {
+            messages.push({ role: 'user', content: toolResultBlock })
+          }
         }
       }
 
@@ -1514,3 +1549,14 @@ export class TaskService {
     this.onChanged()
   }
 }
+    const toImageUrlParts = (images: Array<{ mimeType: string; data: string }>): Array<Record<string, unknown>> => {
+      const parts: Array<Record<string, unknown>> = []
+      for (const it of images) {
+        const mime = (it?.mimeType ?? '').trim() || 'image/png'
+        const raw = (it?.data ?? '').trim()
+        if (!raw) continue
+        const url = raw.startsWith('data:') ? raw : `data:${mime};base64,${raw}`
+        parts.push({ type: 'image_url', image_url: { url } })
+      }
+      return parts
+    }

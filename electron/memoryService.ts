@@ -128,6 +128,15 @@ function normalizeMemoryText(text: string): string {
     .trim()
 }
 
+function buildEmbeddingsEndpoint(baseUrl: string): string {
+  const raw = (baseUrl ?? '').trim()
+  if (!raw) return '/embeddings'
+  let b = raw.replace(/\/+$/, '')
+  // 一些用户会把 baseUrl 直接填成 “…/v1/embeddings”，这里兜底纠正为 “…/v1”
+  b = b.replace(/\/embeddings$/i, '')
+  return `${b}/embeddings`
+}
+
 function hashEmbeddingInput(model: string, text: string): string {
   const normalized = normalizeMemoryText(text)
   return createHash('sha1').update(`${model}\n${normalized}`).digest('hex')
@@ -234,36 +243,6 @@ function extractTagsFromText(textRaw: string, opts?: { maxTags?: number }): stri
   }
 
   return tags
-}
-
-function diceCoefficient(aRaw: string, bRaw: string): number {
-  const a = normalizeMemoryText(aRaw).replace(/[，。！？,.!?；;：:]/g, '').replace(/\s+/g, '')
-  const b = normalizeMemoryText(bRaw).replace(/[，。！？,.!?；;：:]/g, '').replace(/\s+/g, '')
-  if (!a || !b) return 0
-  if (a === b) return 1
-  if (a.length < 2 || b.length < 2) return 0
-
-  const counts = new Map<string, number>()
-  const aChars = Array.from(a)
-  for (let i = 0; i < aChars.length - 1; i++) {
-    const bg = aChars[i] + aChars[i + 1]
-    counts.set(bg, (counts.get(bg) ?? 0) + 1)
-  }
-
-  let intersection = 0
-  const bChars = Array.from(b)
-  for (let i = 0; i < bChars.length - 1; i++) {
-    const bg = bChars[i] + bChars[i + 1]
-    const n = counts.get(bg) ?? 0
-    if (n <= 0) continue
-    intersection += 1
-    if (n === 1) counts.delete(bg)
-    else counts.set(bg, n - 1)
-  }
-
-  const total = (aChars.length - 1) + (bChars.length - 1)
-  if (total <= 0) return 0
-  return (2 * intersection) / total
 }
 
 function extractKeyValue(textRaw: string): { key: string; value: string } | null {
@@ -412,6 +391,8 @@ export class MemoryService {
   private pendingTagRowids = new Set<number>()
   private pendingEmbeddingRowids = new Set<number>()
   private pendingKgRowids = new Set<number>()
+  private embeddingCache = new Map<string, Float32Array>()
+  private chatIngestRedirect = new Map<string, number>()
 
   constructor(userDataDir: string) {
     const require = createRequire(import.meta.url)
@@ -432,6 +413,292 @@ export class MemoryService {
 
   close(): void {
     this.db.close()
+  }
+
+  private rememberChatIngestRedirect(key: string, rowid: number): void {
+    if (!key.trim() || rowid <= 0) return
+    if (this.chatIngestRedirect.has(key)) this.chatIngestRedirect.delete(key)
+    this.chatIngestRedirect.set(key, rowid)
+    const max = 600
+    while (this.chatIngestRedirect.size > max) {
+      const first = this.chatIngestRedirect.keys().next().value as string | undefined
+      if (!first) break
+      this.chatIngestRedirect.delete(first)
+    }
+  }
+
+  private rememberEmbedding(hash: string, vec: Float32Array): void {
+    if (!hash.trim() || vec.length < 8) return
+    if (this.embeddingCache.has(hash)) this.embeddingCache.delete(hash)
+    this.embeddingCache.set(hash, vec)
+    const max = 1200
+    while (this.embeddingCache.size > max) {
+      const first = this.embeddingCache.keys().next().value as string | undefined
+      if (!first) break
+      this.embeddingCache.delete(first)
+    }
+  }
+
+  private getEmbeddingConfig(memSettings: MemorySettings | undefined, aiSettings: AISettings): { model: string; apiKey: string; endpoint: string } | null {
+    const model = (memSettings?.vectorEmbeddingModel ?? '').trim() || 'text-embedding-3-small'
+    const useCustom = memSettings?.vectorUseCustomAi ?? false
+    const apiKey = ((useCustom ? memSettings?.vectorAiApiKey : aiSettings.apiKey) ?? '').trim()
+    const baseUrl = ((useCustom ? memSettings?.vectorAiBaseUrl : aiSettings.baseUrl) ?? '').trim()
+    if (!model.trim() || !apiKey || !baseUrl) return null
+    return { model, apiKey, endpoint: buildEmbeddingsEndpoint(baseUrl) }
+  }
+
+  private async embedTexts(
+    config: { model: string; apiKey: string; endpoint: string },
+    texts: string[],
+  ): Promise<Array<{ text: string; hash: string; vec: Float32Array }>> {
+    const inputs = texts.map((t) => normalizeMemoryText(String(t ?? '')).slice(0, 2000))
+    const hashes = inputs.map((t) => hashEmbeddingInput(config.model, t))
+
+    const results: Array<{ text: string; hash: string; vec: Float32Array }> = []
+    const toCall: string[] = []
+    const toCallIdx: number[] = []
+
+    for (let i = 0; i < inputs.length; i++) {
+      const h = hashes[i]
+      const cached = this.embeddingCache.get(h)
+      if (cached) {
+        results[i] = { text: inputs[i], hash: h, vec: cached }
+      } else {
+        toCall.push(inputs[i])
+        toCallIdx.push(i)
+      }
+    }
+
+    if (toCall.length > 0) {
+      const resp = await fetch(config.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({ model: config.model, input: toCall, encoding_format: 'float' }),
+      })
+
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({} as unknown))
+        const msg =
+          (errData as { error?: { message?: string } }).error?.message ?? `HTTP ${resp.status}: ${resp.statusText}`
+        throw new Error(msg)
+      }
+
+      const data = (await resp.json()) as { data?: Array<{ embedding?: number[] }> }
+      const embeddings = Array.isArray(data.data) ? data.data.map((d) => d.embedding ?? []) : []
+      if (embeddings.length !== toCall.length) {
+        throw new Error(`embeddings 返回数量不匹配：expect=${toCall.length} got=${embeddings.length}`)
+      }
+
+      for (let i = 0; i < toCallIdx.length; i++) {
+        const idx = toCallIdx[i]
+        const vec = embeddings[i]
+        if (!Array.isArray(vec) || vec.length < 8) throw new Error('embeddings 返回为空或维度过小')
+        const out = new Float32Array(vec.length)
+        let norm = 0
+        for (let j = 0; j < vec.length; j++) {
+          const v = Number(vec[j])
+          out[j] = Number.isFinite(v) ? v : 0
+          norm += out[j] * out[j]
+        }
+        norm = Math.sqrt(norm) || 1
+        for (let j = 0; j < out.length; j++) out[j] = out[j] / norm
+
+        const h = hashes[idx]
+        this.rememberEmbedding(h, out)
+        results[idx] = { text: inputs[idx], hash: h, vec: out }
+      }
+    }
+
+    return results
+  }
+
+  private async ensureEmbeddingsForRows(
+    rows: Array<{ rowid: number; content: string; updatedAt: number }>,
+    memSettings: MemorySettings | undefined,
+    aiSettings: AISettings,
+  ): Promise<Map<number, { model: string; hash: string; vec: Float32Array }>> {
+    const config = this.getEmbeddingConfig(memSettings, aiSettings)
+    if (!config) return new Map()
+
+    const picked = rows.filter((r) => r.rowid > 0 && normalizeMemoryText(r.content).length >= 2)
+    if (picked.length === 0) return new Map()
+
+    const rowids = Array.from(new Set(picked.map((r) => r.rowid)))
+    const placeholders = rowids.map(() => '?').join(',')
+
+    type Exist = { rowid: number; model: string; contentHash: string; embedding: Buffer; updatedAt: number }
+    const existRows = this.db
+      .prepare(
+        `
+        SELECT
+          memory_rowid as rowid,
+          model as model,
+          content_hash as contentHash,
+          embedding as embedding,
+          updated_at as updatedAt
+        FROM memory_embedding
+        WHERE memory_rowid IN (${placeholders})
+        `,
+      )
+      .all(...rowids) as Exist[]
+    const existByRowid = new Map<number, Exist>()
+    for (const e of existRows) existByRowid.set(e.rowid, e)
+
+    const need: Array<{ rowid: number; text: string; hash: string }> = []
+    const out = new Map<number, { model: string; hash: string; vec: Float32Array }>()
+
+    for (const r of picked) {
+      const text = normalizeMemoryText(r.content).slice(0, 2000)
+      const hash = hashEmbeddingInput(config.model, text)
+      const exist = existByRowid.get(r.rowid)
+      if (exist && exist.model === config.model && exist.contentHash === hash && (exist.updatedAt ?? 0) >= (r.updatedAt ?? 0)) {
+        const buf = exist.embedding
+        if (buf && buf.byteLength >= 8 * 4) {
+          const dim = Math.floor(buf.byteLength / 4)
+          const vec = new Float32Array(buf.buffer, buf.byteOffset, dim)
+          out.set(r.rowid, { model: config.model, hash, vec })
+          continue
+        }
+      }
+      need.push({ rowid: r.rowid, text, hash })
+    }
+
+    if (need.length === 0) return out
+
+    const embedded = await this.embedTexts(
+      config,
+      need.map((n) => n.text),
+    )
+
+    const ts = now()
+    const upsert = this.db.prepare(
+      `
+      INSERT INTO memory_embedding (memory_rowid, model, dims, content_hash, embedding, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(memory_rowid) DO UPDATE SET
+        model = excluded.model,
+        dims = excluded.dims,
+        content_hash = excluded.content_hash,
+        embedding = excluded.embedding,
+        updated_at = excluded.updated_at
+      `,
+    )
+
+    const tx = this.db.transaction(() => {
+      for (let i = 0; i < need.length; i++) {
+        const item = need[i]
+        const vec = embedded[i].vec
+        const buf = Buffer.from(vec.buffer)
+        upsert.run(item.rowid, config.model, vec.length, item.hash, buf, ts, ts)
+        out.set(item.rowid, { model: config.model, hash: item.hash, vec })
+      }
+    })
+    tx()
+    return out
+  }
+
+  private async findBestVectorDuplicate(opts: {
+    personaId: string | null
+    scope: 'persona' | 'shared'
+    kind: string
+    role: string | null
+    excludeRowid?: number
+    vec: Float32Array
+    threshold: number
+    memSettings: MemorySettings | undefined
+    aiSettings: AISettings
+  }): Promise<{ rowid: number; sim: number; content: string; createdAt: number; updatedAt: number } | null> {
+    const { vec, threshold } = opts
+    if (vec.length < 8) return null
+
+    const config = this.getEmbeddingConfig(opts.memSettings, opts.aiSettings)
+    if (!config) return null
+
+    const scanLimit = 400
+    const embedBatchLimit = 40
+    const excludeRowid = clampInt(opts.excludeRowid, 0, 0, 2_000_000_000)
+
+    const wherePersona = opts.personaId === null ? 'm.persona_id IS NULL' : 'm.persona_id = ?'
+    const params: unknown[] = [config.model]
+    if (opts.personaId !== null) params.push(opts.personaId)
+    params.push(opts.scope, opts.kind)
+    if (opts.role === null) {
+      params.push(excludeRowid, scanLimit)
+    } else {
+      params.push(opts.role, excludeRowid, scanLimit)
+    }
+
+    type Row = {
+      rowid: number
+      content: string
+      createdAt: number
+      updatedAt: number
+      embedding: Buffer | null
+    }
+
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          m.rowid as rowid,
+          m.content as content,
+          m.created_at as createdAt,
+          m.updated_at as updatedAt,
+          e.embedding as embedding
+        FROM memory m
+        LEFT JOIN memory_embedding e ON e.memory_rowid = m.rowid AND e.model = ?
+        WHERE ${wherePersona}
+          AND m.scope = ?
+          AND m.kind = ?
+          ${opts.role === null ? '' : 'AND m.role = ?'}
+          AND COALESCE(m.status, 'active') <> 'deleted'
+          AND m.rowid <> ?
+        ORDER BY m.updated_at DESC, m.rowid DESC
+        LIMIT ?
+        `,
+      )
+      .all(...params) as Row[]
+
+    if (rows.length === 0) return null
+
+    const needEmbed = rows
+      .filter((r) => !r.embedding)
+      .slice(0, embedBatchLimit)
+      .map((r) => ({ rowid: r.rowid, content: r.content, updatedAt: r.updatedAt }))
+    if (needEmbed.length > 0) {
+      try {
+        await this.ensureEmbeddingsForRows(needEmbed, opts.memSettings, opts.aiSettings)
+      } catch {
+        // ignore
+      }
+    }
+
+    let best: { rowid: number; sim: number; content: string; createdAt: number; updatedAt: number } | null = null
+
+    for (const r of rows) {
+      let buf = r.embedding
+      if (!buf) {
+        const fetched = this.db
+          .prepare('SELECT embedding as embedding FROM memory_embedding WHERE memory_rowid = ? AND model = ? LIMIT 1')
+          .get(r.rowid, config.model) as { embedding?: Buffer } | undefined
+        buf = (fetched?.embedding as Buffer | undefined) ?? null
+      }
+      if (!buf || buf.byteLength < 8 * 4) continue
+      const dim = Math.floor(buf.byteLength / 4)
+      if (dim !== vec.length) continue
+      const v = new Float32Array(buf.buffer, buf.byteOffset, dim)
+      let dot = 0
+      for (let i = 0; i < dim; i++) dot += vec[i] * v[i]
+      if (!Number.isFinite(dot)) continue
+      if (dot < threshold) continue
+      if (!best || dot > best.sim) best = { rowid: r.rowid, sim: dot, content: r.content, createdAt: r.createdAt, updatedAt: r.updatedAt }
+    }
+
+    return best
   }
 
   private initSchema(): void {
@@ -792,68 +1059,6 @@ export class MemoryService {
       .run(randomUUID(), args.memoryRowid, args.oldContent, args.newContent, reason, args.source, args.createdAt)
   }
 
-  private createConflictIfNeeded(args: {
-    memoryRowid: number
-    conflictType: 'update' | 'merge' | 'conflict'
-    candidateContent: string
-    candidateSource: string | null
-    candidateImportance: number | null
-    candidateStrength: number | null
-    candidateMemoryType: string | null
-  }): string {
-    const candidate = args.candidateContent.trim()
-    if (!candidate) throw new Error('候选内容为空')
-
-    const existing = this.db
-      .prepare(
-        `
-        SELECT id
-        FROM memory_conflict
-        WHERE memory_rowid = ?
-          AND conflict_type = ?
-          AND candidate_content = ?
-          AND status = 'open'
-        LIMIT 1
-        `,
-      )
-      .get(args.memoryRowid, args.conflictType, candidate) as { id?: string } | undefined
-
-    if (existing?.id) return existing.id
-
-    const id = randomUUID()
-    const ts = now()
-    this.db
-      .prepare(
-        `
-        INSERT INTO memory_conflict (
-          id,
-          memory_rowid,
-          conflict_type,
-          candidate_content,
-          candidate_source,
-          candidate_importance,
-          candidate_strength,
-          candidate_memory_type,
-          status,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-        `,
-      )
-      .run(
-        id,
-        args.memoryRowid,
-        args.conflictType,
-        candidate,
-        args.candidateSource,
-        args.candidateImportance,
-        args.candidateStrength,
-        args.candidateMemoryType,
-        ts,
-      )
-
-    return id
-  }
-
   listPersonas(): PersonaSummary[] {
     const rows = this.db
       .prepare('SELECT id, name, updated_at as updatedAt FROM persona ORDER BY updated_at DESC')
@@ -942,7 +1147,7 @@ export class MemoryService {
     this.db.prepare('DELETE FROM persona WHERE id = ?').run(personaId)
   }
 
-  ingestChatMessage(args: MemoryIngestChatMessageArgs): void {
+  async ingestChatMessage(args: MemoryIngestChatMessageArgs, memSettings: MemorySettings | undefined, aiSettings: AISettings): Promise<void> {
     const persona = this.getPersona(args.personaId.trim() || 'default')
     if (persona) {
       if (!persona.captureEnabled) return
@@ -959,6 +1164,83 @@ export class MemoryService {
     const source = args.role === 'assistant' ? 'assistant_msg' : 'user_msg'
     const importance = args.role === 'user' ? 0.25 : 0.15
     const strength = 0.15
+
+    const extractTurnUserText = (turnRaw: string): string => {
+      const turn = String(turnRaw ?? '').trim()
+      if (!turn) return ''
+      const m = turn.match(/用户：([\s\S]*?)(?:\r?\n助手：|$)/)
+      return (m?.[1] ?? '').trim()
+    }
+
+    const extractTurnAssistantText = (turnRaw: string): string => {
+      const turn = String(turnRaw ?? '').trim()
+      if (!turn) return ''
+      const m = turn.match(/\r?\n助手：([\s\S]*)$/)
+      return (m?.[1] ?? '').trim()
+    }
+
+    const mergeTurnContent = (baseRaw: string, candRaw: string): string => {
+      const base = String(baseRaw ?? '').trim()
+      const cand = String(candRaw ?? '').trim()
+      if (!base) return cand
+      if (!cand) return base
+
+      const baseUser = extractTurnUserText(base)
+      const candUser = extractTurnUserText(cand)
+      const baseUserNorm = normalizeMemoryText(baseUser).replace(/\s+/g, '')
+      const candUserNorm = normalizeMemoryText(candUser).replace(/\s+/g, '')
+      let finalUser = baseUser
+      if (candUserNorm && (candUserNorm.length > baseUserNorm.length || candUserNorm.includes(baseUserNorm))) finalUser = candUser
+
+      const baseAssistant = extractTurnAssistantText(base)
+      const candAssistant = extractTurnAssistantText(cand)
+      const baseA = normalizeMemoryText(baseAssistant).replace(/\s+/g, '')
+      const candA = normalizeMemoryText(candAssistant).replace(/\s+/g, '')
+      let finalAssistant = baseAssistant
+      if (candA && (candA.length > baseA.length || candA.includes(baseA))) finalAssistant = candAssistant
+
+      if (finalUser.trim() && finalAssistant.trim()) return `用户：${finalUser.trim()}\n助手：${finalAssistant.trim()}`.trim()
+      if (cand.trim()) return cand
+      return base
+    }
+
+    const turnKey = `${args.sessionId}\n${args.messageId}`
+    const redirected = this.chatIngestRedirect.get(turnKey)
+    if (redirected && redirected > 0) {
+      const target = this.getMemoryByRowid(redirected)
+      if (!target || target.status === 'deleted') {
+        this.chatIngestRedirect.delete(turnKey)
+      } else {
+        const merged = mergeTurnContent(target.content, content)
+        const mergedNorm = normalizeMemoryText(merged).replace(/\s+/g, '')
+        const oldNorm = normalizeMemoryText(target.content).replace(/\s+/g, '')
+        if (mergedNorm !== oldNorm) {
+          this.addMemoryVersion({
+            memoryRowid: redirected,
+            oldContent: target.content,
+            newContent: merged,
+            reason: 'vector_dedupe_merge',
+            source,
+            createdAt: updatedAt,
+          })
+        }
+        this.db
+          .prepare(
+            "UPDATE memory SET content = ?, created_at = MIN(created_at, ?), updated_at = ?, retention = 1, strength = MIN(1, strength + 0.01), status = 'active', source = ? WHERE rowid = ?",
+          )
+          .run(merged, createdAt, updatedAt, source, redirected)
+        try {
+          await this.ensureEmbeddingsForRows([{ rowid: redirected, content: merged, updatedAt }], memSettings, aiSettings)
+        } catch {
+          /* ignore */
+        }
+        this.enqueueTagIndex(redirected)
+        this.enqueueEmbeddingIndex(redirected)
+        this.enqueueKgIndex(redirected)
+        return
+      }
+    }
+
     this.db
       .prepare(
         `
@@ -992,20 +1274,85 @@ export class MemoryService {
         source,
       )
 
-    // 后台索引：避免阻塞聊天主流程
+    let rowid = 0
     try {
       const inserted = this.db
         .prepare('SELECT rowid as rowid FROM memory WHERE session_id = ? AND message_id = ? LIMIT 1')
         .get(args.sessionId, args.messageId) as { rowid?: number } | undefined
-      const rowid = clampInt(inserted?.rowid, 0, 1, 2_000_000_000)
-      if (rowid > 0) {
-        this.enqueueTagIndex(rowid)
-        this.enqueueEmbeddingIndex(rowid)
-        this.enqueueKgIndex(rowid)
-      }
+      rowid = clampInt(inserted?.rowid, 0, 1, 2_000_000_000)
     } catch {
-      /* ignore */
+      rowid = 0
     }
+
+    if (rowid <= 0) return
+
+    const threshold = clampFloat(memSettings?.vectorDedupeThreshold, 0.9, 0.1, 0.99)
+    let vec: Float32Array | null = null
+    try {
+      const embedded = await this.ensureEmbeddingsForRows([{ rowid, content, updatedAt }], memSettings, aiSettings)
+      vec = embedded.get(rowid)?.vec ?? null
+    } catch {
+      vec = null
+    }
+
+    if (vec && vec.length >= 8) {
+      try {
+        const dup = await this.findBestVectorDuplicate({
+          personaId: pid,
+          scope: 'persona',
+          kind: 'chat_message',
+          role: args.role,
+          excludeRowid: rowid,
+          vec,
+          threshold,
+          memSettings,
+          aiSettings,
+        })
+
+        if (dup && dup.rowid > 0) {
+          const merged = mergeTurnContent(dup.content, content)
+          const mergedNorm = normalizeMemoryText(merged).replace(/\s+/g, '')
+          const oldNorm = normalizeMemoryText(dup.content).replace(/\s+/g, '')
+          if (mergedNorm !== oldNorm) {
+            this.addMemoryVersion({
+              memoryRowid: dup.rowid,
+              oldContent: dup.content,
+              newContent: merged,
+              reason: 'vector_dedupe_merge',
+              source,
+              createdAt: updatedAt,
+            })
+          }
+
+          this.db
+            .prepare(
+              "UPDATE memory SET content = ?, created_at = MIN(created_at, ?), updated_at = ?, retention = 1, strength = MIN(1, strength + 0.01), status = 'active', source = ? WHERE rowid = ?",
+            )
+            .run(merged, createdAt, updatedAt, source, dup.rowid)
+
+          this.db.prepare("UPDATE memory SET status = 'deleted', updated_at = ? WHERE rowid = ?").run(updatedAt, rowid)
+
+          this.rememberChatIngestRedirect(turnKey, dup.rowid)
+
+          try {
+            await this.ensureEmbeddingsForRows([{ rowid: dup.rowid, content: merged, updatedAt }], memSettings, aiSettings)
+          } catch {
+            /* ignore */
+          }
+
+          this.enqueueTagIndex(dup.rowid)
+          this.enqueueEmbeddingIndex(dup.rowid)
+          this.enqueueKgIndex(dup.rowid)
+          return
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    this.enqueueTagIndex(rowid)
+    this.enqueueEmbeddingIndex(rowid)
+    this.enqueueKgIndex(rowid)
   }
 
   runTagMaintenance(settings: MemorySettings, opts?: { batchSize?: number }): { scanned: number; updated: number } {
@@ -1185,7 +1532,7 @@ export class MemoryService {
 
     if (toEmbed.length === 0) return { scanned: rows.length, embedded: 0, skipped: toTouch.length }
 
-    const endpoint = `${baseUrl.replace(/\/+$/, '')}/embeddings`
+    const endpoint = buildEmbeddingsEndpoint(baseUrl)
     const input = toEmbed.map((x) => x.text)
 
     try {
@@ -1195,7 +1542,8 @@ export class MemoryService {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ model, input }),
+        // vLLM/OpenAI-compatible embeddings 有些实现会要求显式传 encoding_format
+        body: JSON.stringify({ model, input, encoding_format: 'float' }),
       })
 
       if (!resp.ok) {
@@ -1850,7 +2198,7 @@ export class MemoryService {
     return { total, items }
   }
 
-  upsertManualMemory(args: MemoryUpsertManualArgs): MemoryRecord {
+  async upsertManualMemory(args: MemoryUpsertManualArgs, memSettings: MemorySettings | undefined, aiSettings: AISettings): Promise<MemoryRecord> {
     const personaId = args.personaId.trim() || 'default'
     const content = args.content.trim()
     if (!content) throw new Error('内容不能为空')
@@ -1863,67 +2211,103 @@ export class MemoryService {
     const importance = clampFloat(args.importance, 0.75, 0, 1)
     const strength = clampFloat(args.strength, 0.6, 0, 1)
 
-    // 去重/冲突检测仅针对“长期记忆条目”（manual_note），不影响原文采集（chat_message）
-    // 目标：避免记忆越写越乱，同时不擅自覆盖（冲突/更新进入待处理队列）
-    const normalized = normalizeMemoryText(content)
-    if (normalized.length >= 3) {
-      const wherePersona = pid === null ? 'persona_id IS NULL' : 'persona_id = ?'
-      const scan = this.db
-        .prepare(
-          `
-          SELECT rowid as rowid, content as content
-          FROM memory
-          WHERE kind = 'manual_note'
-            AND scope = ?
-            AND ${wherePersona}
-            AND COALESCE(status, 'active') <> 'deleted'
-          ORDER BY updated_at DESC, rowid DESC
-          LIMIT ?
-          `,
-        )
-        .all(...(pid === null ? [scope] : [scope, pid]), 240) as Array<{ rowid: number; content: string }>
+    const mergeManualNoteContent = (baseRaw: string, candRaw: string): string => {
+      const base = baseRaw.trim()
+      const cand = candRaw.trim()
+      if (!base) return cand
+      if (!cand) return base
 
-      let best: { rowid: number; content: string; score: number } | null = null
-      for (const r of scan) {
-        const score = diceCoefficient(r.content, normalized)
-        if (!best || score > best.score) best = { rowid: r.rowid, content: r.content, score }
+      const baseNorm = normalizeMemoryText(base).replace(/\s+/g, '')
+      const candNorm = normalizeMemoryText(cand).replace(/\s+/g, '')
+      if (!baseNorm) return cand
+      if (!candNorm) return base
+      if (baseNorm === candNorm) return base
+      if (candNorm.includes(baseNorm)) return cand
+      if (baseNorm.includes(candNorm)) return base
+
+      const baseKv = extractKeyValue(base)
+      const candKv = extractKeyValue(cand)
+      if (baseKv && candKv && baseKv.key === candKv.key) {
+        return `${candKv.key}：${candKv.value}`
       }
 
-      if (best) {
-        const bestNorm = normalizeMemoryText(best.content)
-        const isExact = bestNorm.replace(/\s+/g, '') === normalized.replace(/\s+/g, '')
-        if (isExact || best.score >= 0.92) {
-          // 高度重复：不新增，仅轻微增强（不记作 hit）
-          this.db
-            .prepare(
-              "UPDATE memory SET updated_at = ?, strength = MIN(1, strength + 0.01), retention = 1, status = 'active' WHERE rowid = ?",
-            )
-            .run(ts, best.rowid)
-          const existing = this.getMemoryByRowid(best.rowid)
-          if (!existing) throw new Error('重复检测命中，但记录不存在')
-          return existing
-        }
+      if (cand.length >= base.length + 8) return cand
+      if (base.length >= cand.length + 8) return base
 
-        if (best.score >= 0.78) {
-          const baseKv = extractKeyValue(best.content)
-          const candKv = extractKeyValue(normalized)
-          const conflictType: 'update' | 'merge' | 'conflict' =
-            baseKv && candKv && baseKv.key === candKv.key && baseKv.value !== candKv.value ? 'update' : 'merge'
+      const merged = `${base}；${cand}`.replace(/\s+/g, ' ').trim()
+      return merged.length > 600 ? merged.slice(0, 600) : merged
+    }
 
-          this.createConflictIfNeeded({
-            memoryRowid: best.rowid,
-            conflictType,
-            candidateContent: normalized,
-            candidateSource: source,
-            candidateImportance: importance,
-            candidateStrength: strength,
-            candidateMemoryType: memoryType,
+    const threshold = clampFloat(memSettings?.vectorDedupeThreshold, 0.9, 0.1, 0.99)
+    const config = this.getEmbeddingConfig(memSettings, aiSettings)
+    const normalized = normalizeMemoryText(content)
+
+    if (config && normalized.length >= 3) {
+      try {
+        const vec = (await this.embedTexts(config, [normalized]))[0]?.vec ?? null
+        if (vec && vec.length >= 8) {
+          const dup = await this.findBestVectorDuplicate({
+            personaId: pid,
+            scope,
+            kind: 'manual_note',
+            role: 'note',
+            excludeRowid: 0,
+            vec,
+            threshold,
+            memSettings,
+            aiSettings,
           })
 
-          const existing = this.getMemoryByRowid(best.rowid)
-          if (!existing) throw new Error('冲突检测命中，但记录不存在')
-          return existing
+          if (dup && dup.rowid > 0) {
+            const existing = this.getMemoryByRowid(dup.rowid)
+            if (!existing) throw new Error('重复检测命中，但记录不存在')
+
+            const mergedContent = mergeManualNoteContent(existing.content, content)
+            const mergedNorm = normalizeMemoryText(mergedContent).replace(/\s+/g, '')
+            const existingNorm = normalizeMemoryText(existing.content).replace(/\s+/g, '')
+
+            if (mergedNorm === existingNorm) {
+              this.db
+                .prepare(
+                  "UPDATE memory SET updated_at = ?, importance = MAX(importance, ?), strength = MIN(1, MAX(strength, ?) + 0.01), retention = 1, status = 'active' WHERE rowid = ?",
+                )
+                .run(ts, importance, strength, dup.rowid)
+              const refreshed = this.getMemoryByRowid(dup.rowid)
+              if (!refreshed) throw new Error('重复检测命中，但记录不存在')
+              return refreshed
+            }
+
+            this.addMemoryVersion({
+              memoryRowid: dup.rowid,
+              oldContent: existing.content,
+              newContent: mergedContent,
+              reason: 'vector_dedupe_merge',
+              source,
+              createdAt: ts,
+            })
+
+            this.db
+              .prepare(
+                "UPDATE memory SET content = ?, updated_at = ?, importance = MAX(importance, ?), strength = MIN(1, MAX(strength, ?) + 0.05), retention = 1, status = 'active', memory_type = ?, source = ? WHERE rowid = ?",
+              )
+              .run(mergedContent, ts, importance, strength, memoryType, source, dup.rowid)
+
+            try {
+              await this.ensureEmbeddingsForRows([{ rowid: dup.rowid, content: mergedContent, updatedAt: ts }], memSettings, aiSettings)
+            } catch {
+              /* ignore */
+            }
+
+            const updated = this.getMemoryByRowid(dup.rowid)
+            if (!updated) throw new Error('重复合并命中，但记录不存在')
+            this.enqueueTagIndex(updated.rowid)
+            this.enqueueEmbeddingIndex(updated.rowid)
+            this.enqueueKgIndex(updated.rowid)
+            return updated
+          }
         }
+      } catch {
+        // ignore
       }
     }
 
@@ -1939,6 +2323,12 @@ export class MemoryService {
     const rowid = clampInt(inserted?.rowid, 0, 1, 2_000_000_000)
     const row = rowid > 0 ? this.getMemoryByRowid(rowid) : null
     if (!row) throw new Error('写入失败')
+
+    try {
+      await this.ensureEmbeddingsForRows([{ rowid: row.rowid, content: row.content, updatedAt: ts }], memSettings, aiSettings)
+    } catch {
+      /* ignore */
+    }
 
     // 后台索引：避免阻塞 UI
     this.enqueueTagIndex(row.rowid)
@@ -2440,6 +2830,7 @@ export class MemoryService {
     const limit = clampInt(args.limit, 12, 1, 50)
     const maxChars = clampInt(args.maxChars, 2800, 200, 20000)
     const includeShared = args.includeShared !== false
+    const shouldReinforce = args.reinforce !== false
     const nowMs = now()
 
     // 时间线索优先：针对“某天凌晨/某个时间点/准确复述”类问题，按 created_at 范围直接取原文片段
@@ -2486,7 +2877,7 @@ export class MemoryService {
         if (used >= maxChars) break
       }
 
-      if (hitRowids.length > 0) this.reinforceMemoryHits(hitRowids, nowMs)
+      if (shouldReinforce && hitRowids.length > 0) this.reinforceMemoryHits(hitRowids, nowMs)
 
       const hint =
         tr.quoteOnly
@@ -2800,7 +3191,7 @@ export class MemoryService {
       const baseUrl = (useCustom ? memSettings.vectorAiBaseUrl : aiSettings.baseUrl) ?? ''
 
       if (model && apiKey.trim() && baseUrl.trim()) {
-        const endpoint = `${baseUrl.replace(/\/+$/, '')}/embeddings`
+        const endpoint = buildEmbeddingsEndpoint(baseUrl)
         try {
           vectorAttempted = true
           const resp = await fetch(endpoint, {
@@ -2809,7 +3200,8 @@ export class MemoryService {
               'Content-Type': 'application/json',
               Authorization: `Bearer ${apiKey}`,
             },
-            body: JSON.stringify({ model, input: normalizeMemoryText(query).slice(0, 800) }),
+            // vLLM/OpenAI-compatible embeddings 有些实现会要求显式传 encoding_format
+            body: JSON.stringify({ model, input: normalizeMemoryText(query).slice(0, 800), encoding_format: 'float' }),
           })
 
           if (resp.ok) {
@@ -2911,11 +3303,12 @@ export class MemoryService {
       })
       .sort((a, b) => b.weight - a.weight || b.createdAt - a.createdAt || b.rowid - a.rowid)
       .slice(0, limit)
+    const finalRanked = ranked
 
     const lines: string[] = []
     const hitRowids: number[] = []
     let used = 0
-    for (const r of ranked) {
+    for (const r of finalRanked) {
       const content = r.content.trim().replace(/\s+/g, ' ')
       if (!content) continue
       const role = r.role === 'assistant' ? 'assistant' : r.role === 'user' ? 'user' : 'note'
@@ -2930,17 +3323,17 @@ export class MemoryService {
       if (used >= maxChars) break
     }
 
-    if (hitRowids.length > 0) this.reinforceMemoryHits(hitRowids, nowMs)
+    if (shouldReinforce && hitRowids.length > 0) this.reinforceMemoryHits(hitRowids, nowMs)
 
     const memoryBlock = lines.length > 0 ? `【相关记忆】\n${lines.join('\n')}` : ''
 
     const counts = {
       timeRange: 0,
-      fts: ranked.filter((r) => r.ftsRel > 0).length,
-      like: ranked.filter((r) => r.likeRel > 0).length,
-      tag: ranked.filter((r) => r.tagRel > 0).length,
-      vector: ranked.filter((r) => r.vecRel > 0).length,
-      kg: ranked.filter((r) => r.kgRel > 0).length,
+      fts: finalRanked.filter((r) => r.ftsRel > 0).length,
+      like: finalRanked.filter((r) => r.likeRel > 0).length,
+      tag: finalRanked.filter((r) => r.tagRel > 0).length,
+      vector: finalRanked.filter((r) => r.vecRel > 0).length,
+      kg: finalRanked.filter((r) => r.kgRel > 0).length,
     }
 
     const layers: Array<'none' | 'timeRange' | 'fts' | 'like' | 'tag' | 'vector' | 'kg'> = []

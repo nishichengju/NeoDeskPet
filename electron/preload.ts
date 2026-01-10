@@ -67,6 +67,13 @@ export type TtsStopAllListener = () => void
 export type TasksChangedListener = (payload: TaskListResult) => void
 
 contextBridge.exposeInMainWorld('neoDeskPet', {
+  // Debug log：用于复现后回放定位“消息回退/工具卡堆叠”等问题
+  getDebugLogPath: (): Promise<string> => ipcRenderer.invoke('debug:getPath'),
+  clearDebugLog: (): Promise<{ ok: true; path: string }> => ipcRenderer.invoke('debug:clear'),
+  appendDebugLog: (event: string, data?: unknown): void => {
+    ipcRenderer.send('debug:append', { event, data })
+  },
+
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   setAlwaysOnTop: (value: boolean): Promise<AppSettings> => ipcRenderer.invoke('settings:setAlwaysOnTop', value),
   setClickThrough: (value: boolean): Promise<AppSettings> => ipcRenderer.invoke('settings:setClickThrough', value),

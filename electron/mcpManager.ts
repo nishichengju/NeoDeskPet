@@ -203,6 +203,41 @@ function formatMcpToolResult(result: unknown): string {
   return clampText(text, 5000) || '(空)'
 }
 
+function extractMcpToolImages(result: unknown): Array<{ mimeType: string; data: string }> {
+  type McpToolCallResult = {
+    content?: unknown
+    structuredContent?: unknown
+    toolResult?: unknown
+  }
+
+  type McpContentItem = {
+    type?: unknown
+    data?: unknown
+    mimeType?: unknown
+  } & Record<string, unknown>
+
+  const r: McpToolCallResult | null = typeof result === 'object' && result ? (result as McpToolCallResult) : null
+  if (!r) return []
+
+  const pickContent = (v: unknown): McpContentItem[] | null => (Array.isArray(v) ? (v as McpContentItem[]) : null)
+  const content =
+    pickContent(r.content) ??
+    (typeof r.structuredContent === 'object' && r.structuredContent ? pickContent((r.structuredContent as Record<string, unknown>).content) : null) ??
+    (typeof r.toolResult === 'object' && r.toolResult ? pickContent((r.toolResult as Record<string, unknown>).content) : null)
+  if (!content) return []
+
+  const images: Array<{ mimeType: string; data: string }> = []
+  for (const item of content) {
+    const type = typeof item?.type === 'string' ? item.type : ''
+    if (type !== 'image') continue
+    const data = typeof item.data === 'string' ? item.data.trim() : ''
+    if (!data) continue
+    const mimeType = typeof item.mimeType === 'string' ? item.mimeType.trim() : 'image/png'
+    images.push({ mimeType: mimeType || 'image/png', data })
+  }
+  return images
+}
+
 export class McpManager {
   private currentSettings: McpSettings = { enabled: false, servers: [] }
   private readonly runtimes = new Map<string, McpServerRuntime>()
@@ -508,6 +543,11 @@ export class McpManager {
   }
 
   async callTool(internalToolName: string, input: unknown): Promise<string> {
+    const { text } = await this.callToolDetailed(internalToolName, input)
+    return text
+  }
+
+  async callToolDetailed(internalToolName: string, input: unknown): Promise<{ text: string; images: Array<{ mimeType: string; data: string }> }> {
     const parsed = parseMcpInternalToolName(internalToolName)
     if (!parsed) throw new Error(`not an MCP tool: ${internalToolName}`)
 
@@ -526,7 +566,8 @@ export class McpManager {
       'isError' in (res as Record<string, unknown>) &&
       (res as { isError?: unknown }).isError === true
     const text = formatMcpToolResult(res)
+    const images = extractMcpToolImages(res)
     if (isError) throw new Error(text)
-    return text
+    return { text, images }
   }
 }

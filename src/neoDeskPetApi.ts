@@ -67,6 +67,11 @@ export type TasksChangedListener = (payload: TaskListResult) => void
 export type McpChangedListener = (snapshot: McpStateSnapshot) => void
 
 export type NeoDeskPetApi = {
+  // Debug log：用于复现后回放定位“消息回退/工具卡堆叠”等问题
+  getDebugLogPath(): Promise<string>
+  clearDebugLog(): Promise<{ ok: true; path: string }>
+  appendDebugLog(event: string, data?: unknown): void
+
   getSettings(): Promise<AppSettings>
   setAlwaysOnTop(value: boolean): Promise<AppSettings>
   setClickThrough(value: boolean): Promise<AppSettings>

@@ -19,6 +19,15 @@ release
 .serena/
 .claude/
 .spec-workflow/
+.ace-tool/
+._rescue_untracked_*/
+
+# MCP runtime outputs (do not commit)
+mcp-output/
+
+# Local backups / vendored scratchpads (do not commit)
+备份/
+perplexity-ai-main/
 
 # Large local assets / backups (do not commit)
 GPT-SoVITS-v2_ProPlus/
