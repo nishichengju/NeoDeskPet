@@ -13,6 +13,7 @@ dist-ssr
 *.local
 dist-electron
 release
+docs/
 
 # Agent/automation work dirs
 .codex/
