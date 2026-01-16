@@ -32,6 +32,8 @@ npm run dev
 
 打开浏览器地址栏里显示的本地 URL。
 
+> 如果你遇到 `Could not find Cubism 2 runtime`：请确认 `public/lib/live2d.min.js` 与 `public/lib/live2dcubismcore.min.js` 存在，并且 `index.html` 已加载它们。
+
 ## 3) Script（给 LLM 用的输入格式）
 
 支持以下两种格式：
