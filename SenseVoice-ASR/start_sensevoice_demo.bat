@@ -10,7 +10,9 @@ echo Starting SenseVoiceSmall ASR demo...
 echo Open: http://127.0.0.1:8766
 echo.
 
-G:\DeskPet\NeoDeskPet\voxcpm-rainfall\python\python.exe sensevoice_server.py
+rem 使用系统 python；如需指定解释器，可提前 set PYTHON_EXE=C:\path\to\python.exe
+if "%PYTHON_EXE%"=="" set "PYTHON_EXE=python"
+"%PYTHON_EXE%" sensevoice_server.py
 pause
 endlocal
 
