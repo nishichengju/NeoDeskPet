@@ -7,8 +7,14 @@ type Cdi3Param = { Id?: unknown; Name?: unknown; GroupId?: unknown }
 type Cdi3Json = { Parameters?: unknown }
 
 type Model3Json = {
+  Version?: unknown
   FileReferences?: {
+    Moc?: unknown
+    Textures?: unknown
+    Physics?: unknown
+    Pose?: unknown
     DisplayInfo?: unknown
+    Expressions?: unknown
   }
 }
 
@@ -105,6 +111,80 @@ async function copyText(text: string): Promise<boolean> {
 function joinUrl(base: string, rel: string): string {
   const u = new URL(rel, base)
   return u.toString()
+}
+
+async function probeUrlExists(url: string): Promise<boolean> {
+  // 先 HEAD（不拉大文件）；某些 server 不支持 HEAD，再退回到 Range GET（只取 1 byte）
+  try {
+    const r = await fetch(url, { method: 'HEAD', cache: 'no-store' })
+    if (r.ok) return true
+    if (r.status === 405) throw new Error('HEAD not allowed')
+    return false
+  } catch {
+    try {
+      const r = await fetch(url, { method: 'GET', cache: 'no-store', headers: { Range: 'bytes=0-0' } })
+      return r.ok
+    } catch {
+      return false
+    }
+  }
+}
+
+function toStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return v.map((x) => String(x ?? '').trim()).filter(Boolean)
+}
+
+type ModelFileCheck = { ok: true; modelJson: Model3Json } | { ok: false; error: string }
+
+async function preflightModelFiles(modelJsonUrl: string): Promise<ModelFileCheck> {
+  const raw = (await fetchJson(modelJsonUrl)) as Model3Json
+  if (!raw || typeof raw !== 'object') return { ok: false, error: 'model3.json 不是有效的 JSON 对象' }
+
+  const version = clampNumber((raw as Model3Json).Version, NaN)
+  if (!Number.isFinite(version)) return { ok: false, error: 'model3.json 缺少 Version 字段' }
+
+  const fileRefs = raw.FileReferences ?? {}
+  const mocRel = typeof fileRefs.Moc === 'string' ? fileRefs.Moc.trim() : ''
+  const texturesRel = toStringArray(fileRefs.Textures)
+
+  if (!mocRel) return { ok: false, error: 'model3.json 缺少 FileReferences.Moc' }
+  if (texturesRel.length === 0) return { ok: false, error: 'model3.json 缺少 FileReferences.Textures' }
+
+  const baseDir = dirnameUrl(modelJsonUrl)
+  const missing: string[] = []
+
+  const need = [
+    mocRel,
+    ...texturesRel,
+    typeof fileRefs.Physics === 'string' ? fileRefs.Physics.trim() : '',
+    typeof fileRefs.Pose === 'string' ? fileRefs.Pose.trim() : '',
+    typeof fileRefs.DisplayInfo === 'string' ? fileRefs.DisplayInfo.trim() : '',
+  ].filter(Boolean)
+
+  // 表情文件（可选，但经常会被模型引用，提前检查方便定位问题）
+  const expressions = fileRefs.Expressions
+  if (Array.isArray(expressions)) {
+    for (const e of expressions as Array<{ File?: unknown }>) {
+      const rel = typeof e?.File === 'string' ? e.File.trim() : ''
+      if (rel) need.push(rel)
+    }
+  }
+
+  for (const rel of need) {
+    const u = joinUrl(baseDir, rel)
+    const ok = await probeUrlExists(u)
+    if (!ok) missing.push(rel)
+  }
+
+  if (missing.length > 0) {
+    const tip =
+      '资源文件不存在（通常是：你改了文件夹名/文件名，但 model3.json 内引用没同步）。\n' +
+      '请确保 model3.json 里引用的 moc3/纹理/physics/cdi3 等文件名与目录下实际文件名一致。'
+    return { ok: false, error: `${tip}\n\n缺失：\n- ${missing.join('\n- ')}` }
+  }
+
+  return { ok: true, modelJson: raw }
 }
 
 function dirnameUrl(url: string): string {
@@ -218,7 +298,7 @@ type UiState = {
   scriptText: string
 }
 
-const DEFAULT_MODEL_URL = '/live2d/艾玛/艾玛.model3.json'
+const DEFAULT_MODEL_URL = ''
 
 async function main() {
   const root = document.getElementById('app')
@@ -319,6 +399,17 @@ async function main() {
     render()
   }
 
+  // 捕获运行时异常，尽量在 UI 上显示可读信息（避免只看 console）
+  window.addEventListener('error', (ev) => {
+    const msg = ev.error instanceof Error ? ev.error.message : String(ev.message ?? '')
+    if (msg) setError(msg)
+  })
+  window.addEventListener('unhandledrejection', (ev) => {
+    const reason = (ev as PromiseRejectionEvent).reason
+    const msg = reason instanceof Error ? reason.message : String(reason ?? '')
+    if (msg) setError(msg)
+  })
+
   const setTab = (t: UiState['tab']) => {
     state.tab = t
     tabControls.classList.toggle('active', t === 'controls')
@@ -339,6 +430,14 @@ async function main() {
     overrides.clear()
 
     try {
+      // 预检查：先把“文件找不到/路径不一致”的问题变成可读错误
+      const checked = await preflightModelFiles(url)
+      if (!checked.ok) {
+        setStatus('加载失败')
+        setError(checked.error)
+        return
+      }
+
       if (live2d) {
         try {
           live2d.destroy({ children: true, texture: true, baseTexture: true })
@@ -709,8 +808,8 @@ async function main() {
     }
   })
 
-  // 初次自动加载（如果默认路径不存在会显示错误，方便用户知道该做什么）
-  void loadModel(state.modelUrl)
+  // 初次默认不自动加载，避免默认路径导致“加载失败”噪声；如果通过 ?model= 传入则自动加载
+  if (state.modelUrl) void loadModel(state.modelUrl)
 }
 
 void main()
