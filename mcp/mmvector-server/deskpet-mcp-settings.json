@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "mmvector": {
+      "command": "node",
+      "args": ["mcp/mmvector-server/server.mjs"],
+      "cwd": "<ABSOLUTE_PATH_TO_YOUR_NeoDeskPet-electron>",
+      "env": {
+        "NDP_MMVECTOR_BASE_URL": "http://127.0.0.1:7860/v1",
+        "NDP_MMVECTOR_MODEL": "qwen3-vl-embedding-8b",
+        "NDP_MMVECTOR_DATA_DIR": "mcp-output/mmvector"
+      }
+    }
+  }
+}

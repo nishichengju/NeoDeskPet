@@ -142,6 +142,14 @@ export type NeoDeskPetApi = {
   clearChatSession(sessionId: string): Promise<ChatSession>
   setChatMessages(sessionId: string, messages: ChatMessageRecord[]): Promise<ChatSession>
   addChatMessage(sessionId: string, message: ChatMessageRecord): Promise<ChatSession>
+  saveChatAttachment(payload: {
+    kind: 'image' | 'video'
+    sourcePath?: string
+    dataUrl?: string
+    filename?: string
+  }): Promise<{ ok: true; kind: 'image' | 'video'; path: string; filename: string; mimeType?: string }>
+  readChatAttachmentDataUrl(path: string): Promise<{ ok: true; mimeType: string; dataUrl: string }>
+  getChatAttachmentUrl(path: string): Promise<{ ok: true; url: string }>
   updateChatMessage(sessionId: string, messageId: string, content: string): Promise<ChatSession>
   updateChatMessageRecord(sessionId: string, messageId: string, patch: Partial<ChatMessageRecord>): Promise<ChatSession>
   deleteChatMessage(sessionId: string, messageId: string): Promise<ChatSession>

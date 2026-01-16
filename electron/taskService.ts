@@ -572,7 +572,181 @@ export class TaskService {
       return this.runAgentRunTool(resolved, task, rt)
     }
 
+    if (toolName === 'workflow.mmvector_video_qa') {
+      return this.runWorkflowMmvectorVideoQa(resolved, task, rt)
+    }
+
     return this.executeToolByName(toolName, resolved, task, rt)
+  }
+
+  private async runWorkflowMmvectorVideoQa(resolved: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
+    if (!this.mcpManager) throw new Error('MCP manager not initialized')
+
+    const obj = typeof resolved === 'object' && resolved && !Array.isArray(resolved) ? (resolved as Record<string, unknown>) : null
+    const searchQuery = typeof obj?.searchQuery === 'string' ? obj.searchQuery.trim() : typeof resolved === 'string' ? resolved.trim() : ''
+    const question = typeof obj?.question === 'string' ? obj.question.trim() : ''
+    if (!searchQuery) throw new Error('workflow.mmvector_video_qa 需要 searchQuery')
+    if (!question) throw new Error('workflow.mmvector_video_qa 需要 question')
+
+    const topK = typeof obj?.topK === 'number' ? Math.max(1, Math.min(20, Math.trunc(obj.topK))) : 3
+    const minScore = typeof obj?.minScore === 'number' ? Math.max(0, Math.min(1, obj.minScore)) : undefined
+
+    const segmentSeconds = typeof obj?.segmentSeconds === 'number' ? Math.max(5, Math.min(120, Math.trunc(obj.segmentSeconds))) : 20
+    const framesPerSegment = typeof obj?.framesPerSegment === 'number' ? Math.max(1, Math.min(8, Math.trunc(obj.framesPerSegment))) : 3
+    const maxSegments = typeof obj?.maxSegments === 'number' ? Math.max(1, Math.min(60, Math.trunc(obj.maxSegments))) : 8
+    const startSeconds = typeof obj?.startSeconds === 'number' ? Math.max(0, Math.min(1e9, obj.startSeconds)) : 0
+
+    const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(5000, Math.min(600000, Math.trunc(obj.timeoutMs))) : 180000
+    const startedAt = now()
+    const ensureTime = () => {
+      if (now() - startedAt > timeoutMs) throw new Error('workflow.mmvector_video_qa timeout')
+    }
+
+    const parseJsonFromText = (raw: string): Record<string, unknown> | null => {
+      const text = String(raw ?? '').trim()
+      if (!text) return null
+      const first = text.indexOf('{')
+      const last = text.lastIndexOf('}')
+      if (first < 0 || last <= first) return null
+      try {
+        return JSON.parse(text.slice(first, last + 1)) as Record<string, unknown>
+      } catch {
+        return null
+      }
+    }
+
+    const exists = async (p: string): Promise<boolean> => {
+      try {
+        const st = await fs.promises.stat(p)
+        return st.isFile()
+      } catch {
+        return false
+      }
+    }
+
+    const downloadToFile = async (url: string, destPath: string): Promise<void> => {
+      const ac = new AbortController()
+      const remaining = Math.max(5000, timeoutMs - (now() - startedAt))
+      const timer = setTimeout(() => ac.abort(new Error('download timeout')), remaining)
+      rt.cancelCurrent = () => ac.abort(new Error('canceled'))
+
+      try {
+        const res = await fetch(url, { method: 'GET', signal: ac.signal })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        await fs.promises.mkdir(path.dirname(destPath), { recursive: true })
+
+        const file = fs.createWriteStream(destPath)
+        await new Promise<void>((resolve, reject) => {
+          file.once('error', reject)
+          file.once('finish', () => resolve())
+          const body = res.body
+          if (!body) {
+            file.end()
+            reject(new Error('empty body'))
+            return
+          }
+          const bodyStream = body as unknown as NodeJS.ReadableStream
+          bodyStream.pipe(file)
+        })
+      } finally {
+        clearTimeout(timer)
+        rt.cancelCurrent = undefined
+      }
+    }
+
+    ensureTime()
+    await this.waitIfPaused(task.id)
+
+    const searchText = await this.mcpManager.callTool('mcp.mmvector.search_by_text', {
+      query: searchQuery,
+      topK,
+      filter: 'video',
+      ...(typeof minScore === 'number' ? { minScore } : {}),
+    })
+
+    type MmvectorResult = { id?: number; type?: string; score?: number; filename?: string; videoUrl?: string; videoPath?: string }
+    const parsed = parseJsonFromText(searchText)
+    const resultsUnknown = parsed && parsed.ok === true && Array.isArray(parsed.results) ? (parsed.results as unknown[]) : []
+    const results: MmvectorResult[] = resultsUnknown
+      .map((r) => (r && typeof r === 'object' && !Array.isArray(r) ? (r as MmvectorResult) : null))
+      .filter((r): r is MmvectorResult => Boolean(r))
+
+    const picked =
+      results.find((r) => typeof r.videoPath === 'string' && r.videoPath.trim()) ??
+      results.find((r) => typeof r.videoUrl === 'string' && r.videoUrl.trim()) ??
+      null
+    if (!picked) {
+      return clampText(
+        JSON.stringify({ ok: false, error: 'mmvector 未命中任何视频', searchQuery, tool: 'mcp.mmvector.search_by_text', raw: searchText }),
+        5000,
+      )
+    }
+
+    ensureTime()
+    await this.waitIfPaused(task.id)
+
+    const rawVideoPath = typeof picked.videoPath === 'string' ? picked.videoPath.trim() : ''
+    const rawVideoUrl = typeof picked.videoUrl === 'string' ? picked.videoUrl.trim() : ''
+
+    let localVideoPath = rawVideoPath
+    if (!localVideoPath || !(await exists(localVideoPath))) {
+      if (!rawVideoUrl) throw new Error(`mmvector 命中但无可用 videoPath/videoUrl：${JSON.stringify(picked)}`)
+      const safeName = (picked.filename ?? '').trim() || `mmvector_${task.id}_${now().toString(36)}.mp4`
+      const dest = path.join(this.userDataDir, 'video-qa-cache', safeName.replace(/[<>:"/\\|?*]+/g, '_'))
+      await downloadToFile(rawVideoUrl, dest)
+      localVideoPath = dest
+    }
+
+    ensureTime()
+    await this.waitIfPaused(task.id)
+
+    const qaInput: Record<string, unknown> = {
+      videoPath: localVideoPath,
+      question,
+      segmentSeconds,
+      framesPerSegment,
+      maxSegments,
+      startSeconds,
+      ...(typeof obj?.baseUrl === 'string' && obj.baseUrl.trim() ? { baseUrl: obj.baseUrl.trim() } : {}),
+      ...(typeof obj?.apiKey === 'string' && obj.apiKey.trim() ? { apiKey: obj.apiKey.trim() } : {}),
+      ...(typeof obj?.model === 'string' && obj.model.trim() ? { model: obj.model.trim() } : {}),
+      ...(typeof obj?.temperature === 'number' ? { temperature: obj.temperature } : {}),
+      ...(typeof obj?.maxTokensPerSegment === 'number' ? { maxTokensPerSegment: obj.maxTokensPerSegment } : {}),
+      ...(typeof obj?.maxTokensFinal === 'number' ? { maxTokensFinal: obj.maxTokensFinal } : {}),
+      ...(typeof obj?.timeoutMs === 'number' ? { timeoutMs: Math.max(5000, timeoutMs - (now() - startedAt)) } : {}),
+    }
+
+    const qaText = await this.executeToolByName('media.video_qa', qaInput, task, rt)
+
+    const out = {
+      ok: true,
+      search: {
+        query: searchQuery,
+        picked: {
+          id: picked.id,
+          score: picked.score,
+          filename: picked.filename,
+          videoUrl: rawVideoUrl || undefined,
+          videoPath: rawVideoPath || undefined,
+          localVideoPath,
+        },
+      },
+      qa: (() => {
+        const raw = String(qaText ?? '').trim()
+        const first = raw.indexOf('{')
+        const last = raw.lastIndexOf('}')
+        if (first >= 0 && last > first) {
+          try {
+            return JSON.parse(raw.slice(first, last + 1)) as unknown
+          } catch {
+            return raw
+          }
+        }
+        return raw
+      })(),
+    }
+
+    return clampText(JSON.stringify(out, null, 2), 5000) || '(空)'
   }
 
   private async runAgentRunTool(resolved: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
@@ -603,6 +777,21 @@ export class TaskService {
     // 桌宠“人设/语气”只允许来自 AI 设置里的 systemPrompt；agent.run 不允许覆盖 system（避免多处人设割裂）
     const system = typeof settings.ai.systemPrompt === 'string' ? settings.ai.systemPrompt.trim() : ''
     const extraContext = typeof obj?.context === 'string' ? obj.context.trim() : ''
+
+    const readStringArray = (v: unknown, max: number): string[] => {
+      if (!Array.isArray(v)) return []
+      const out: string[] = []
+      for (const it of v) {
+        if (typeof it !== 'string') continue
+        const s = it.trim()
+        if (!s) continue
+        out.push(s)
+        if (out.length >= max) break
+      }
+      return out
+    }
+
+    const visionImagePaths = readStringArray(obj?.imagePaths, 4)
 
     type ToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } }
     type RawToolCall = Record<string, unknown>
@@ -657,7 +846,53 @@ export class TaskService {
       content:
         '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。',
     })
-    messages.push({ role: 'user', content: request })
+
+    if (visionImagePaths.length > 0) {
+      const mimeFromExt = (p: string): string => {
+        const ext = path.extname(p).toLowerCase()
+        if (ext === '.png') return 'image/png'
+        if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+        if (ext === '.webp') return 'image/webp'
+        if (ext === '.gif') return 'image/gif'
+        return 'image/png'
+      }
+
+      const fileToDataUrl = async (filePath: string): Promise<string | null> => {
+        try {
+          const buf = await fs.promises.readFile(filePath)
+          const b64 = buf.toString('base64')
+          if (!b64) return null
+          return `data:${mimeFromExt(filePath)};base64,${b64}`
+        } catch {
+          return null
+        }
+      }
+
+      type VisionPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+      const parts: VisionPart[] = []
+      if (request.trim()) parts.push({ type: 'text', text: request })
+      for (const p of visionImagePaths) {
+        const url = await fileToDataUrl(p)
+        if (!url) continue
+        parts.push({ type: 'image_url', image_url: { url } })
+      }
+      if (parts.length === 0) messages.push({ role: 'user', content: request })
+      else messages.push({ role: 'user', content: parts })
+    } else {
+      messages.push({ role: 'user', content: request })
+    }
+
+    const userMsgRef = messages.find((m) => m.role === 'user') as Record<string, unknown> | undefined
+    let visionStripped = false
+    const stripVisionFromUserMessage = (): boolean => {
+      if (visionStripped) return false
+      const m = userMsgRef
+      if (!m) return false
+      if (!Array.isArray(m.content)) return false
+      m.content = request
+      visionStripped = true
+      return true
+    }
 
     const logs: string[] = []
     let lastProgressAt = 0
@@ -804,7 +1039,9 @@ export class TaskService {
     // 使用任务ID作为sessionId，让API代理可以缓存和复用签名
     const sessionId = task.id
 
-    const callLlmNative = async (): Promise<{ contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage }> => {
+    const callLlmNative = async (
+      attempt = 0,
+    ): Promise<{ contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage }> => {
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
       rt.cancelCurrent = () => ac.abort(new Error('canceled'))
@@ -913,13 +1150,20 @@ export class TaskService {
         if (rawToolCalls.length) assistantMsgRaw.tool_calls = rawToolCalls.map((c, idx) => ensureToolCallId(c, idx))
 
         return { contentText, toolCalls, rawToolCalls: rawToolCalls.map((c, idx) => ensureToolCallId(c, idx)), assistantMsgRaw }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (attempt === 0 && stripVisionFromUserMessage()) {
+          pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
+          return callLlmNative(1)
+        }
+        throw err
       } finally {
         clearTimeout(timer)
         rt.cancelCurrent = undefined
       }
     }
 
-    const callLlmText = async (): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage }> => {
+    const callLlmText = async (attempt = 0): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage }> => {
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
       rt.cancelCurrent = () => ac.abort(new Error('canceled'))
@@ -966,6 +1210,13 @@ export class TaskService {
         if (typeof assistantMsgRaw.content !== 'string') assistantMsgRaw.content = contentText
 
         return { contentText, assistantMsgRaw }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (attempt === 0 && stripVisionFromUserMessage()) {
+          pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
+          return callLlmText(1)
+        }
+        throw err
       } finally {
         clearTimeout(timer)
         rt.cancelCurrent = undefined

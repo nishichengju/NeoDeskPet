@@ -1,5 +1,9 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen } from 'electron'
 import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import * as http from 'node:http'
+import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { getSettings, setSettings } from './store'
 import { createTray } from './tray'
@@ -80,6 +84,50 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
+function pickChatAttachmentExt(mimeType: string, fallback: string): string {
+  const mime = (mimeType ?? '').trim().toLowerCase()
+  if (mime === 'image/png') return '.png'
+  if (mime === 'image/jpeg') return '.jpg'
+  if (mime === 'image/webp') return '.webp'
+  if (mime === 'image/gif') return '.gif'
+  if (mime === 'video/mp4') return '.mp4'
+  if (mime === 'video/webm') return '.webm'
+  if (mime === 'video/quicktime') return '.mov'
+  if (mime === 'video/x-msvideo') return '.avi'
+  if (mime === 'video/x-matroska') return '.mkv'
+  return fallback
+}
+
+function pickChatAttachmentMimeByExt(filePath: string): string {
+  const ext = path.extname(String(filePath ?? '')).toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.mp4') return 'video/mp4'
+  if (ext === '.webm') return 'video/webm'
+  if (ext === '.mov') return 'video/quicktime'
+  if (ext === '.avi') return 'video/x-msvideo'
+  if (ext === '.mkv') return 'video/x-matroska'
+  return 'application/octet-stream'
+}
+
+function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } | null {
+  const raw = (dataUrl ?? '').trim()
+  if (!raw.startsWith('data:')) return null
+  const idx = raw.indexOf(',')
+  if (idx < 0) return null
+  const meta = raw.slice(5, idx) // after "data:"
+  const payload = raw.slice(idx + 1)
+  const parts = meta.split(';').map((s) => s.trim())
+  const mimeType = parts[0] ?? ''
+  const isBase64 = parts.includes('base64')
+  if (!isBase64) return null
+  if (!mimeType) return null
+  if (!payload) return null
+  return { mimeType, base64: payload }
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
@@ -89,6 +137,119 @@ const windowManager = new WindowManager({
   rendererDistDir: RENDERER_DIST,
   mainDistDir: MAIN_DIST,
 })
+
+let chatAttachmentServer: http.Server | null = null
+let chatAttachmentServerPort: number | null = null
+
+function pickHttpContentTypeByExt(filePath: string): string {
+  const ext = path.extname(String(filePath ?? '')).toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.mp4') return 'video/mp4'
+  if (ext === '.webm') return 'video/webm'
+  if (ext === '.mov') return 'video/quicktime'
+  if (ext === '.avi') return 'video/x-msvideo'
+  if (ext === '.mkv') return 'video/x-matroska'
+  return 'application/octet-stream'
+}
+
+async function ensureChatAttachmentServer(): Promise<number> {
+  if (chatAttachmentServer && typeof chatAttachmentServerPort === 'number') return chatAttachmentServerPort
+
+  chatAttachmentServer = http.createServer(async (req, res) => {
+    try {
+      const method = String(req.method ?? 'GET').toUpperCase()
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      if (url.pathname !== '/file') {
+        res.statusCode = 404
+        res.end('not found')
+        return
+      }
+
+      const b64 = url.searchParams.get('path') ?? ''
+      if (!b64) {
+        res.statusCode = 400
+        res.end('missing path')
+        return
+      }
+
+      const filePath = Buffer.from(b64, 'base64').toString('utf8').trim()
+      if (!filePath || !path.isAbsolute(filePath)) {
+        res.statusCode = 400
+        res.end('invalid path')
+        return
+      }
+
+      const st = await fs.stat(filePath)
+      if (!st.isFile()) {
+        res.statusCode = 404
+        res.end('not a file')
+        return
+      }
+
+      const contentType = pickHttpContentTypeByExt(filePath)
+      res.setHeader('Content-Type', contentType)
+      res.setHeader('Accept-Ranges', 'bytes')
+
+      if (method !== 'GET' && method !== 'HEAD') {
+        res.statusCode = 405
+        res.end('method not allowed')
+        return
+      }
+
+      const range = typeof req.headers.range === 'string' ? req.headers.range : ''
+      if (range && /^bytes=/.test(range)) {
+        const m = range.match(/^bytes=(\d+)-(\d*)$/)
+        if (!m) {
+          res.statusCode = 416
+          res.end('invalid range')
+          return
+        }
+        const start = Math.max(0, Math.trunc(Number(m[1])))
+        const end = m[2] ? Math.max(start, Math.trunc(Number(m[2]))) : st.size - 1
+        const safeEnd = Math.min(end, st.size - 1)
+        if (start >= st.size) {
+          res.statusCode = 416
+          res.end('range not satisfiable')
+          return
+        }
+        res.statusCode = 206
+        res.setHeader('Content-Range', `bytes ${start}-${safeEnd}/${st.size}`)
+        res.setHeader('Content-Length', String(safeEnd - start + 1))
+        if (method === 'HEAD') {
+          res.end()
+          return
+        }
+        createReadStream(filePath, { start, end: safeEnd }).pipe(res)
+        return
+      }
+
+      res.setHeader('Content-Length', String(st.size))
+      if (method === 'HEAD') {
+        res.end()
+        return
+      }
+      createReadStream(filePath).pipe(res)
+    } catch (err) {
+      res.statusCode = 500
+      res.end(err instanceof Error ? err.message : 'error')
+    }
+  })
+
+  const port = await new Promise<number>((resolve, reject) => {
+    chatAttachmentServer!.listen(0, '127.0.0.1', () => {
+      const addr = chatAttachmentServer!.address()
+      if (addr && typeof addr === 'object' && typeof addr.port === 'number') resolve(addr.port)
+      else reject(new Error('failed to bind chatAttachmentServer'))
+    })
+    chatAttachmentServer!.on('error', reject)
+  })
+
+  chatAttachmentServerPort = port
+  return port
+}
 
 let registeredAsrHotkey: string | null = null
 let pendingAsrTranscript: string[] = []
@@ -529,6 +690,78 @@ function registerIpc() {
   ipcMain.handle('chat:setAutoExtractMeta', (_event, sessionId: string, patch: unknown) =>
     setChatSessionAutoExtractMeta(sessionId, patch),
   )
+
+  // Chat attachments: persist dropped/pasted media into userData for stable paths.
+  ipcMain.handle('chat:saveAttachment', async (_event, payload: unknown) => {
+    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
+    const kind = p.kind === 'image' || p.kind === 'video' ? (p.kind as 'image' | 'video') : ''
+    if (!kind) throw new Error('invalid kind')
+
+    const sourcePath = typeof p.sourcePath === 'string' ? p.sourcePath.trim() : ''
+    const dataUrl = typeof p.dataUrl === 'string' ? p.dataUrl.trim() : ''
+    const filename = typeof p.filename === 'string' ? p.filename.trim() : ''
+
+    if (!sourcePath && !dataUrl) throw new Error('missing sourcePath/dataUrl')
+
+    const baseDir = path.join(app.getPath('userData'), 'chat-attachments')
+    await fs.mkdir(baseDir, { recursive: true })
+
+    let ext = filename ? path.extname(filename) : ''
+    let detectedMime = ''
+    if (!ext && dataUrl) {
+      const parsed = parseDataUrl(dataUrl)
+      detectedMime = parsed?.mimeType ?? ''
+      ext = pickChatAttachmentExt(detectedMime, kind === 'image' ? '.png' : '.mp4')
+    }
+    if (!ext) ext = kind === 'image' ? '.png' : '.mp4'
+
+    const storedName = `${randomUUID()}${ext}`
+    const storedPath = path.join(baseDir, storedName)
+
+    if (sourcePath) {
+      await fs.copyFile(sourcePath, storedPath)
+    } else {
+      const parsed = parseDataUrl(dataUrl)
+      if (!parsed) throw new Error('invalid dataUrl')
+      const buf = Buffer.from(parsed.base64, 'base64')
+      await fs.writeFile(storedPath, buf)
+      detectedMime = parsed.mimeType
+    }
+
+    return {
+      ok: true as const,
+      kind,
+      path: storedPath,
+      filename: filename || storedName,
+      ...(detectedMime ? { mimeType: detectedMime } : {}),
+    }
+  })
+
+  // Chat attachments: read local file into dataUrl for UI preview (useful when renderer cannot load file:// directly).
+  ipcMain.handle('chat:readAttachmentDataUrl', async (_event, payload: unknown) => {
+    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
+    const filePath = typeof p.path === 'string' ? p.path.trim() : ''
+    if (!filePath) throw new Error('missing path')
+
+    const st = await fs.stat(filePath)
+    if (!st.isFile()) throw new Error('not a file')
+    if (st.size > 8 * 1024 * 1024) throw new Error('file too large')
+
+    const buf = await fs.readFile(filePath)
+    const mimeType = pickChatAttachmentMimeByExt(filePath)
+    const b64 = buf.toString('base64')
+    const dataUrl = `data:${mimeType};base64,${b64}`
+    return { ok: true as const, mimeType, dataUrl }
+  })
+
+  ipcMain.handle('chat:getAttachmentUrl', async (_event, payload: unknown) => {
+    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
+    const filePath = typeof p.path === 'string' ? p.path.trim() : ''
+    if (!filePath) throw new Error('missing path')
+    const port = await ensureChatAttachmentServer()
+    const b64 = Buffer.from(filePath, 'utf8').toString('base64')
+    return { ok: true as const, url: `http://127.0.0.1:${port}/file?path=${encodeURIComponent(b64)}` }
+  })
 
   // Tasks / Orchestrator (M1)
   ipcMain.handle('task:list', (): TaskListResult => taskService?.listTasks() ?? { items: [] })

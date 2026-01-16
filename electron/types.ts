@@ -205,11 +205,20 @@ export type ChatMessageBlock =
   | { type: 'tool_use'; taskId: string; runId?: string } // runId=可选：指向 task.toolRuns[i].id（用于一条消息里渲染多个工具卡片）
   | { type: 'status'; text: string }
 
+export type ChatAttachment = {
+  kind: 'image' | 'video'
+  path: string // 本地绝对路径：用于聊天预览/播放与工具/MCP 调用
+  filename?: string
+}
+
 export type ChatMessageRecord = {
   id: string
   role: ChatRole
   content: string
-  image?: string // data URL (base64)
+  attachments?: ChatAttachment[] // 本地附件（多图/多视频）；图片不会自动作为 LLM 的 image_url 发送，除非显式在调用处转成 dataUrl
+  image?: string // 兼容旧数据：data URL (base64)
+  imagePath?: string // 兼容旧数据：本地图片路径（用于工具/MCP）
+  videoPath?: string // 兼容旧数据：本地视频路径（用于工具/MCP；聊天窗口可预览播放）
   taskId?: string // 关联任务：用于在聊天中渲染可折叠的 ToolUse 详情（不写入正文）
   blocks?: ChatMessageBlock[] // turn 容器：按顺序渲染 text/tool_use/status 等块（不写入 LLM 上下文时只取 text）
   createdAt: number
@@ -303,6 +312,13 @@ export type MemorySettings = {
   vectorUseCustomAi?: boolean // 向量是否使用单独的 API Key/BaseUrl（不影响聊天）
   vectorAiApiKey?: string
   vectorAiBaseUrl?: string
+
+  // M5.5：多模态向量（图片/视频，昂贵，建议按需开启）
+  mmVectorEnabled?: boolean // 是否启用多模态向量能力（本次仅配置/开关，不会自动触发计算）
+  mmVectorEmbeddingModel?: string // 多模态 embeddings 模型名（OpenAI-compatible）
+  mmVectorUseCustomAi?: boolean // 多模态向量是否使用单独的 API Key/BaseUrl（不影响聊天/文本向量）
+  mmVectorAiApiKey?: string
+  mmVectorAiBaseUrl?: string
 
   // M6：实体/事件/关系层（内置 SQLite 图层，可选）
   kgEnabled?: boolean // 是否启用图谱层召回（KG）

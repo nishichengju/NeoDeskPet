@@ -96,6 +96,80 @@ function sliceTail<T>(items: T[], max: number): T[] {
   return items.slice(items.length - max)
 }
 
+function toLocalMediaSrc(mediaPath: string): string {
+  const p = String(mediaPath ?? '').trim()
+  if (!p) return ''
+  if (/^(https?:|file:|data:|blob:)/i.test(p)) return p
+  if (/^[a-zA-Z]:[\\/]/.test(p)) return `file:///${p.replace(/\\/g, '/')}`
+  if (p.startsWith('\\\\')) return `file:${p.replace(/\\/g, '/')}`
+  if (p.startsWith('/')) return `file://${p}`
+  return p
+}
+
+function MmvectorImagePreview(props: { api: ReturnType<typeof getApi> | null; imagePath: string; alt: string }) {
+  const { api, imagePath, alt } = props
+  const [src, setSrc] = useState<string>('')
+
+  useEffect(() => {
+    let alive = true
+    const p = String(imagePath ?? '').trim()
+    if (!api || !p) return
+    if (/^(https?:|data:|blob:)/i.test(p)) return
+    api
+      .readChatAttachmentDataUrl(p)
+      .then((res) => {
+        if (!alive) return
+        if (res?.ok && typeof res.dataUrl === 'string') setSrc(res.dataUrl)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [api, imagePath])
+
+  return <img className="ndp-mmvector-image" src={src || toLocalMediaSrc(imagePath)} alt={alt} loading="lazy" />
+}
+
+function useLocalMediaUrl(api: ReturnType<typeof getApi> | null, inputPath: string): string {
+  const [url, setUrl] = useState<string>('')
+
+  useEffect(() => {
+    let alive = true
+    const p = String(inputPath ?? '').trim()
+    if (!api || !p) return
+    if (/^(https?:|data:|blob:)/i.test(p)) {
+      setUrl(p)
+      return
+    }
+    api
+      .getChatAttachmentUrl(p)
+      .then((res) => {
+        if (!alive) return
+        if (res?.ok && typeof res.url === 'string') setUrl(res.url)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [api, inputPath])
+
+  return url || toLocalMediaSrc(inputPath)
+}
+
+function LocalVideo(props: {
+  api: ReturnType<typeof getApi> | null
+  videoPath: string
+  className?: string
+  controls?: boolean
+  muted?: boolean
+  playsInline?: boolean
+  preload?: 'none' | 'metadata' | 'auto'
+}) {
+  const { api, videoPath, className, controls = true, muted, playsInline, preload } = props
+  const src = useLocalMediaUrl(api, videoPath)
+  return <video className={className} src={src} controls={controls} muted={muted} playsInline={playsInline} preload={preload} />
+}
+
 function clampIntValue(v: unknown, fallback: number, min: number, max: number): number {
   const n = typeof v === 'number' ? v : Number(v)
   if (!Number.isFinite(n)) return fallback
@@ -1712,12 +1786,15 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [sessionContextMenu, setSessionContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [editingMessageContent, setEditingMessageContent] = useState('')
-  const [pendingImage, setPendingImage] = useState<string | null>(null)
+  type PendingAttachment = { id: string; kind: 'image' | 'video'; path: string; filename: string; previewDataUrl?: string }
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
   const [ttsSegmentedMessageFlags, setTtsSegmentedMessageFlags] = useState<Record<string, true>>({})
   const [ttsRevealedSegments, setTtsRevealedSegments] = useState<Record<string, number>>({})
   const [ttsPendingUtteranceId, setTtsPendingUtteranceId] = useState<string | null>(null)
@@ -1757,6 +1834,42 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     >
   >(new Map())
   const taskFinalizingRef = useRef<Set<string>>(new Set())
+
+  const toolFactsSeenRef = useRef<Set<string>>(new Set())
+  const sessionToolFactsRef = useRef<Map<string, Array<{ at: number; lines: string[] }>>>(new Map())
+
+  const addSessionToolFacts = useCallback((sessionId: string, lines: string[], at?: number) => {
+    const sid = String(sessionId ?? '').trim()
+    if (!sid) return
+    const cleaned = (lines ?? []).map((x) => String(x ?? '').trim()).filter(Boolean)
+    if (cleaned.length === 0) return
+    const ts = typeof at === 'number' && Number.isFinite(at) ? at : Date.now()
+    const prev = sessionToolFactsRef.current.get(sid) ?? []
+    const next = [...prev, { at: ts, lines: cleaned }]
+    // 仅保留最近 30 条“事实块”
+    const sliced = next.length > 30 ? next.slice(next.length - 30) : next
+    sessionToolFactsRef.current.set(sid, sliced)
+  }, [])
+
+  const buildSessionToolFactsAddon = useCallback((sessionId: string): string => {
+    const sid = String(sessionId ?? '').trim()
+    if (!sid) return ''
+    const items = sessionToolFactsRef.current.get(sid) ?? []
+    if (items.length === 0) return ''
+    const nowTs = Date.now()
+    const fresh = items.filter((x) => nowTs - x.at < 15 * 60 * 1000)
+    if (fresh.length === 0) return ''
+    const flat = fresh.flatMap((x) => x.lines).filter(Boolean)
+    if (flat.length === 0) return ''
+    const MAX_LINES = 24
+    const lines = flat.length > MAX_LINES ? [...flat.slice(0, MAX_LINES), `- ...（已省略 ${flat.length - MAX_LINES} 行）`] : flat
+    return [
+      '【最近工具事实（用于减少你让我重复；仅供后续工具调用）】',
+      ...lines,
+      '',
+      '规则：1) 工具调用必须优先复用这些事实里的 path/url；2) 严禁编造路径；3) 最终回复不要暴露本地路径。',
+    ].join('\n')
+  }, [])
   const contextUsageLastSentAtRef = useRef(0)
   const contextUsagePendingRef = useRef<ContextUsageSnapshot | null>(null)
   const contextUsageSendTimerRef = useRef<number | null>(null)
@@ -2398,6 +2511,91 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         const messageId = taskOriginMessageRef.current.get(t.id)
         if (!sessionId || !messageId) continue
 
+        // 将关键工具输出“摘要化”后注入到下次对话上下文，避免模型看不见 tool 卡片导致乱填参数。
+        // 注意：这里只记录可复用的事实（路径/URL/ID/统计），不记录长文本与隐私内容。
+        const toolRuns = Array.isArray(t.toolRuns) ? t.toolRuns : []
+        for (const r of toolRuns) {
+          const runId = typeof r?.id === 'string' ? r.id : ''
+          if (!runId) continue
+          const status = (r as { status?: unknown }).status
+          if (status !== 'done' && status !== 'error') continue
+          const sig = `${t.id}:${runId}:${String(status)}:${String((r as { endedAt?: unknown }).endedAt ?? '')}`
+          if (toolFactsSeenRef.current.has(sig)) continue
+          toolFactsSeenRef.current.add(sig)
+
+          const toolName = typeof (r as { toolName?: unknown }).toolName === 'string' ? String((r as { toolName: string }).toolName) : ''
+          const rawOut = typeof (r as { outputPreview?: unknown }).outputPreview === 'string' ? String((r as { outputPreview: string }).outputPreview) : ''
+          const rawErr = typeof (r as { error?: unknown }).error === 'string' ? String((r as { error: string }).error) : ''
+          const endedAt = typeof (r as { endedAt?: unknown }).endedAt === 'number' ? ((r as { endedAt: number }).endedAt as number) : Date.now()
+
+          const parseJsonFromText = (raw: string): Record<string, unknown> | null => {
+            const text = String(raw ?? '').trim()
+            if (!text) return null
+            const first = text.indexOf('{')
+            const last = text.lastIndexOf('}')
+            if (first < 0 || last <= first) return null
+            try {
+              return JSON.parse(text.slice(first, last + 1)) as Record<string, unknown>
+            } catch {
+              return null
+            }
+          }
+
+          const lines: string[] = []
+
+          if (toolName.startsWith('mcp.mmvector.') && rawOut) {
+            const parsed = parseJsonFromText(rawOut)
+            const results = parsed && parsed.ok === true && Array.isArray(parsed.results) ? (parsed.results as unknown[]) : []
+            const media = results
+              .map((x) => (x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : null))
+              .filter(Boolean)
+              .map((x) => ({
+                type: typeof x!.type === 'string' ? String(x!.type).trim() : '',
+                score: typeof x!.score === 'number' && Number.isFinite(x!.score) ? (x!.score as number) : null,
+                filename: typeof x!.filename === 'string' ? String(x!.filename).trim() : '',
+                imagePath: typeof x!.imagePath === 'string' ? String(x!.imagePath).trim() : '',
+                videoPath: typeof x!.videoPath === 'string' ? String(x!.videoPath).trim() : '',
+                videoUrl: typeof x!.videoUrl === 'string' ? String(x!.videoUrl).trim() : '',
+              }))
+              .filter((x) => x.imagePath || x.videoPath || x.videoUrl)
+
+            for (const it of media.slice(0, 6)) {
+              const scoreText = it.score != null ? ` score=${it.score.toFixed(4)}` : ''
+              if (it.type === 'video') {
+                const parts = [
+                  `mmvector.video:${scoreText}`,
+                  it.filename ? ` filename=${it.filename}` : '',
+                  it.videoPath ? ` videoPath=${it.videoPath}` : '',
+                  it.videoUrl ? ` videoUrl=${it.videoUrl}` : '',
+                ].filter(Boolean)
+                lines.push(`- ${parts.join('')}`)
+              } else {
+                const parts = [
+                  `mmvector.image:${scoreText}`,
+                  it.filename ? ` filename=${it.filename}` : '',
+                  it.imagePath ? ` imagePath=${it.imagePath}` : '',
+                ].filter(Boolean)
+                lines.push(`- ${parts.join('')}`)
+              }
+            }
+          }
+
+          if (toolName === 'media.video_qa' && rawOut) {
+            const parsed = parseJsonFromText(rawOut)
+            const ok = parsed?.ok === true
+            const videoPath = ok && typeof parsed?.videoPath === 'string' ? String(parsed.videoPath).trim() : ''
+            const q = ok && typeof parsed?.question === 'string' ? String(parsed.question).trim() : ''
+            if (videoPath) lines.push(`- video_qa: videoPath=${videoPath}${q ? ` question=${q}` : ''}`)
+          }
+
+          if (lines.length === 0 && rawErr && toolName) {
+            // 兜底：把关键错误也记录一条，便于模型后续避免重复踩坑
+            lines.push(`- ${toolName}: error=${rawErr.slice(0, 180)}`)
+          }
+
+          if (lines.length > 0) addSessionToolFacts(sessionId, lines, endedAt)
+        }
+
         const isFinal = t.status === 'done' || t.status === 'failed' || t.status === 'canceled'
 
         const finalizeCtx = taskFinalizeContextRef.current.get(t.id) ?? null
@@ -2786,7 +2984,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     })
 
     return () => off()
-  }, [api, currentSessionId, debugLog, runAutoExtractIfNeeded])
+  }, [addSessionToolFacts, api, currentSessionId, debugLog, runAutoExtractIfNeeded])
 
   const closeOverlays = useCallback(() => {
     setContextMenu(null)
@@ -2802,15 +3000,87 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     reader.readAsDataURL(file)
   }, [])
 
-  const readChatImageFile = useCallback((file: File) => {
-    if (!file.type.startsWith('image/')) return
-    if (file.size > 5 * 1024 * 1024) return
-    const reader = new FileReader()
-    reader.onload = () => setPendingImage(String(reader.result || ''))
-    reader.readAsDataURL(file)
+  const newAttachmentId = useCallback(() => {
+    if ('crypto' in globalThis && typeof globalThis.crypto.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID()
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
   }, [])
 
+  const addPendingAttachment = useCallback((att: Omit<PendingAttachment, 'id'>) => {
+    setPendingAttachments((prev) => [...prev, { id: newAttachmentId(), ...att }])
+  }, [newAttachmentId])
+
+  const removePendingAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => prev.filter((x) => x.id !== id))
+  }, [])
+
+  const readChatImageFile = useCallback(
+    async (file: File) => {
+      if (!file.type.startsWith('image/')) return
+      if (file.size > 5 * 1024 * 1024) {
+        setError('图片太大（>5MB），请压缩后再发送')
+        return
+      }
+
+      const readAsDataUrl = (): Promise<string> =>
+        new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onerror = () => reject(new Error('read failed'))
+          reader.onload = () => resolve(String(reader.result || ''))
+          reader.readAsDataURL(file)
+        })
+
+      try {
+        const dataUrl = await readAsDataUrl()
+        setError(null)
+
+        const filePath = typeof (file as unknown as { path?: unknown }).path === 'string' ? String((file as unknown as { path: string }).path) : ''
+        const saved = await api?.saveChatAttachment({
+          kind: 'image',
+          ...(filePath ? { sourcePath: filePath } : { dataUrl }),
+          ...(file.name ? { filename: file.name } : {}),
+        })
+        if (saved?.ok) {
+          addPendingAttachment({ kind: 'image', path: saved.path, filename: saved.filename, previewDataUrl: dataUrl })
+        }
+      } catch (err) {
+        console.error('[chat] read/save image failed:', err)
+        setError('读取/保存图片失败')
+      }
+    },
+    [addPendingAttachment, api],
+  )
+
+  const readChatVideoFile = useCallback(
+    async (file: File) => {
+      if (!file.type.startsWith('video/')) return
+      const filePath = typeof (file as unknown as { path?: unknown }).path === 'string' ? String((file as unknown as { path: string }).path) : ''
+      if (!filePath) {
+        setError('当前视频无法读取本地路径（请用拖拽文件或“视频”按钮选择）')
+        return
+      }
+      try {
+        setError(null)
+        const saved = await api?.saveChatAttachment({
+          kind: 'video',
+          sourcePath: filePath,
+          ...(file.name ? { filename: file.name } : {}),
+        })
+        if (saved?.ok) addPendingAttachment({ kind: 'video', path: saved.path, filename: saved.filename })
+      } catch (err) {
+        console.error('[chat] save video failed:', err)
+        setError('保存视频失败')
+      }
+    },
+    [addPendingAttachment, api],
+  )
+
   const canUseVision = settings?.ai?.enableVision ?? false
+
+  const MmvectorImage = (props: { imagePath: string; alt: string }) => (
+    <MmvectorImagePreview api={api} imagePath={props.imagePath} alt={props.alt} />
+  )
   const chatOrbEnabled = settings?.chatUi?.contextOrbEnabled ?? false
   const chatOrbX = settings?.chatUi?.contextOrbX ?? 6
   const chatOrbY = settings?.chatUi?.contextOrbY ?? 14
@@ -2994,29 +3264,40 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     const chatHistory: ChatMessage[] = messages.map((m) => {
       if (m.role !== 'user') return { role: 'assistant', content: m.content }
 
-      if (m.image && canUseVision) {
+      const imgCountFromAttachments = Array.isArray(m.attachments)
+        ? m.attachments.filter((a) => a && typeof a === 'object' && (a as { kind?: unknown }).kind === 'image').length
+        : 0
+
+      if ((m.image || imgCountFromAttachments > 0) && canUseVision) {
         const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
         const text = m.content === '[图片]' ? '' : m.content
         if (text.trim().length > 0) parts.push({ type: 'text', text })
-        parts.push({ type: 'image_url', image_url: { url: m.image } })
+        if (m.image) {
+          parts.push({ type: 'image_url', image_url: { url: m.image } })
+        } else {
+          const n = Math.max(0, Math.min(4, imgCountFromAttachments))
+          for (let i = 0; i < n; i += 1) parts.push({ type: 'image_url', image_url: { url: 'data:image/png;base64,' } })
+        }
         return { role: 'user', content: parts }
       }
 
-      const plain = m.content.trim().length > 0 ? m.content : '[图片]'
+      const plain = m.content.trim().length > 0 ? m.content : '[消息]'
       return { role: 'user', content: plain }
     })
 
     // 估算“下一次发送”时会附带的内容：把当前输入（以及待发送图片）也视为会进入上下文
     const inputText = (input ?? '').trim()
     const withPending: ChatMessage[] = [...chatHistory]
-    if (inputText || pendingImage) {
-      if (pendingImage && canUseVision) {
+    const pendingImageCount = pendingAttachments.filter((a) => a.kind === 'image').length
+    if (inputText || pendingImageCount > 0) {
+      if (pendingImageCount > 0 && canUseVision) {
         const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
         if (inputText) parts.push({ type: 'text', text: inputText })
-        parts.push({ type: 'image_url', image_url: { url: pendingImage } })
+        const n = Math.max(0, Math.min(4, pendingImageCount))
+        for (let i = 0; i < n; i += 1) parts.push({ type: 'image_url', image_url: { url: 'data:image/png;base64,' } })
         withPending.push({ role: 'user', content: parts })
       } else {
-        withPending.push({ role: 'user', content: inputText || '[图片]' })
+        withPending.push({ role: 'user', content: inputText || '[消息]' })
       }
     }
 
@@ -3039,7 +3320,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     estimateTokensFromText,
     input,
     messages,
-    pendingImage,
+    pendingAttachments,
     settings?.ai,
     systemAddonForUsage,
     trimChatHistoryToMaxContext,
@@ -3190,13 +3471,24 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
   const send = useCallback(async (override?: {
     text?: string
-    image?: string | null
     source?: 'manual' | 'asr'
     baseMessages?: ChatMessageRecord[]
+    attachments?: Array<{ kind: 'image' | 'video'; path: string; filename?: string }>
   }) => {
     const source = override?.source ?? 'manual'
     const text = (override?.text ?? input).trim()
-    const image = source === 'manual' ? (override?.image ?? pendingImage) : (override?.image ?? null)
+    const attachmentsRaw =
+      source === 'manual'
+        ? (override?.attachments ??
+          pendingAttachments.map((a) => ({ kind: a.kind, path: a.path, filename: a.filename })))
+        : (override?.attachments ?? [])
+    const attachments = attachmentsRaw
+      .map((a) => ({
+        kind: a.kind,
+        path: String(a.path ?? '').trim(),
+        filename: typeof a.filename === 'string' ? a.filename.trim() : '',
+      }))
+      .filter((a) => (a.kind === 'image' || a.kind === 'video') && a.path.length > 0)
     if (!api || !currentSessionId) return
 
     // 发送新消息前先停止正在播放的 TTS/气泡（作为“打断”）
@@ -3208,9 +3500,9 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
     if (isLoadingRef.current) {
       interrupt()
-      if (!text && !image) return
+      if (!text && attachments.length === 0) return
     } else {
-      if (!text && !image) return
+      if (!text && attachments.length === 0) return
     }
 
     const aiService = getAIService()
@@ -3219,17 +3511,24 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       return
     }
 
-    if (image && !canUseVision) {
-      setError('当前未启用识图能力，无法发送图片（请在设置 -> AI 设置中开启）')
-      return
-    }
-
     // Add user message
+    const attachmentLabel = (() => {
+      const tags: string[] = []
+      const imgCount = attachments.filter((a) => a.kind === 'image').length
+      const vidCount = attachments.filter((a) => a.kind === 'video').length
+      if (imgCount > 0) tags.push(imgCount === 1 ? '[图片]' : `[图片x${imgCount}]`)
+      if (vidCount > 0) tags.push(vidCount === 1 ? '[视频]' : `[视频x${vidCount}]`)
+      return tags.join('') || ''
+    })()
+    const firstImagePath = attachments.find((a) => a.kind === 'image')?.path ?? ''
+    const firstVideoPath = attachments.find((a) => a.kind === 'video')?.path ?? ''
     const userMessage: ChatMessageRecord = {
       id: newMessageId(),
       role: 'user',
-      content: text || '[图片]',
-      image: image || undefined,
+      content: text || attachmentLabel || '[消息]',
+      attachments: attachments.length ? attachments : undefined,
+      imagePath: firstImagePath || undefined, // 兼容旧逻辑：保留第一张图路径
+      videoPath: firstVideoPath || undefined, // 兼容旧逻辑：保留第一个视频路径
       createdAt: Date.now(),
     }
     const baseMessages = override?.baseMessages ?? messages
@@ -3237,7 +3536,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     setMessages(nextMessages)
     if (source === 'manual') {
       setInput('')
-      setPendingImage(null)
+      setPendingAttachments([])
     }
     setError(null)
     isLoadingRef.current = true
@@ -3247,21 +3546,49 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
     try {
       // Build chat history for context
-      let chatHistory: ChatMessage[] = nextMessages.map((m) => {
-        if (m.role !== 'user') return { role: 'assistant', content: m.content }
+      type VisionPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+      const buildLastUserWithVision = async (m: ChatMessageRecord): Promise<ChatMessage> => {
+        const text = String(m.content ?? '').trim()
+        const imagePaths = attachments.filter((a) => a.kind === 'image').map((a) => a.path).slice(0, 4)
+        if (!canUseVision || imagePaths.length === 0) return { role: 'user', content: text || attachmentLabel || '[消息]' }
+
+        const parts: VisionPart[] = []
+        if (text.length > 0) parts.push({ type: 'text', text })
+        for (const p of imagePaths) {
+          try {
+            const res = await api.readChatAttachmentDataUrl(p)
+            if (res?.ok && typeof res.dataUrl === 'string') parts.push({ type: 'image_url', image_url: { url: res.dataUrl } })
+          } catch {
+            /* ignore */
+          }
+        }
+        if (parts.some((x) => x.type === 'image_url')) return { role: 'user', content: parts }
+        return { role: 'user', content: text || attachmentLabel || '[消息]' }
+      }
+
+      let chatHistory: ChatMessage[] = []
+      for (const m of nextMessages) {
+        if (m.role !== 'user') {
+          if (m.content.trim().length > 0) chatHistory.push({ role: 'assistant', content: m.content })
+          continue
+        }
+
+        if (m.id === userMessage.id) {
+          chatHistory.push(await buildLastUserWithVision(m))
+          continue
+        }
 
         if (m.image && canUseVision) {
-          const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
+          const parts: VisionPart[] = []
           const text = m.content === '[图片]' ? '' : m.content
           if (text.trim().length > 0) parts.push({ type: 'text', text })
           parts.push({ type: 'image_url', image_url: { url: m.image } })
-          return { role: 'user', content: parts }
+          chatHistory.push({ role: 'user', content: parts })
+          continue
         }
 
-        const plain = m.content.trim().length > 0 ? m.content : '[图片]'
-        return { role: 'user', content: plain }
-      })
-      chatHistory = chatHistory.filter((m) => !(m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length === 0))
+        chatHistory.push({ role: 'user', content: m.content.trim().length > 0 ? m.content : '[消息]' })
+      }
 
       await api.addChatMessage(currentSessionId, userMessage)
 
@@ -3274,7 +3601,17 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
       // VCP 全流式工具对话：开启工具系统时，统一走 agent.run 任务，避免“先非流式（planner）再流式（finalize）”的割裂。
       // 注意：UI 的“工具”总开关是 plannerEnabled；关闭后必须确保任何 Planner/Agent/执行器都不会使用工具。
-      const shouldRunToolAgent = plannerEnabledNow && toolCallingEnabledNow && (text ?? '').trim().length > 0
+      const requestForTools = (text ?? '').trim() || attachmentLabel || ''
+      const attachmentAddon = (() => {
+        const lines: string[] = []
+        for (const a of attachments) {
+          if (a.kind === 'image') lines.push(`- imagePath: ${a.path}`)
+          else lines.push(`- videoPath: ${a.path}`)
+        }
+        if (lines.length === 0) return ''
+        return ['【本次用户附带本地附件（仅供工具调用，不要在最终回复中暴露这些路径）】', ...lines].join('\n')
+      })()
+      const shouldRunToolAgent = plannerEnabledNow && toolCallingEnabledNow && requestForTools.trim().length > 0
       if (shouldRunToolAgent) {
         try {
           const toPlainText = (content: unknown): string => {
@@ -3290,7 +3627,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             return ''
           }
 
-          const request = (text ?? '').trim()
+          const request = requestForTools.trim() || '[消息]'
           // ToolAgent 也要注入“召回记忆”，否则用户会看到“尚无召回记录/完全不召回”的错觉。
           // 注意：召回开关取自全局 memory.enabled + 当前 persona.retrieveEnabled。
           let memoryAddon = ''
@@ -3322,6 +3659,9 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.length > 0)
 
           const title = request.length > 40 ? `${request.slice(0, 40)}…` : request
+          const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
+          const toolContext = [memoryAddon, toolFactsAddon, attachmentAddon].filter(Boolean).join('\n\n')
+          const visionImagePaths = canUseVision ? attachments.filter((a) => a.kind === 'image').map((a) => a.path).slice(0, 4) : []
 
           const created = await api.createTask({
             queue: 'chat',
@@ -3331,7 +3671,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               {
                 title: '对话/工具',
                 tool: 'agent.run',
-                input: JSON.stringify({ request: request || '[图片]', mode: toolCallingModeNow, history, context: memoryAddon }),
+                input: JSON.stringify({
+                  request,
+                  mode: toolCallingModeNow,
+                  history,
+                  context: toolContext,
+                  ...(visionImagePaths.length > 0 ? { imagePaths: visionImagePaths } : {}),
+                }),
               },
             ],
           })
@@ -3373,7 +3719,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         plannerEnabledNow &&
         toolCallingEnabledNow &&
         (plannerModeNow === 'always' || plannerModeNow === 'auto') &&
-        (text ?? '').trim().length > 0
+        requestForTools.trim().length > 0
 
       if (shouldTryPlanner) {
         try {
@@ -3413,6 +3759,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                   motions: toolAnimRef.current.motionGroups ?? [],
                 }),
               },
+              ...(attachmentAddon ? [{ role: 'system' as const, content: attachmentAddon }] : []),
               ...plannerHistory,
             ],
             { signal: abort.signal },
@@ -3524,14 +3871,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               } catch {
                 systemAddon = ''
               }
+              const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
+              const mergedSystemAddon = [systemAddon.trim(), toolFactsAddon.trim()].filter(Boolean).join('\n\n')
 
               const historyWithPreface = [...chatHistory, { role: 'assistant' as const, content: assistantMessage.content }]
-              const trimmed = trimChatHistoryToMaxContext(historyWithPreface, systemAddon)
+              const trimmed = trimChatHistoryToMaxContext(historyWithPreface, mergedSystemAddon)
               taskFinalizeContextRef.current.set(created.id, {
                 sessionId: currentSessionId,
                 messageId: assistantId,
                 chatHistory: trimmed.history,
-                systemAddon,
+                systemAddon: mergedSystemAddon,
                 userText: text,
               })
               void runAutoExtractIfNeeded(currentSessionId)
@@ -3569,6 +3918,11 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         }
       } catch (_) {
         setLastRetrieveDebug(null)
+      }
+
+      {
+        const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
+        if (toolFactsAddon.trim()) systemAddonParts.push(toolFactsAddon.trim())
       }
 
       const systemAddon = systemAddonParts.filter(Boolean).join('\n\n')
@@ -3845,7 +4199,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     input,
     messages,
     newMessageId,
-    pendingImage,
+    pendingAttachments,
+    buildSessionToolFactsAddon,
     refreshSessions,
     retrieveEnabled,
     interrupt,
@@ -4300,9 +4655,25 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         setMessages(baseMessages)
         await api.setChatMessages(currentSessionId, baseMessages)
 
-        const resendText = userMsg.content === '[图片]' ? '' : userMsg.content
-        const resendImage = userMsg.image ?? null
-        await send({ text: resendText, image: resendImage, source: 'manual', baseMessages })
+        const rawText = String(userMsg.content ?? '').trim()
+        const hasText = rawText.replace(/\[[^\]]+\]/g, '').trim().length > 0
+        const resendText = hasText ? rawText : ''
+        const resendAttachmentsRaw =
+          Array.isArray(userMsg.attachments) && userMsg.attachments.length > 0
+            ? userMsg.attachments
+            : [
+                ...(userMsg.imagePath ? [{ kind: 'image' as const, path: userMsg.imagePath }] : []),
+                ...(userMsg.videoPath ? [{ kind: 'video' as const, path: userMsg.videoPath }] : []),
+              ]
+        const resendAttachments = resendAttachmentsRaw
+          .map((a) => {
+            const kind = (a as { kind?: unknown }).kind === 'video' ? ('video' as const) : ('image' as const)
+            const path = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
+            const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
+            return { kind, path, ...(filename ? { filename } : {}) }
+          })
+          .filter((a) => a.path.length > 0)
+        await send({ text: resendText, attachments: resendAttachments, source: 'manual', baseMessages })
         return
       } catch (err) {
         console.error('[Resend] fallback legacy resend:', err)
@@ -4972,9 +5343,78 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
             const steps = Array.isArray(t.steps) ? t.steps : []
 
+            const toMediaSrc = (mediaUrl: string, mediaPath: string): string => {
+              const url = String(mediaUrl ?? '').trim()
+              if (url) return url
+              const p = String(mediaPath ?? '').trim()
+              if (!p) return ''
+              if (/^(https?:|file:|data:|blob:)/i.test(p)) return p
+              if (/^[a-zA-Z]:[\\/]/.test(p)) return `file:///${p.replace(/\\/g, '/')}`
+              if (p.startsWith('\\\\')) return `file:${p.replace(/\\/g, '/')}`
+              if (p.startsWith('/')) return `file://${p}`
+              return p
+            }
+
+            const parseMmvectorResults = (
+              raw: string,
+            ): null | {
+              count?: number
+              results: Array<{
+                id?: number
+                type?: string
+                score?: number
+                filename?: string
+                imagePath?: string
+                videoUrl?: string
+                videoPath?: string
+              }>
+            } => {
+              const text = String(raw ?? '').trim()
+              if (!text) return null
+              const first = text.indexOf('{')
+              const last = text.lastIndexOf('}')
+              if (first < 0 || last <= first) return null
+              try {
+                const parsed = (() => {
+                  try {
+                    return JSON.parse(text) as unknown
+                  } catch {
+                    return JSON.parse(text.slice(first, last + 1)) as unknown
+                  }
+                })()
+                const obj = parsed
+                if (!obj || typeof obj !== 'object') return null
+                const ok = (obj as { ok?: unknown }).ok
+                if (ok !== true) return null
+                const results = (obj as { results?: unknown }).results
+                if (!Array.isArray(results)) return null
+                return {
+                  count: typeof (obj as { count?: unknown }).count === 'number' ? (obj as { count: number }).count : undefined,
+                  results: results as Array<{
+                    id?: number
+                    type?: string
+                    score?: number
+                    filename?: string
+                    videoUrl?: string
+                    videoPath?: string
+                  }>,
+                }
+              } catch {
+                return null
+              }
+            }
+
             const renderRun = (r: (typeof runs)[number], idx: number): React.ReactNode => {
               const progress = runs.length > 1 ? `${idx + 1}/${runs.length}` : ''
               const pillStatus = r.status === 'error' ? 'failed' : r.status
+              const mm = r.outputPreview ? parseMmvectorResults(r.outputPreview) : null
+              const mmMedia =
+                mm?.results?.filter((x) => {
+                  const t = String(x?.type ?? '')
+                  if (t === 'video') return String(x?.videoUrl ?? '').trim() || String(x?.videoPath ?? '').trim()
+                  if (t === 'image') return String(x?.imagePath ?? '').trim()
+                  return false
+                }) ?? []
               return (
                 <details key={r.id} className="ndp-tooluse">
                   <summary className="ndp-tooluse-summary">
@@ -4991,6 +5431,68 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                       </div>
                       {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
                       {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
+                      {mmMedia.length > 0 ? (
+                        <div className="ndp-mmvector-results">
+                          <div className="ndp-mmvector-title">多模态结果（可预览/播放）</div>
+                          <div className="ndp-mmvector-grid">
+                            {mmMedia.map((it) => {
+                              const isVideo = String(it.type ?? '') === 'video'
+                              const src = isVideo
+                                ? toMediaSrc(String(it.videoUrl ?? ''), String(it.videoPath ?? ''))
+                                : toMediaSrc('', String(it.imagePath ?? ''))
+                              if (!src) return null
+                              const labelParts: string[] = []
+                              if (it.filename) labelParts.push(String(it.filename))
+                              if (typeof it.score === 'number' && Number.isFinite(it.score)) labelParts.push(it.score.toFixed(4))
+                              const label = labelParts.join(' · ')
+                              return (
+                                <div key={`mmv-${String(it.id ?? '')}-${src}`} className="ndp-mmvector-item">
+                                  {isVideo ? (
+                                    <LocalVideo api={api} videoPath={src} className="ndp-mmvector-video" controls preload="metadata" playsInline />
+                                  ) : (
+                                    <MmvectorImage imagePath={String(it.imagePath ?? '')} alt={String(it.filename ?? 'image')} />
+                                  )}
+                                  <div className="ndp-mmvector-meta" title={src}>
+                                    {label || src}
+                                  </div>
+                                  <div className="ndp-mmvector-actions">
+                                    <button
+                                      className="ndp-btn ndp-btn-mini"
+                                      onClick={() => {
+                                        const target = isVideo
+                                          ? (String(it.videoUrl ?? '').trim() || String(it.videoPath ?? '').trim() || src)
+                                          : (String(it.imagePath ?? '').trim() || src)
+                                        void (async () => {
+                                          const raw = String(target ?? '').trim()
+                                          if (!raw) return
+                                          if (/^(https?:|data:|blob:)/i.test(raw)) {
+                                            window.open(raw, '_blank')
+                                            return
+                                          }
+                                          if (api) {
+                                            try {
+                                              const res = await api.getChatAttachmentUrl(raw)
+                                              if (res?.ok && typeof res.url === 'string') {
+                                                window.open(res.url, '_blank')
+                                                return
+                                              }
+                                            } catch {
+                                              /* ignore */
+                                            }
+                                          }
+                                          window.open(toLocalMediaSrc(raw), '_blank')
+                                        })()
+                                      }}
+                                    >
+                                      打开
+                                    </button>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
                       {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
                     </div>
                   </div>
@@ -5054,9 +5556,88 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           const blocks = !isUser ? normalizeMessageBlocks(m) : []
           const hasToolBlock = !isUser && blocks.some((b) => b.type === 'tool_use')
 
-          const imageNode = m.image ? (
-            <img className="ndp-msg-image" src={m.image} alt="attachment" onClick={() => window.open(m.image, '_blank')} />
-          ) : null
+          const openAttachment = async (pathOrUrl: string) => {
+            const raw = String(pathOrUrl ?? '').trim()
+            if (!raw) return
+            if (/^(https?:|data:|blob:)/i.test(raw)) {
+              window.open(raw, '_blank')
+              return
+            }
+            if (!api) {
+              window.open(toLocalMediaSrc(raw), '_blank')
+              return
+            }
+            try {
+              const res = await api.getChatAttachmentUrl(raw)
+              if (res?.ok && typeof res.url === 'string') {
+                window.open(res.url, '_blank')
+                return
+              }
+            } catch {
+              /* ignore */
+            }
+            window.open(toLocalMediaSrc(raw), '_blank')
+          }
+
+          const attachmentsNode = (() => {
+            const normalized: Array<{ kind: 'image' | 'video'; path?: string; dataUrl?: string; filename?: string }> = []
+
+            if (Array.isArray(m.attachments)) {
+              for (const a of m.attachments) {
+                if (!a || typeof a !== 'object') continue
+                const kind = (a as { kind?: unknown }).kind === 'video' ? 'video' : (a as { kind?: unknown }).kind === 'image' ? 'image' : ''
+                const p = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
+                const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
+                if (!kind || !p) continue
+                normalized.push({ kind, path: p, ...(filename ? { filename } : {}) })
+              }
+            }
+
+            if (normalized.length === 0) {
+              if (m.imagePath) normalized.push({ kind: 'image', path: String(m.imagePath) })
+              if (m.videoPath) normalized.push({ kind: 'video', path: String(m.videoPath) })
+              if (m.image && !m.imagePath) normalized.push({ kind: 'image', dataUrl: String(m.image) })
+            }
+
+            if (normalized.length === 0) return null
+
+            return (
+              <div className="ndp-msg-attachments">
+                {normalized.map((a, idx) => {
+                  const key = `${m.id}-att-${idx}-${String(a.kind)}-${String(a.path ?? a.dataUrl ?? '')}`
+                  if (a.kind === 'video') {
+                    const p = String(a.path ?? '').trim()
+                    if (!p) return null
+                    return (
+                      <div key={key} className="ndp-msg-attachment">
+                        <LocalVideo api={api} className="ndp-msg-video" videoPath={p} controls preload="metadata" playsInline />
+                        <button className="ndp-attachment-open" onClick={() => void openAttachment(p)} title="打开">
+                          打开
+                        </button>
+                      </div>
+                    )
+                  }
+
+                  const dataUrl = String(a.dataUrl ?? '').trim()
+                  const p = String(a.path ?? '').trim()
+                  const src = dataUrl || p
+                  if (!src) return null
+                  return (
+                    <div key={key} className="ndp-msg-attachment">
+                      {dataUrl ? (
+                        <img className="ndp-msg-image" src={dataUrl} alt="attachment" />
+                      ) : (
+                        <MmvectorImagePreview api={api} imagePath={p} alt="attachment" />
+                      )}
+                      <button className="ndp-attachment-open" onClick={() => void openAttachment(src)} title="打开">
+                        打开
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })()
 
           if (isSegmentedAssistant && !hasToolBlock && editingMessageId !== m.id) {
             const segments = splitTextIntoTtsSegments(m.content, { lang: 'zh', textSplitMethod: 'cut5' })
@@ -5081,14 +5662,18 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                     const displaySeg = trimTrailingCommaForSegment(seg)
                     const isLast = i === visible.length - 1
                     return (
-                      <div key={`${m.id}-${i}`} className="ndp-msg ndp-msg-pet">
-                        <div className="ndp-msg-content">
-                          {displaySeg}
-                          {isLast ? imageNode : null}
+                        <div key={`${m.id}-${i}`} className="ndp-msg ndp-msg-pet">
+                          <div className="ndp-msg-content">
+                            {displaySeg}
+                            {isLast ? (
+                              <>
+                                {attachmentsNode}
+                              </>
+                            ) : null}
+                          </div>
                         </div>
-                      </div>
-                    )
-                  })}
+                      )
+                    })}
                 </div>
               </div>
             )
@@ -5164,7 +5749,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                           return null
                         })
                         })()}
-                    {imageNode}
+                    {attachmentsNode}
                   </div>
                 )}
               </div>
@@ -5202,12 +5787,25 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       )}
 
       <footer className="ndp-chat-input">
-        {pendingImage ? (
-          <div className="ndp-input-preview" onMouseDown={(e) => e.stopPropagation()}>
-            <img src={pendingImage} alt="preview" />
-            <button className="ndp-preview-remove" onClick={() => setPendingImage(null)} title="移除图片">
-              ×
-            </button>
+        {pendingAttachments.length > 0 ? (
+          <div className="ndp-input-previews" onMouseDown={(e) => e.stopPropagation()}>
+            {pendingAttachments.map((a) => (
+              <div key={a.id} className="ndp-input-preview">
+                {a.kind === 'video' ? (
+                  <LocalVideo api={api} videoPath={a.path} controls={false} muted playsInline preload="metadata" />
+                ) : a.previewDataUrl ? (
+                  <img src={a.previewDataUrl} alt="preview" />
+                ) : (
+                  <MmvectorImagePreview api={api} imagePath={a.path} alt="preview" />
+                )}
+                <div className="ndp-input-preview-meta" title={a.path}>
+                  {a.filename || a.kind}
+                </div>
+                <button className="ndp-preview-remove" onClick={() => removePendingAttachment(a.id)} title="移除">
+                  ×
+                </button>
+              </div>
+            ))}
           </div>
         ) : null}
         <div className="ndp-chat-input-row">
@@ -5216,45 +5814,57 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={(e) => {
-              const items = e.clipboardData?.items
-              if (!items) return
-              for (const item of items) {
-                if (item.type.startsWith('image/')) {
-                  if (!canUseVision) {
-                    e.preventDefault()
-                    setError('请先在设置中开启识图能力')
-                    break
-                  }
-                  e.preventDefault()
-                  const file = item.getAsFile()
-                  if (file) readChatImageFile(file)
-                  break
+              const dt = e.clipboardData
+              if (!dt) return
+
+              const files = Array.from(dt.files ?? []).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
+              if (files.length > 0) {
+                e.preventDefault()
+                for (const f of files) {
+                  if (f.type.startsWith('image/')) void readChatImageFile(f)
+                  else void readChatVideoFile(f)
                 }
+                return
+              }
+
+              const items = dt.items
+              if (!items) return
+              const mediaItems = Array.from(items).filter((it) => it.type.startsWith('image/') || it.type.startsWith('video/'))
+              if (mediaItems.length === 0) return
+              e.preventDefault()
+              for (const item of mediaItems) {
+                const file = item.getAsFile()
+                if (!file) continue
+                if (file.type.startsWith('image/')) void readChatImageFile(file)
+                else void readChatVideoFile(file)
               }
             }}
             onDrop={(e) => {
               e.preventDefault()
-              const file = e.dataTransfer?.files?.[0]
-              if (!file) return
-              if (file.type.startsWith('image/') && !canUseVision) {
-                setError('请先在设置中开启识图能力')
+              const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
+              if (files.length === 0) {
+                setError('只支持拖拽图片或视频文件')
                 return
               }
-              readChatImageFile(file)
+              for (const file of files) {
+                if (file.type.startsWith('image/')) void readChatImageFile(file)
+                else void readChatVideoFile(file)
+              }
             }}
             onDragOver={(e) => e.preventDefault()}
             placeholder="输入一句话..."
           />
-          <button
-            className="ndp-btn"
-            onClick={() => imageInputRef.current?.click()}
-            disabled={!canUseVision}
-            title={canUseVision ? '选择图片' : '请先在设置中开启识图能力'}
-          >
+          <button className="ndp-btn" onClick={() => imageInputRef.current?.click()} title={canUseVision ? '选择图片' : '选择图片（不会发给模型，只用于存档/检索）'}>
             图片
           </button>
-          <button className="ndp-btn" onClick={() => send()} disabled={!input.trim() && !pendingImage && !isLoading}>
-            {isLoading ? (!input.trim() && !pendingImage ? '打断' : '打断并发送') : '发送'}
+          <button className="ndp-btn" onClick={() => videoInputRef.current?.click()} title="选择视频（本地存档/检索用）">
+            视频
+          </button>
+          <button className="ndp-btn" onClick={() => attachmentInputRef.current?.click()} title="选择附件（可多选图片/视频）">
+            附件
+          </button>
+          <button className="ndp-btn" onClick={() => send()} disabled={!input.trim() && pendingAttachments.length === 0 && !isLoading}>
+            {isLoading ? (!input.trim() && pendingAttachments.length === 0 ? '打断' : '打断并发送') : '发送'}
           </button>
         </div>
       </footer>
@@ -5263,11 +5873,47 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         ref={imageInputRef}
         type="file"
         accept="image/*"
+        multiple
         style={{ display: 'none' }}
         onChange={(e) => {
-          const file = e.target.files?.[0]
-          if (!file) return
-          readChatImageFile(file)
+          const files = Array.from(e.target.files ?? [])
+          for (const file of files) {
+            if (!file) continue
+            void readChatImageFile(file)
+          }
+          e.currentTarget.value = ''
+        }}
+      />
+
+      <input
+        ref={videoInputRef}
+        type="file"
+        accept="video/*"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? [])
+          for (const file of files) {
+            if (!file) continue
+            void readChatVideoFile(file)
+          }
+          e.currentTarget.value = ''
+        }}
+      />
+
+      <input
+        ref={attachmentInputRef}
+        type="file"
+        accept="image/*,video/*"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? [])
+          for (const file of files) {
+            if (!file) continue
+            if (file.type.startsWith('image/')) void readChatImageFile(file)
+            else if (file.type.startsWith('video/')) void readChatVideoFile(file)
+          }
           e.currentTarget.value = ''
         }}
       />
@@ -6376,6 +7022,12 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
   const vectorAiBaseUrl = settings?.memory?.vectorAiBaseUrl ?? ''
   const vectorAiApiKey = settings?.memory?.vectorAiApiKey ?? ''
 
+  const mmVectorEnabled = settings?.memory?.mmVectorEnabled ?? false
+  const mmVectorEmbeddingModel = settings?.memory?.mmVectorEmbeddingModel ?? 'qwen3-vl-embedding-8b'
+  const mmVectorUseCustomAi = settings?.memory?.mmVectorUseCustomAi ?? false
+  const mmVectorAiBaseUrl = settings?.memory?.mmVectorAiBaseUrl ?? ''
+  const mmVectorAiApiKey = settings?.memory?.mmVectorAiApiKey ?? ''
+
   const kgEnabled = settings?.memory?.kgEnabled ?? false
   const kgIncludeChatMessages = settings?.memory?.kgIncludeChatMessages ?? false
   const kgUseCustomAi = settings?.memory?.kgUseCustomAi ?? true
@@ -6389,6 +7041,7 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
   const [currentPersona, setCurrentPersona] = useState<Persona | null>(null)
   const [draftName, setDraftName] = useState('')
   const [draftPrompt, setDraftPrompt] = useState('')
+  const [subTab, setSubTab] = useState<'persona' | 'memory' | 'recall' | 'textVector' | 'mmVector' | 'manage'>('persona')
   const [memScope, setMemScope] = useState<'persona' | 'shared' | 'all'>('persona')
   const [memRole, setMemRole] = useState<'all' | 'user' | 'assistant' | 'note'>('all')
   const [memQuery, setMemQuery] = useState('')
@@ -6565,128 +7218,169 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
 
   return (
     <div className="ndp-settings-section">
-      <h3>角色</h3>
-
-      <div className="ndp-setting-item">
-        <label>当前角色</label>
-        <div className="ndp-row">
-          <select className="ndp-select" value={activePersonaId} onChange={(e) => void onChangePersona(e.target.value)}>
-            {personas.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <button className="ndp-btn" onClick={() => void onCreatePersona()}>
-            新建
-          </button>
-          <button className="ndp-btn" disabled={!currentPersona || currentPersona.id === 'default'} onClick={() => void onDeletePersona()}>
-            删除
-          </button>
-        </div>
-        <p className="ndp-setting-hint">每个角色的长期记忆与会话列表隔离；公共事实层后续再加。</p>
+      <div className="ndp-settings-subtabs">
+        <button className={`ndp-tab-btn ${subTab === 'persona' ? 'active' : ''}`} onClick={() => setSubTab('persona')}>
+          角色
+        </button>
+        <button className={`ndp-tab-btn ${subTab === 'memory' ? 'active' : ''}`} onClick={() => setSubTab('memory')}>
+          记忆
+        </button>
+        <button className={`ndp-tab-btn ${subTab === 'recall' ? 'active' : ''}`} onClick={() => setSubTab('recall')}>
+          召回
+        </button>
+        <button className={`ndp-tab-btn ${subTab === 'textVector' ? 'active' : ''}`} onClick={() => setSubTab('textVector')}>
+          文本向量
+        </button>
+        <button className={`ndp-tab-btn ${subTab === 'mmVector' ? 'active' : ''}`} onClick={() => setSubTab('mmVector')}>
+          多模态向量
+        </button>
+        <button className={`ndp-tab-btn ${subTab === 'manage' ? 'active' : ''}`} onClick={() => setSubTab('manage')}>
+          管理
+        </button>
       </div>
 
-      <div className="ndp-setting-item">
-        <label>角色名称</label>
-        <div className="ndp-row">
-          <input className="ndp-input" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
-          <button className="ndp-btn" disabled={!currentPersona} onClick={() => void onRenamePersona()}>
-            保存
-          </button>
-        </div>
-      </div>
+      {subTab === 'persona' ? (
+        <>
+          <h3>角色</h3>
 
-      <div className="ndp-setting-item">
-        <label>人设补充提示词</label>
-        <textarea
-          className="ndp-textarea"
-          rows={10}
-          value={draftPrompt}
-          placeholder="写下这个角色的口癖、价值观、禁忌、关系设定等（会追加到全局 systemPrompt 后）"
-          onChange={(e) => {
-            const next = e.target.value
-            setDraftPrompt(next)
-            if (currentPersona) scheduleSavePrompt(currentPersona.id, next)
-          }}
-        />
-        <p className="ndp-setting-hint">建议只写“稳定约束”。对话原文会自动写入长期记忆库用于召回。</p>
-      </div>
+          <div className="ndp-setting-item">
+            <label>当前角色</label>
+            <div className="ndp-row">
+              <select className="ndp-select" value={activePersonaId} onChange={(e) => void onChangePersona(e.target.value)}>
+                {personas.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <button className="ndp-btn" onClick={() => void onCreatePersona()}>
+                新建
+              </button>
+              <button className="ndp-btn" disabled={!currentPersona || currentPersona.id === 'default'} onClick={() => void onDeletePersona()}>
+                删除
+              </button>
+            </div>
+            <p className="ndp-setting-hint">每个角色的长期记忆与会话列表隔离；公共事实层后续再加。</p>
+          </div>
 
-      <h3>记忆开关</h3>
+          <div className="ndp-setting-item">
+            <label>角色名称</label>
+            <div className="ndp-row">
+              <input className="ndp-input" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+              <button className="ndp-btn" disabled={!currentPersona} onClick={() => void onRenamePersona()}>
+                保存
+              </button>
+            </div>
+          </div>
 
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={memoryEnabled} onChange={(e) => void onToggleGlobalMemory(e.target.checked)} />
-          <span>启用长期记忆（全局）</span>
-        </label>
-        <p className="ndp-setting-hint">关闭后不会再记录新内容，也不会将记忆注入到提示词。</p>
-      </div>
+          <div className="ndp-setting-item">
+            <label>人设补充提示词</label>
+            <textarea
+              className="ndp-textarea"
+              rows={10}
+              value={draftPrompt}
+              placeholder="写下这个角色的口癖、价值观、禁忌、关系设定等（会追加到全局 systemPrompt 后）"
+              onChange={(e) => {
+                const next = e.target.value
+                setDraftPrompt(next)
+                if (currentPersona) scheduleSavePrompt(currentPersona.id, next)
+              }}
+            />
+            <p className="ndp-setting-hint">建议只写“稳定约束”。对话原文会自动写入长期记忆库用于召回。</p>
+          </div>
+        </>
+      ) : null}
 
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={includeSharedOnRetrieve}
-            onChange={(e) => void onToggleIncludeShared(e.target.checked)}
-          />
-          <span>检索时包含共享记忆（默认）</span>
-        </label>
-      </div>
+      {subTab === 'memory' ? <h3>记忆开关</h3> : null}
 
-      <h3>向量去重</h3>
+      {subTab === 'memory' ? (
+        <>
+          <div className="ndp-setting-item">
+            <label className="ndp-checkbox-label">
+              <input type="checkbox" checked={memoryEnabled} onChange={(e) => void onToggleGlobalMemory(e.target.checked)} />
+              <span>启用长期记忆（全局）</span>
+            </label>
+            <p className="ndp-setting-hint">关闭后不会再记录新内容，也不会将记忆注入到提示词。</p>
+          </div>
 
-      <div className="ndp-setting-item">
-        <label>向量去重阈值（越高越保守）</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={0.1}
-          max={0.99}
-          step={0.01}
-          value={vectorDedupeThreshold}
-          onChange={(e) => void onSetAutoExtractSettings({ vectorDedupeThreshold: Number(e.target.value) })}
-        />
-        <p className="ndp-setting-hint">每次写入记忆时：先用 embeddings 做相似度匹配，命中相似条目就立即合并，不新增重复记录。</p>
-      </div>
+          <div className="ndp-setting-item">
+            <label className="ndp-checkbox-label">
+              <input
+                type="checkbox"
+                checked={includeSharedOnRetrieve}
+                onChange={(e) => void onToggleIncludeShared(e.target.checked)}
+              />
+              <span>检索时包含共享记忆（默认）</span>
+            </label>
+          </div>
+        </>
+      ) : null}
 
-      <h3>召回增强（M5）</h3>
+      {subTab === 'textVector' ? (
+        <>
+          <h3>向量去重</h3>
 
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={tagEnabled}
-            onChange={(e) => void onSetAutoExtractSettings({ tagEnabled: e.target.checked })}
-          />
-          <span>启用 Tag 网络（模糊问法扩展，本地低延迟）</span>
-        </label>
-        <p className="ndp-setting-hint">把重点词拆成轻量 Tag，用于模糊问法的扩展与召回。</p>
-      </div>
+          <div className="ndp-setting-item">
+            <label>向量去重阈值（越高越保守）</label>
+            <input
+              className="ndp-input"
+              type="number"
+              min={0.1}
+              max={0.99}
+              step={0.01}
+              value={vectorDedupeThreshold}
+              onChange={(e) => void onSetAutoExtractSettings({ vectorDedupeThreshold: Number(e.target.value) })}
+            />
+            <p className="ndp-setting-hint">每次写入记忆时：先用 embeddings 做相似度匹配，命中相似条目就立即合并，不新增重复记录。</p>
+          </div>
+        </>
+      ) : null}
 
-      <div className="ndp-setting-item">
-        <label>Tag 扩展数（0=不扩展）</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={0}
-          max={40}
-          value={tagMaxExpand}
-          onChange={(e) => void onSetAutoExtractSettings({ tagMaxExpand: Number(e.target.value) })}
-        />
-      </div>
+      {subTab === 'recall' ? (
+        <>
+          <h3>召回增强（M5）</h3>
 
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={vectorEnabled}
-            onChange={(e) => void onSetAutoExtractSettings({ vectorEnabled: e.target.checked })}
-          />
-          <span>启用向量召回（更强，需 embeddings API）</span>
-        </label>
-        <p className="ndp-setting-hint">启用后会在后台逐步补齐你的记忆嵌入，不会阻塞聊天。</p>
-      </div>
+          <div className="ndp-setting-item">
+            <label className="ndp-checkbox-label">
+              <input
+                type="checkbox"
+                checked={tagEnabled}
+                onChange={(e) => void onSetAutoExtractSettings({ tagEnabled: e.target.checked })}
+              />
+              <span>启用 Tag 网络（模糊问法扩展，本地低延迟）</span>
+            </label>
+            <p className="ndp-setting-hint">把重点词拆成轻量 Tag，用于模糊问法的扩展与召回。</p>
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>Tag 扩展数（0=不扩展）</label>
+            <input
+              className="ndp-input"
+              type="number"
+              min={0}
+              max={40}
+              value={tagMaxExpand}
+              onChange={(e) => void onSetAutoExtractSettings({ tagMaxExpand: Number(e.target.value) })}
+            />
+          </div>
+        </>
+      ) : null}
+
+      {subTab === 'textVector' ? (
+        <>
+          <h3>文本向量召回（M5）</h3>
+
+          <div className="ndp-setting-item">
+            <label className="ndp-checkbox-label">
+              <input
+                type="checkbox"
+                checked={vectorEnabled}
+                onChange={(e) => void onSetAutoExtractSettings({ vectorEnabled: e.target.checked })}
+              />
+              <span>启用向量召回（更强，需 embeddings API）</span>
+            </label>
+            <p className="ndp-setting-hint">启用后会在后台逐步补齐你的记忆嵌入，不会阻塞聊天。</p>
+          </div>
 
       <div className="ndp-setting-item">
         <label>embeddings 模型</label>
@@ -6772,18 +7466,88 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
           </div>
         </>
       ) : null}
+        </>
+      ) : null}
 
-      <h3>图谱层（M6，可选）</h3>
+      {subTab === 'mmVector' ? (
+        <>
+          <h3>多模态向量（按需）</h3>
 
-      <div className="ndp-setting-item">
+          <div className="ndp-setting-item">
+            <label className="ndp-checkbox-label">
+              <input
+                type="checkbox"
+                checked={mmVectorEnabled}
+                onChange={(e) => void onSetAutoExtractSettings({ mmVectorEnabled: e.target.checked })}
+              />
+              <span>启用多模态向量（图片/视频）</span>
+            </label>
+            <p className="ndp-setting-hint">建议按需手动开启：服务成本高，不常开时保持关闭即可。</p>
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>多模态 embeddings 模型</label>
+            <input
+              className="ndp-input"
+              value={mmVectorEmbeddingModel}
+              placeholder="例如：qwen3-vl-embedding-8b"
+              onChange={(e) => void onSetAutoExtractSettings({ mmVectorEmbeddingModel: e.target.value })}
+            />
+          </div>
+
+          <div className="ndp-setting-item">
+            <label className="ndp-checkbox-label">
+              <input
+                type="checkbox"
+                checked={mmVectorUseCustomAi}
+                onChange={(e) => void onSetAutoExtractSettings({ mmVectorUseCustomAi: e.target.checked })}
+              />
+              <span>多模态向量使用单独 API Key/BaseUrl</span>
+            </label>
+            {!mmVectorUseCustomAi ? <p className="ndp-setting-hint">当前将使用聊天的 API Key/BaseUrl。</p> : null}
+          </div>
+
+          {mmVectorUseCustomAi ? (
+            <>
+              <div className="ndp-setting-item">
+                <label>多模态 embeddings BaseUrl</label>
+                <input
+                  className="ndp-input"
+                  value={mmVectorAiBaseUrl}
+                  placeholder="例如：http://127.0.0.1:8000/v1"
+                  onChange={(e) => void onSetAutoExtractSettings({ mmVectorAiBaseUrl: e.target.value })}
+                />
+              </div>
+
+              <div className="ndp-setting-item">
+                <label>多模态 embeddings API Key</label>
+                <input
+                  className="ndp-input"
+                  type="password"
+                  value={mmVectorAiApiKey}
+                  placeholder="留空则不发送 Authorization"
+                  onChange={(e) => void onSetAutoExtractSettings({ mmVectorAiApiKey: e.target.value })}
+                />
+              </div>
+            </>
+          ) : null}
+        </>
+      ) : null}
+
+      {subTab === 'recall' ? <h3>图谱层（M6，可选）</h3> : null}
+
+      {subTab === 'recall' ? (
+        <div className="ndp-setting-item">
         <label className="ndp-checkbox-label">
           <input type="checkbox" checked={kgEnabled} onChange={(e) => void onSetAutoExtractSettings({ kgEnabled: e.target.checked })} />
           <span>启用 KG（实体/关系）召回</span>
         </label>
         <p className="ndp-setting-hint">开启后会在后台用 LLM 抽取实体/关系，并在召回时用“图谱证据”补命中（仍以低延迟为优先）。</p>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="ndp-setting-item">
+      {subTab === 'recall' ? (
+        <div className="ndp-setting-item">
         <label className="ndp-checkbox-label">
           <input
             type="checkbox"
@@ -6793,9 +7557,11 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
           />
           <span>抽取 chat_message（更全但更噪）</span>
         </label>
-      </div>
+        </div>
+      ) : null}
 
-      <div className="ndp-setting-item">
+      {subTab === 'recall' ? (
+        <div className="ndp-setting-item">
         <label className="ndp-checkbox-label">
           <input
             type="checkbox"
@@ -6805,9 +7571,10 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
           />
           <span>KG 抽取使用单独 API</span>
         </label>
-      </div>
+        </div>
+      ) : null}
 
-      {kgEnabled && kgUseCustomAi ? (
+      {subTab === 'recall' && kgEnabled && kgUseCustomAi ? (
         <>
           <div className="ndp-setting-item">
             <label>KG BaseUrl</label>
@@ -6867,7 +7634,9 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
         </>
       ) : null}
 
-      <h3>自动提炼</h3>
+      {subTab === 'memory' ? (
+        <>
+          <h3>自动提炼</h3>
 
       <div className="ndp-setting-item">
         <label className="ndp-checkbox-label">
@@ -6989,146 +7758,158 @@ function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: A
         </div>
       )}
 
-      <div className="ndp-setting-item">
-        <label>当前角色：写入 / 召回</label>
-        <div className="ndp-setting-item">
-          <label className="ndp-checkbox-label">
-            <input
-              type="checkbox"
-              checked={currentPersona?.captureEnabled ?? true}
-              onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureEnabled: e.target.checked })}
-            />
-            <span>允许写入该角色的长期记忆</span>
-          </label>
-        </div>
-        <div className="ndp-setting-item">
-          <label className="ndp-checkbox-label">
-            <input
-              type="checkbox"
-              checked={currentPersona?.captureUser ?? true}
-              onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureUser: e.target.checked })}
-            />
-            <span>记录用户消息</span>
-          </label>
-        </div>
-        <div className="ndp-setting-item">
-          <label className="ndp-checkbox-label">
-            <input
-              type="checkbox"
-              checked={currentPersona?.captureAssistant ?? true}
-              onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureAssistant: e.target.checked })}
-            />
-            <span>记录 AI 消息</span>
-          </label>
-        </div>
-        <div className="ndp-setting-item">
-          <label className="ndp-checkbox-label">
-            <input
-              type="checkbox"
-              checked={currentPersona?.retrieveEnabled ?? true}
-              onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { retrieveEnabled: e.target.checked })}
-            />
-            <span>允许该角色参与召回注入</span>
-          </label>
-        </div>
-      </div>
-
-      <h3>记忆管理</h3>
-
-      <div className="ndp-setting-item">
-        <label>手动添加</label>
-        <div className="ndp-row">
-          <select className="ndp-select" value={memNewScope} onChange={(e) => setMemNewScope(e.target.value as 'persona' | 'shared')}>
-            <option value="persona">当前角色</option>
-            <option value="shared">共享</option>
-          </select>
-          <button className="ndp-btn" onClick={() => void onAddManualMemory()} disabled={!memNewText.trim()}>
-            添加
-          </button>
-        </div>
-        <textarea
-          className="ndp-textarea ndp-textarea-compact"
-          rows={3}
-          value={memNewText}
-          placeholder="写一条手动记忆（例如：长期设定、重要事实、约束）"
-          onChange={(e) => setMemNewText(e.target.value)}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>筛选</label>
-        <div className="ndp-row">
-          <select
-            className="ndp-select"
-            value={memScope}
-            onChange={(e) => {
-              const v = e.target.value
-              if (v === 'persona' || v === 'shared' || v === 'all') setMemScope(v)
-              setMemOffset(0)
-            }}
-          >
-            <option value="persona">当前角色</option>
-            <option value="shared">共享</option>
-            <option value="all">当前角色 + 共享</option>
-          </select>
-          <select
-            className="ndp-select"
-            value={memRole}
-            onChange={(e) => {
-              const v = e.target.value
-              if (v === 'all' || v === 'user' || v === 'assistant' || v === 'note') setMemRole(v)
-              setMemOffset(0)
-            }}
-          >
-            <option value="all">全部</option>
-            <option value="user">用户</option>
-            <option value="assistant">AI</option>
-            <option value="note">笔记</option>
-          </select>
-        </div>
-        <div className="ndp-row" style={{ marginTop: 10 }}>
-          <input className="ndp-input" value={memQuery} placeholder="关键词（LIKE）" onChange={(e) => setMemQuery(e.target.value)} />
-          <button className="ndp-btn" onClick={() => { setMemOffset(0); void refreshMemoryList() }}>
-            搜索
-          </button>
-        </div>
-        <p className="ndp-setting-hint">共 {memTotal} 条</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>列表</label>
-        <div className="ndp-memory-list">
-          {memItems.length === 0 && <div className="ndp-setting-hint">暂无记录</div>}
-          {memItems.map((m) => (
-            <div key={m.rowid} className="ndp-memory-item">
-              <div className="ndp-memory-meta">
-                <span>#{m.rowid}</span>
-                <span>{new Date(m.createdAt).toLocaleString()}</span>
-                <span>{m.scope}</span>
-                <span>{m.role ?? 'note'}</span>
-                <span>{m.kind}</span>
-              </div>
-              <div className="ndp-memory-content">{m.content}</div>
-              <div className="ndp-memory-actions">
-                <button className="ndp-btn" onClick={() => void onDeleteMemory(m.rowid)}>
-                  删除
-                </button>
-              </div>
+          <div className="ndp-setting-item">
+            <label>当前角色：写入 / 召回</label>
+            <div className="ndp-setting-item">
+              <label className="ndp-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={currentPersona?.captureEnabled ?? true}
+                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureEnabled: e.target.checked })}
+                />
+                <span>允许写入该角色的长期记忆</span>
+              </label>
             </div>
-          ))}
-        </div>
-        <div className="ndp-row" style={{ marginTop: 10 }}>
-          <button className="ndp-btn" disabled={memOffset === 0} onClick={() => setMemOffset((o) => Math.max(0, o - 50))}>
-            上一页
-          </button>
-          <button className="ndp-btn" disabled={memOffset + 50 >= memTotal} onClick={() => setMemOffset((o) => o + 50)}>
-            下一页
-          </button>
-          <button className="ndp-btn" onClick={() => void refreshMemoryList()}>
-            刷新
-          </button>
-        </div>
-      </div>
+            <div className="ndp-setting-item">
+              <label className="ndp-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={currentPersona?.captureUser ?? true}
+                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureUser: e.target.checked })}
+                />
+                <span>记录用户消息</span>
+              </label>
+            </div>
+            <div className="ndp-setting-item">
+              <label className="ndp-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={currentPersona?.captureAssistant ?? true}
+                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureAssistant: e.target.checked })}
+                />
+                <span>记录 AI 消息</span>
+              </label>
+            </div>
+            <div className="ndp-setting-item">
+              <label className="ndp-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={currentPersona?.retrieveEnabled ?? true}
+                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { retrieveEnabled: e.target.checked })}
+                />
+                <span>允许该角色参与召回注入</span>
+              </label>
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      {subTab === 'manage' ? (
+        <>
+          <h3>记忆管理</h3>
+
+          <div className="ndp-setting-item">
+            <label>手动添加</label>
+            <div className="ndp-row">
+              <select className="ndp-select" value={memNewScope} onChange={(e) => setMemNewScope(e.target.value as 'persona' | 'shared')}>
+                <option value="persona">当前角色</option>
+                <option value="shared">共享</option>
+              </select>
+              <button className="ndp-btn" onClick={() => void onAddManualMemory()} disabled={!memNewText.trim()}>
+                添加
+              </button>
+            </div>
+            <textarea
+              className="ndp-textarea ndp-textarea-compact"
+              rows={3}
+              value={memNewText}
+              placeholder="写一条手动记忆（例如：长期设定、重要事实、约束）"
+              onChange={(e) => setMemNewText(e.target.value)}
+            />
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>筛选</label>
+            <div className="ndp-row">
+              <select
+                className="ndp-select"
+                value={memScope}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === 'persona' || v === 'shared' || v === 'all') setMemScope(v)
+                  setMemOffset(0)
+                }}
+              >
+                <option value="persona">当前角色</option>
+                <option value="shared">共享</option>
+                <option value="all">当前角色 + 共享</option>
+              </select>
+              <select
+                className="ndp-select"
+                value={memRole}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === 'all' || v === 'user' || v === 'assistant' || v === 'note') setMemRole(v)
+                  setMemOffset(0)
+                }}
+              >
+                <option value="all">全部</option>
+                <option value="user">用户</option>
+                <option value="assistant">AI</option>
+                <option value="note">笔记</option>
+              </select>
+            </div>
+            <div className="ndp-row" style={{ marginTop: 10 }}>
+              <input className="ndp-input" value={memQuery} placeholder="关键词（LIKE）" onChange={(e) => setMemQuery(e.target.value)} />
+              <button
+                className="ndp-btn"
+                onClick={() => {
+                  setMemOffset(0)
+                  void refreshMemoryList()
+                }}
+              >
+                搜索
+              </button>
+            </div>
+            <p className="ndp-setting-hint">共 {memTotal} 条</p>
+          </div>
+
+          <div className="ndp-setting-item">
+            <label>列表</label>
+            <div className="ndp-memory-list">
+              {memItems.length === 0 && <div className="ndp-setting-hint">暂无记录</div>}
+              {memItems.map((m) => (
+                <div key={m.rowid} className="ndp-memory-item">
+                  <div className="ndp-memory-meta">
+                    <span>#{m.rowid}</span>
+                    <span>{new Date(m.createdAt).toLocaleString()}</span>
+                    <span>{m.scope}</span>
+                    <span>{m.role ?? 'note'}</span>
+                    <span>{m.kind}</span>
+                  </div>
+                  <div className="ndp-memory-content">{m.content}</div>
+                  <div className="ndp-memory-actions">
+                    <button className="ndp-btn" onClick={() => void onDeleteMemory(m.rowid)}>
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="ndp-row" style={{ marginTop: 10 }}>
+              <button className="ndp-btn" disabled={memOffset === 0} onClick={() => setMemOffset((o) => Math.max(0, o - 50))}>
+                上一页
+              </button>
+              <button className="ndp-btn" disabled={memOffset + 50 >= memTotal} onClick={() => setMemOffset((o) => o + 50)}>
+                下一页
+              </button>
+              <button className="ndp-btn" onClick={() => void refreshMemoryList()}>
+                刷新
+              </button>
+            </div>
+          </div>
+        </>
+      ) : null}
     </div>
   )
 }

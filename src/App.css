@@ -493,6 +493,12 @@
   color: rgba(255, 255, 255, 0.92);
 }
 
+.ndp-input-previews {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .ndp-input-preview {
   display: flex;
   align-items: center;
@@ -510,6 +516,25 @@
   border-radius: 10px;
   object-fit: cover;
   border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ndp-input-preview video {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.ndp-input-preview-meta {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ndp-preview-remove {
@@ -602,6 +627,52 @@
   margin-top: 10px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   cursor: pointer;
+}
+
+.ndp-msg-video {
+  display: block;
+  width: min(320px, 100%);
+  max-height: 240px;
+  border-radius: 12px;
+  margin-top: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.35);
+  object-fit: cover;
+}
+
+.ndp-msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ndp-msg-attachments .ndp-msg-image,
+.ndp-msg-attachments .ndp-msg-video,
+.ndp-msg-attachments .ndp-mmvector-image {
+  margin-top: 0;
+}
+
+.ndp-msg-attachment {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ndp-attachment-open {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  width: fit-content;
+}
+
+.ndp-attachment-open:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.32);
 }
 
 .ndp-tooluse {
@@ -729,6 +800,61 @@
 
 .ndp-tooluse-run-error {
   color: rgba(248, 113, 113, 0.9);
+}
+
+.ndp-mmvector-results {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.ndp-mmvector-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.88);
+  margin-bottom: 8px;
+}
+
+.ndp-mmvector-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ndp-mmvector-item {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.12);
+  padding: 8px;
+}
+
+.ndp-mmvector-video {
+  width: 100%;
+  max-height: 180px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  object-fit: cover;
+}
+
+.ndp-mmvector-image {
+  width: 100%;
+  max-height: 180px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  object-fit: cover;
+}
+
+.ndp-mmvector-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  word-break: break-word;
+}
+
+.ndp-mmvector-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .ndp-btn-mini {
@@ -1140,6 +1266,22 @@
   gap: 4px;
   background: rgba(0, 0, 0, 0.2);
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ndp-settings-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0;
+  margin: 0 0 14px 0;
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ndp-settings-subtabs .ndp-tab-btn {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  font-size: 12px;
 }
 
 .ndp-tab-btn {

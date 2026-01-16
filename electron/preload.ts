@@ -188,6 +188,16 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     ipcRenderer.invoke('chat:setMessages', sessionId, messages),
   addChatMessage: (sessionId: string, message: ChatMessageRecord): Promise<ChatSession> =>
     ipcRenderer.invoke('chat:addMessage', sessionId, message),
+  saveChatAttachment: (payload: {
+    kind: 'image' | 'video'
+    sourcePath?: string
+    dataUrl?: string
+    filename?: string
+  }): Promise<{ ok: true; kind: 'image' | 'video'; path: string; filename: string; mimeType?: string }> =>
+    ipcRenderer.invoke('chat:saveAttachment', payload),
+  readChatAttachmentDataUrl: (path: string): Promise<{ ok: true; mimeType: string; dataUrl: string }> =>
+    ipcRenderer.invoke('chat:readAttachmentDataUrl', { path }),
+  getChatAttachmentUrl: (path: string): Promise<{ ok: true; url: string }> => ipcRenderer.invoke('chat:getAttachmentUrl', { path }),
   updateChatMessage: (sessionId: string, messageId: string, content: string): Promise<ChatSession> =>
     ipcRenderer.invoke('chat:updateMessage', sessionId, messageId, content),
   updateChatMessageRecord: (sessionId: string, messageId: string, patch: Partial<ChatMessageRecord>): Promise<ChatSession> =>

@@ -509,6 +509,300 @@ export async function executeBuiltinTool(
     return `${header}\n\n[stdout]\n${out}`
   }
 
+  if (toolName === 'media.video_qa') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const videoPath = typeof obj?.videoPath === 'string' ? obj.videoPath.trim() : typeof input === 'string' ? input.trim() : ''
+    const question = typeof obj?.question === 'string' ? obj.question.trim() : ''
+    if (!videoPath) throw new Error('media.video_qa 需要 videoPath')
+    if (!question) throw new Error('media.video_qa 需要 question')
+
+    const segmentSeconds = typeof obj?.segmentSeconds === 'number' ? Math.max(5, Math.min(120, Math.trunc(obj.segmentSeconds))) : 20
+    const framesPerSegment = typeof obj?.framesPerSegment === 'number' ? Math.max(1, Math.min(8, Math.trunc(obj.framesPerSegment))) : 3
+    const maxSegments = typeof obj?.maxSegments === 'number' ? Math.max(1, Math.min(60, Math.trunc(obj.maxSegments))) : 8
+    const startSeconds = typeof obj?.startSeconds === 'number' ? Math.max(0, Math.min(1e9, obj.startSeconds)) : 0
+
+    const maxTokensPerSegment =
+      typeof obj?.maxTokensPerSegment === 'number' ? Math.max(64, Math.min(2048, Math.trunc(obj.maxTokensPerSegment))) : 320
+    const maxTokensFinal = typeof obj?.maxTokensFinal === 'number' ? Math.max(64, Math.min(4096, Math.trunc(obj.maxTokensFinal))) : 420
+
+    const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(5000, Math.min(600000, Math.trunc(obj.timeoutMs))) : 120000
+    const startedAt = Date.now()
+
+    const st = await fs.stat(videoPath).catch(() => null)
+    if (!st || !st.isFile()) throw new Error(`video not found: ${videoPath}`)
+
+    const appSettings = settings
+    const baseUrl = (typeof obj?.baseUrl === 'string' && obj.baseUrl.trim() ? obj.baseUrl.trim() : appSettings.ai.baseUrl).trim()
+    const apiKey = typeof obj?.apiKey === 'string' ? obj.apiKey : appSettings.ai.apiKey
+    const model = (typeof obj?.model === 'string' && obj.model.trim() ? obj.model.trim() : appSettings.ai.model).trim()
+    const temperature =
+      typeof obj?.temperature === 'number'
+        ? Math.max(0, Math.min(2, obj.temperature))
+        : Math.max(0, Math.min(2, appSettings.ai.temperature))
+
+    if (!baseUrl || !model) throw new Error('未配置 LLM baseUrl/model（设置 → AI 设置）')
+
+    const mimeFromExt = (p: string): string => {
+      const ext = path.extname(p).toLowerCase()
+      if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+      if (ext === '.webp') return 'image/webp'
+      if (ext === '.gif') return 'image/gif'
+      return 'image/png'
+    }
+
+    const fileToDataUrl = async (filePath: string): Promise<string | null> => {
+      try {
+        const buf = await fs.readFile(filePath)
+        const b64 = buf.toString('base64')
+        if (!b64) return null
+        return `data:${mimeFromExt(filePath)};base64,${b64}`
+      } catch {
+        return null
+      }
+    }
+
+    const join = (b: string, p: string) => `${b.replace(/\/+$/, '')}/${p.replace(/^\/+/, '')}`
+    const endpoint = join(baseUrl, 'chat/completions')
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    const token = (apiKey ?? '').trim()
+    if (token) headers.authorization = `Bearer ${token}`
+
+    const callLlm = async (payload: Record<string, unknown>, perCallTimeoutMs: number): Promise<string> => {
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(new Error('llm timeout')), perCallTimeoutMs)
+      ctx.setCancelCurrent(() => ac.abort(new Error('canceled')))
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          signal: ac.signal,
+          headers,
+          body: JSON.stringify(payload),
+        })
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string }
+          choices?: Array<{ message?: { content?: unknown } }>
+        }
+        if (!res.ok) {
+          const errMsg = data?.error?.message || `HTTP ${res.status}`
+          throw new Error(errMsg)
+        }
+        const msg = data?.choices?.[0]?.message?.content
+        if (typeof msg === 'string') return msg
+        if (Array.isArray(msg)) {
+          return msg
+            .map((p) => (p && typeof p === 'object' && typeof (p as Record<string, unknown>).text === 'string' ? String((p as Record<string, unknown>).text) : ''))
+            .filter(Boolean)
+            .join('\n')
+        }
+        return ''
+      } finally {
+        clearTimeout(timer)
+        ctx.setCancelCurrent(undefined)
+      }
+    }
+
+    const resolveExtractorPath = async (): Promise<string> => {
+      const candidates = [
+        path.join(process.cwd(), 'electron', 'tools', 'video_qa_extract_frames.py'),
+        path.join(process.cwd(), 'NeoDeskPet-electron', 'electron', 'tools', 'video_qa_extract_frames.py'),
+        process.env.APP_ROOT ? path.join(String(process.env.APP_ROOT), 'electron', 'tools', 'video_qa_extract_frames.py') : '',
+      ].filter(Boolean)
+      for (const p of candidates) {
+        try {
+          await fs.access(p)
+          return p
+        } catch {
+          // ignore
+        }
+      }
+      throw new Error('未找到 video_qa_extract_frames.py（请确认源码目录存在 electron/tools/video_qa_extract_frames.py）')
+    }
+
+    const runExtractor = async (): Promise<{
+      ok: true
+      durationSec: number
+      fps: number
+      segments: Array<{ index: number; startSec: number; endSec: number; frames: string[] }>
+    }> => {
+      const scriptPath = await resolveExtractorPath()
+      const outDir = path.join(ctx.userDataDir, 'video-qa', ctx.task.id, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`)
+      await fs.mkdir(outDir, { recursive: true })
+
+      const pythonArgs = [
+        scriptPath,
+        '--video',
+        videoPath,
+        '--out',
+        outDir,
+        '--segment-seconds',
+        String(segmentSeconds),
+        '--frames-per-segment',
+        String(framesPerSegment),
+        '--max-segments',
+        String(maxSegments),
+        '--start-seconds',
+        String(startSeconds),
+      ]
+
+      const tryRun = async (exe: string): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+        const stdoutChunks: Buffer[] = []
+        const stderrChunks: Buffer[] = []
+        const cp = spawn(exe, pythonArgs, { windowsHide: true })
+        cp.stdout?.on('data', (d) => stdoutChunks.push(Buffer.from(d)))
+        cp.stderr?.on('data', (d) => stderrChunks.push(Buffer.from(d)))
+        const code = await new Promise<number | null>((resolve, reject) => {
+          cp.once('error', reject)
+          cp.once('close', (c) => resolve(c))
+        })
+        const stdout = Buffer.concat(stdoutChunks).toString('utf8').trim()
+        const stderr = Buffer.concat(stderrChunks).toString('utf8').trim()
+        return { code, stdout, stderr }
+      }
+
+      let run: { code: number | null; stdout: string; stderr: string } | null = null
+      try {
+        run = await tryRun('python')
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (/ENOENT/i.test(msg)) run = await tryRun('py')
+        else throw err
+      }
+
+      if (!run) throw new Error('extractor failed')
+      if (run.code !== 0) {
+        throw new Error(`抽帧脚本失败（code=${run.code ?? 'null'}）：${run.stderr || run.stdout || '(无输出)'}`)
+      }
+
+      const text = run.stdout || run.stderr
+      const first = text.indexOf('{')
+      const last = text.lastIndexOf('}')
+      if (first < 0 || last <= first) throw new Error(`抽帧脚本输出无法解析：${clampText(text, 200)}`)
+      const parsed = JSON.parse(text.slice(first, last + 1)) as Record<string, unknown>
+      if (parsed.ok !== true) throw new Error(String(parsed.error ?? 'extract failed'))
+
+      const segmentsUnknown = Array.isArray(parsed.segments) ? (parsed.segments as unknown[]) : []
+      const segments = segmentsUnknown
+        .map((s) => (s && typeof s === 'object' && !Array.isArray(s) ? (s as Record<string, unknown>) : null))
+        .filter(Boolean)
+        .map((s) => ({
+          index: typeof s!.index === 'number' ? s!.index : 0,
+          startSec: typeof s!.startSec === 'number' ? s!.startSec : 0,
+          endSec: typeof s!.endSec === 'number' ? s!.endSec : 0,
+          frames: ensureStringArray(s!.frames, 32),
+        }))
+
+      const durationSec = typeof parsed.durationSec === 'number' ? parsed.durationSec : 0
+      const fps = typeof parsed.fps === 'number' ? parsed.fps : 0
+      return { ok: true, durationSec, fps, segments }
+    }
+
+    if (Date.now() - startedAt > timeoutMs) throw new Error('timeout before extraction')
+    const extracted = await runExtractor()
+
+    type SegmentAnswer = { index: number; startSec: number; endSec: number; frameCount: number; answer: string }
+    const segmentAnswers: SegmentAnswer[] = []
+
+    const perCallTimeoutMs = Math.max(5000, Math.min(180000, Math.trunc(timeoutMs / Math.max(2, extracted.segments.length + 1))))
+
+    for (const seg of extracted.segments) {
+      if (ctx.isCanceled()) break
+      await ctx.waitIfPaused()
+      if (Date.now() - startedAt > timeoutMs) throw new Error('video_qa timeout')
+
+      const framePaths = seg.frames.slice(0, framesPerSegment)
+      const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [
+        {
+          type: 'text',
+          text: [
+            `问题：${question}`,
+            `当前片段：#${seg.index}（${seg.startSec.toFixed(2)}s ~ ${seg.endSec.toFixed(2)}s）`,
+            '规则：只能依据提供的抽帧回答；如果无法判断，请直接说“无法从当前抽帧确定”。',
+          ].join('\n'),
+        },
+      ]
+
+      for (const fp of framePaths) {
+        const url = await fileToDataUrl(fp)
+        if (!url) continue
+        parts.push({ type: 'image_url', image_url: { url } })
+      }
+
+      if (parts.length <= 1) continue
+
+      const answer = await callLlm(
+        {
+          model,
+          temperature,
+          max_tokens: maxTokensPerSegment,
+          messages: [
+            {
+              role: 'system',
+              content:
+                '你是严谨的视频问答助手。你会看到一个视频片段的少量抽帧图像。只能依据抽帧回答，不能凭空猜测；无法判断就明确说明无法判断。',
+            },
+            { role: 'user', content: parts },
+          ],
+        },
+        perCallTimeoutMs,
+      )
+
+      segmentAnswers.push({
+        index: seg.index,
+        startSec: seg.startSec,
+        endSec: seg.endSec,
+        frameCount: framePaths.length,
+        answer: (answer ?? '').trim() || '(空)',
+      })
+    }
+
+    if (segmentAnswers.length === 0) {
+      return JSON.stringify({
+        ok: false,
+        error: '抽帧成功但没有可用帧（可能是视频编码/读取失败或片段为空）',
+        videoPath,
+        question,
+      })
+    }
+
+    const summary = await callLlm(
+      {
+        model,
+        temperature: Math.min(temperature, 0.4),
+        max_tokens: maxTokensFinal,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你是视频问答汇总器。你会得到按时间片段拆分的“抽帧回答”。请综合它们给出最终答复，并在必要时指出哪些片段无法判断。',
+          },
+          {
+            role: 'user',
+            content: [
+              `问题：${question}`,
+              '',
+              '分段回答：',
+              ...segmentAnswers.map((s) => `- #${s.index} (${s.startSec.toFixed(2)}s~${s.endSec.toFixed(2)}s): ${s.answer}`),
+            ].join('\n'),
+          },
+        ],
+      },
+      perCallTimeoutMs,
+    )
+
+    const out = {
+      ok: true,
+      videoPath,
+      question,
+      params: { segmentSeconds, framesPerSegment, maxSegments, startSeconds },
+      extracted: { durationSec: extracted.durationSec, fps: extracted.fps, segments: extracted.segments.length },
+      segments: segmentAnswers,
+      final: (summary ?? '').trim() || '(空)',
+      note: '该工具按时间分段抽帧并逐段调用视觉模型；成本≈段数次 API 调用。答案只基于采样帧，可能漏掉快速变化内容。',
+    }
+
+    return clampStepOutput(JSON.stringify(out, null, 2), maxStepOutputChars)
+  }
+
   if (toolName === 'delay.sleep') {
     const ms =
       typeof input === 'string'

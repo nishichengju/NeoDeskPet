@@ -2,6 +2,7 @@
   "name": "neodeskpet-electron",
   "private": true,
   "version": "0.1.0",
+  "license": "AGPL-3.0-only",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "set ELECTRON_RUN_AS_NODE=&& vite",

@@ -3,9 +3,9 @@
     "screen": {
       "command": "node",
       "args": ["mcp/screen-server/server.mjs"],
-      "cwd": "G:\\\\DeskPet\\\\NeoDeskPet-electron",
+      "cwd": "<ABSOLUTE_PATH_TO_YOUR_NeoDeskPet-electron>",
       "env": {
-        "NDP_SCREEN_OUT_DIR": "G:\\\\DeskPet\\\\NeoDeskPet-electron\\\\mcp-output\\\\screen"
+        "NDP_SCREEN_OUT_DIR": "mcp-output/screen"
       }
     }
   }

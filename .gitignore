@@ -6,6 +6,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+*.bak
 
 node_modules
 dist
@@ -14,6 +15,11 @@ dist-ssr
 dist-electron
 release
 docs/
+
+# Env files (never commit secrets)
+.env
+.env.*
+!.env.example
 
 # Agent/automation work dirs
 .codex/
@@ -29,13 +35,29 @@ mcp-output/
 # Local backups / vendored scratchpads (do not commit)
 备份/
 perplexity-ai-main/
+多模态向量/
 
 # Large local assets / backups (do not commit)
 GPT-SoVITS-v2_ProPlus/
 *.zip
 
+# Third-party Live2D assets (do not commit; may be large / copyrighted)
+public/live2d/lafei/
+public/live2d/mailili/
+public/live2d/mianfeimox/
+public/live2d/nn/
+public/live2d/波奇酱2.0/
+public/live2d/灵小狗/
+public/live2d/鱼香天天卷版权所有XIAOPmaiddress/
+public/models/maid/
+public/models/
+
+# Local verification notes (dev only)
+verification.md
+
 # Project-local planning notes (dev only)
 记忆系统plan.md
+vector-settings-split-and-mmvector.md
 
 # Python caches
 __pycache__/

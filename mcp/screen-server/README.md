@@ -29,7 +29,7 @@ node mcp/screen-server/server.mjs --selftest
 
 - `command`: `node`
 - `args`: `["mcp/screen-server/server.mjs"]`
-- `cwd`: `G:\\DeskPet\\NeoDeskPet-electron`（确保能找到 `node_modules/@modelcontextprotocol/sdk`）
+- `cwd`: `<ABSOLUTE_PATH_TO_YOUR_NeoDeskPet-electron>`（确保能找到 `node_modules/@modelcontextprotocol/sdk`）
 - `env.NDP_SCREEN_OUT_DIR`: 截图输出目录（可改）
 
 ## 4) 重要限制（关于“视觉”）
