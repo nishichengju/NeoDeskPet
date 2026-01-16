@@ -43,6 +43,9 @@ type Live2DParamMeta = {
 
 type ParamPatch = Record<string, number>
 
+type ModelListItem = { id: string; name: string; url: string; file: string; dir: string }
+type ModelListResponse = { baseDir: string; models: ModelListItem[] }
+
 function clampNumber(v: unknown, fallback: number): number {
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : fallback
@@ -171,10 +174,9 @@ async function preflightModelFiles(modelJsonUrl: string): Promise<ModelFileCheck
     }
   }
 
-  for (const rel of need) {
-    const u = joinUrl(baseDir, rel)
-    const ok = await probeUrlExists(u)
-    if (!ok) missing.push(rel)
+  const results = await Promise.all(need.map((rel) => probeUrlExists(joinUrl(baseDir, rel))))
+  for (let i = 0; i < need.length; i++) {
+    if (!results[i]) missing.push(need[i])
   }
 
   if (missing.length > 0) {
@@ -348,12 +350,18 @@ async function main() {
 
   // 右侧：顶部输入栏（模型 URL）
   const topbar = createEl('div', 'ndp-demo-topbar')
+  const modelSelect = createEl('select', 'ndp-demo-input') as HTMLSelectElement
+  modelSelect.innerHTML = `<option value="">(扫描中...)</option>`
   const urlInput = createEl('input', 'ndp-demo-input')
   urlInput.placeholder = '输入 model3.json URL（例如 /live2d/艾玛/艾玛.model3.json）'
   urlInput.value = state.modelUrl
+  const scanBtn = createEl('button', 'ndp-demo-btn')
+  scanBtn.textContent = 'Scan'
   const loadBtn = createEl('button', 'ndp-demo-btn ndp-demo-btn-primary')
   loadBtn.textContent = 'Load'
+  topbar.appendChild(modelSelect)
   topbar.appendChild(urlInput)
+  topbar.appendChild(scanBtn)
   topbar.appendChild(loadBtn)
   panelEl.appendChild(topbar)
 
@@ -430,8 +438,15 @@ async function main() {
     overrides.clear()
 
     try {
+      const fixedUrl = String(url ?? '').trim()
+      if (!fixedUrl) {
+        setStatus('加载失败')
+        setError('请先选择/输入一个 model3.json URL')
+        return
+      }
+
       // 预检查：先把“文件找不到/路径不一致”的问题变成可读错误
-      const checked = await preflightModelFiles(url)
+      const checked = await preflightModelFiles(fixedUrl)
       if (!checked.ok) {
         setStatus('加载失败')
         setError(checked.error)
@@ -452,7 +467,7 @@ async function main() {
       const win = window as unknown as { PIXI?: unknown }
       win.PIXI = PIXI
 
-      const model = await Live2DModel.from(url, { autoInteract: false, autoUpdate: true })
+      const model = await Live2DModel.from(fixedUrl, { autoInteract: false, autoUpdate: true })
       live2d = model
       core = readCoreModel(model)
 
@@ -466,17 +481,39 @@ async function main() {
       model.position.set(w / 2, h / 2 + h * 0.06)
 
       // 元数据：优先从 DisplayInfo(cdi3) 枚举参数
-      const metas = await loadCdi3Params(url)
+      const metas = await loadCdi3Params(fixedUrl)
       params = enrichParamRanges(core, metas)
       ;({ groups, byGroup } = groupParams(params))
 
-      state.loadedUrl = url
-      setStatus(`已加载：${url}`)
+      state.loadedUrl = fixedUrl
+      setStatus(`已加载：${fixedUrl}`)
       render()
     } catch (err) {
       setStatus('加载失败')
       const msg = err instanceof Error ? err.message : String(err ?? 'unknown error')
       setError(msg)
+    }
+  }
+
+  const refreshModelList = async () => {
+    try {
+      modelSelect.innerHTML = `<option value="">(扫描中...)</option>`
+      const res = (await fetchJson('/__ndp_live2d/models')) as ModelListResponse
+      const list = Array.isArray(res?.models) ? res.models : []
+
+      if (list.length === 0) {
+        modelSelect.innerHTML = `<option value="">(未发现模型)</option>`
+        return
+      }
+
+      const opts = list
+        .map((m) => `<option value="${m.url}">${m.name} · ${m.file}</option>`)
+        .join('')
+      modelSelect.innerHTML = `<option value="">(选择一个模型)</option>${opts}`
+    } catch (e) {
+      modelSelect.innerHTML = `<option value="">(扫描失败)</option>`
+      const msg = e instanceof Error ? e.message : String(e ?? '')
+      setError(`扫描模型列表失败：${msg}`)
     }
   }
 
@@ -801,6 +838,16 @@ async function main() {
     state.modelUrl = urlInput.value.trim()
     void loadModel(state.modelUrl)
   })
+  scanBtn.addEventListener('click', () => {
+    void refreshModelList()
+  })
+  modelSelect.addEventListener('change', () => {
+    const picked = modelSelect.value
+    if (!picked) return
+    urlInput.value = picked
+    state.modelUrl = picked
+    void loadModel(picked)
+  })
   urlInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       state.modelUrl = urlInput.value.trim()
@@ -809,6 +856,7 @@ async function main() {
   })
 
   // 初次默认不自动加载，避免默认路径导致“加载失败”噪声；如果通过 ?model= 传入则自动加载
+  void refreshModelList()
   if (state.modelUrl) void loadModel(state.modelUrl)
 }
 

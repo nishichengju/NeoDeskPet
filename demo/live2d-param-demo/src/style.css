@@ -82,6 +82,11 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.ndp-demo-topbar select {
+  flex: 0 0 220px;
+  max-width: 220px;
+}
+
 .ndp-demo-topbar input {
   flex: 1;
   min-width: 0;
