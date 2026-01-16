@@ -43,7 +43,3 @@ npm run build
 ## 开源协议
 
 本项目采用 **AGPL-3.0-only** 开源，详见 `LICENSE`。
-
-## 致谢
-
-- 灵感参考：`super-agent-party`（AGPL-3.0） https://github.com/heshengtao/super-agent-party
