@@ -42,6 +42,7 @@ GPT-SoVITS-v2_ProPlus/
 *.zip
 
 # Third-party Live2D assets (do not commit; may be large / copyrighted)
+public/live2d/
 public/live2d/lafei/
 public/live2d/mailili/
 public/live2d/mianfeimox/

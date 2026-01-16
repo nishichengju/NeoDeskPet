@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.DS_Store
+
+# 你的模型文件请放这里，但不要提交到仓库
+public/live2d/
+
