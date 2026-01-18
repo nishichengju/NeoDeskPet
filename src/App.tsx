@@ -30,7 +30,7 @@ import {
   scanAvailableModels,
   type Live2DModelInfo,
 } from './live2d/live2dModels'
-import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatMessage } from './services/aiService'
+import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatMessage, type ChatUsage } from './services/aiService'
 import { TtsPlayer } from './services/ttsService'
 import { splitTextIntoTtsSegments } from './services/textSegmentation'
 
@@ -1788,6 +1788,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [editingMessageContent, setEditingMessageContent] = useState('')
   type PendingAttachment = { id: string; kind: 'image' | 'video'; path: string; filename: string; previewDataUrl?: string }
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
+  // 存储最近一次 API 返回的真实 token usage（用于精确上下文统计）
+  const [lastApiUsage, setLastApiUsage] = useState<ChatUsage | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
@@ -2437,9 +2439,11 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     async (enabled: boolean) => {
       if (!api) return
       try {
-        // “工具”总开关：关闭时强制同时关闭 ToolAgent，避免 UI 关闭后仍在后台走 agent.run
+        // "工具"总开关：关闭时强制同时关闭 ToolAgent，避免 UI 关闭后仍在后台走 agent.run
         await api.setOrchestratorSettings(enabled ? { plannerEnabled: true } : { plannerEnabled: false, toolCallingEnabled: false })
         if (!enabled) plannerPendingRef.current = false
+        // 切换工具开关时清空 lastApiUsage，让 token 统计立即反映新的上下文
+        setLastApiUsage(null)
       } catch (err) {
         console.error(err)
         window.alert(err instanceof Error ? err.message : String(err))
@@ -2466,6 +2470,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       if (!api) return
       try {
         await api.setOrchestratorSettings({ toolCallingEnabled: enabled })
+        // 切换工具开关时清空 lastApiUsage，让 token 统计立即反映新的上下文（有/无工具定义）
+        setLastApiUsage(null)
       } catch (err) {
         console.error(err)
         window.alert(err instanceof Error ? err.message : String(err))
@@ -2968,6 +2974,15 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           if (isFinal) {
             if (expression) api.triggerExpression(expression)
             if (motion) api.triggerMotion(motion, 0)
+
+            // 任务完成时，更新真实的 API usage 统计（用于上下文悬浮球）
+            if (t.usage && t.usage.totalTokens > 0) {
+              setLastApiUsage({
+                promptTokens: t.usage.promptTokens,
+                completionTokens: t.usage.completionTokens,
+                totalTokens: t.usage.totalTokens,
+              })
+            }
           }
         }
 
@@ -3258,6 +3273,25 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     const maxTokensRaw = ai.maxTokens ?? 2048
     const outputReserve = Math.max(512, Math.min(8192, Math.trunc(Number.isFinite(maxTokensRaw) ? maxTokensRaw : 2048)))
 
+    // 如果有 API 返回的真实 usage，优先使用真实值
+    if (lastApiUsage && lastApiUsage.promptTokens > 0) {
+      // 真实的 usedTokens = 上次请求的 prompt_tokens + 上次请求的 completion_tokens
+      // 这代表了当前上下文实际消耗的 token 数
+      const realUsedTokens = lastApiUsage.promptTokens + lastApiUsage.completionTokens
+      return {
+        usedTokens: realUsedTokens,
+        maxContextTokens,
+        outputReserveTokens: outputReserve,
+        systemPromptTokens: 0, // 真实 usage 时这些细分不再需要估算
+        addonTokens: 0,
+        historyTokens: lastApiUsage.promptTokens, // prompt_tokens 包含了 system + history
+        trimmedCount: 0,
+        updatedAt: Date.now(),
+        isRealUsage: true, // 标记这是真实值
+      }
+    }
+
+    // 没有真实 usage 时，使用估算值（发送前预测）
     const systemPromptTokens = estimateTokensFromText(ai.systemPrompt ?? '')
     const addonTokens = estimateTokensFromText(systemAddonForUsage ?? '')
 
@@ -3285,7 +3319,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       return { role: 'user', content: plain }
     })
 
-    // 估算“下一次发送”时会附带的内容：把当前输入（以及待发送图片）也视为会进入上下文
+    // 估算"下一次发送"时会附带的内容：把当前输入（以及待发送图片）也视为会进入上下文
     const inputText = (input ?? '').trim()
     const withPending: ChatMessage[] = [...chatHistory]
     const pendingImageCount = pendingAttachments.filter((a) => a.kind === 'image').length
@@ -3319,6 +3353,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     estimateTokensForChatMessage,
     estimateTokensFromText,
     input,
+    lastApiUsage,
     messages,
     pendingAttachments,
     settings?.ai,
@@ -3599,8 +3634,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const toolCallingEnabledNow = orch?.toolCallingEnabled ?? false
       const toolCallingModeNow = orch?.toolCallingMode ?? 'auto'
 
-      // VCP 全流式工具对话：开启工具系统时，统一走 agent.run 任务，避免“先非流式（planner）再流式（finalize）”的割裂。
-      // 注意：UI 的“工具”总开关是 plannerEnabled；关闭后必须确保任何 Planner/Agent/执行器都不会使用工具。
       const requestForTools = (text ?? '').trim() || attachmentLabel || ''
       const attachmentAddon = (() => {
         const lines: string[] = []
@@ -3653,14 +3686,18 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             setLastRetrieveDebug(null)
           }
 
-          const history = sliceTail(chatHistory, 12)
+          const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
+          const toolContext = [memoryAddon, toolFactsAddon, attachmentAddon].filter(Boolean).join('\n\n')
+
+          // 使用 token 预算动态截断历史，而非硬编码轮数，充分利用模型的上下文窗口
+          const historyForAgent: ChatMessage[] = chatHistory
             .slice(0, -1)
             .map((m) => ({ role: m.role, content: toPlainText(m.content).trim() }))
             .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.length > 0)
+          const trimmedHistory = trimChatHistoryToMaxContext(historyForAgent, toolContext)
+          const history = trimmedHistory.history
 
           const title = request.length > 40 ? `${request.slice(0, 40)}…` : request
-          const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
-          const toolContext = [memoryAddon, toolFactsAddon, attachmentAddon].filter(Boolean).join('\n\n')
           const visionImagePaths = canUseVision ? attachments.filter((a) => a.kind === 'image').map((a) => a.path).slice(0, 4) : []
 
           const created = await api.createTask({
@@ -3743,10 +3780,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           )
           const plannerToolSet = new Set(plannerToolNames)
 
-          const plannerHistory: ChatMessage[] = sliceTail(nextMessages, 12).map((m) => ({
+          // Planner 也使用 token 预算动态截断历史
+          const plannerHistoryRaw: ChatMessage[] = nextMessages.map((m) => ({
             role: m.role === 'user' ? 'user' : 'assistant',
-            content: m.content,
+            content: typeof m.content === 'string' ? m.content : '',
           }))
+          const plannerTrimmed = trimChatHistoryToMaxContext(plannerHistoryRaw, attachmentAddon ?? '')
+          const plannerHistory = plannerTrimmed.history
 
           const planRes = await aiService.chat(
             [
@@ -3995,6 +4035,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           }
 
           const content = normalizeAssistantDisplayText(response.content, { trim: true })
+          // 更新真实的 API usage 统计
+          if (response.usage) setLastApiUsage(response.usage)
           const assistantCreatedAt = Date.now()
 
           const assistantMessage: ChatMessageRecord = {
@@ -4129,6 +4171,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         }
 
         const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
+        // 更新真实的 API usage 统计
+        if (response.usage) setLastApiUsage(response.usage)
         if (created) {
           setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: finalContent } : m)))
           await api.updateChatMessage(currentSessionId, assistantId, finalContent).catch(() => undefined)
@@ -4166,6 +4210,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         content: response.content,
         createdAt: Date.now(),
       }
+      // 更新真实的 API usage 统计
+      if (response.usage) setLastApiUsage(response.usage)
       setMessages((prev) => [...prev, assistantMessage])
       await api.addChatMessage(currentSessionId, assistantMessage)
 
@@ -4328,6 +4374,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const session = await api.getChatSession(sessionId)
       setCurrentSessionId(sessionId)
       setMessages(session.messages)
+      setLastApiUsage(null) // 切换会话时清空真实 usage，使用估算值直到收到新的 API 响应
       setError(null)
       setShowSessionList(false)
     },
@@ -4908,6 +4955,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             }
 
             const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
+            // 更新真实的 API usage 统计
+            if (response.usage) setLastApiUsage(response.usage)
             if (!created) {
               ensureMessageCreated(finalContent)
             } else {
@@ -5028,6 +5077,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           }
 
           const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
+          // 更新真实的 API usage 统计
+          if (response.usage) setLastApiUsage(response.usage)
           if (created) {
             setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: finalContent } : m)))
             await api.updateChatMessage(currentSessionId, assistantId, finalContent).catch(() => undefined)
@@ -5065,6 +5116,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           content: response.content,
           createdAt: Date.now(),
         }
+        // 更新真实的 API usage 统计
+        if (response.usage) setLastApiUsage(response.usage)
         setMessages((prev) => [...prev, assistantMessage])
         await api.addChatMessage(currentSessionId, assistantMessage)
 

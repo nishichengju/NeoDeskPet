@@ -238,6 +238,14 @@ function normalizeTaskRecord(value: unknown): TaskRecord | null {
     live2dMotion,
     toolRuns,
     lastError: typeof v.lastError === 'string' ? clampText(v.lastError, 1600) : undefined,
+    usage:
+      v.usage && typeof v.usage === 'object'
+        ? {
+            promptTokens: typeof v.usage.promptTokens === 'number' ? v.usage.promptTokens : 0,
+            completionTokens: typeof v.usage.completionTokens === 'number' ? v.usage.completionTokens : 0,
+            totalTokens: typeof v.usage.totalTokens === 'number' ? v.usage.totalTokens : 0,
+          }
+        : undefined,
   }
 }
 
@@ -767,11 +775,7 @@ export class TaskService {
       return null
     }
 
-    // 注意：由于 gcli2api 等代理不支持在 tool_use 上添加 thoughtSignature，
-    // 对于思考模型（如 claude-sonnet-4-5-thinking）使用 native 模式会导致上游 API 报错。
-    // 因此默认使用 'text' 模式，通过 VCP 文本协议调用工具，更稳定可靠。
     const modeRaw = normalizeMode(obj?.mode) ?? normalizeMode(orch?.toolCallingMode) ?? 'text'
-    // auto：默认走 text（VCP 文本协议），避免不同 OpenAI-compat/代理对原生 tools 的兼容差异导致割裂与报错
     const mode: 'auto' | 'native' | 'text' = modeRaw
 
     // 桌宠“人设/语气”只允许来自 AI 设置里的 systemPrompt；agent.run 不允许覆盖 system（避免多处人设割裂）
@@ -847,6 +851,18 @@ export class TaskService {
         '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。',
     })
 
+    // 注入历史对话（history），让 agent 能够理解对话上下文，避免答非所问
+    const historyRaw = Array.isArray(obj?.history) ? obj.history : []
+    for (const h of historyRaw) {
+      if (typeof h !== 'object' || h === null) continue
+      const hObj = h as Record<string, unknown>
+      const role = typeof hObj.role === 'string' ? hObj.role.trim() : ''
+      const content = typeof hObj.content === 'string' ? hObj.content.trim() : ''
+      if ((role === 'user' || role === 'assistant') && content.length > 0) {
+        messages.push({ role, content })
+      }
+    }
+
     if (visionImagePaths.length > 0) {
       const mimeFromExt = (p: string): string => {
         const ext = path.extname(p).toLowerCase()
@@ -900,6 +916,8 @@ export class TaskService {
     let live2dExpression: string | undefined
     let live2dMotion: string | undefined
     let toolRuns: TaskRecord['toolRuns'] = []
+    // 累积 API 返回的 token 使用统计（多轮工具调用会累加）
+    let cumulativeUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
 
     // 初始化一次：避免复用上次残留的 draft/toolRuns
     this.writeState((draft) => {
@@ -1163,7 +1181,9 @@ export class TaskService {
       }
     }
 
-    const callLlmText = async (attempt = 0): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage }> => {
+    const callLlmText = async (
+      attempt = 0,
+    ): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> => {
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
       rt.cancelCurrent = () => ac.abort(new Error('canceled'))
@@ -1179,37 +1199,75 @@ export class TaskService {
             max_tokens: maxTokens,
             messages,
             sessionId,
+            stream: true,
           }),
         })
 
-        const data = (await res.json().catch(() => ({}))) as { error?: { message?: string }; choices?: Array<{ message?: AssistantMessage }> }
         if (!res.ok) {
-          const errMsg = data?.error?.message || `HTTP ${res.status}`
+          const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
+          const errMsg = errData?.error?.message || `HTTP ${res.status}`
           throw new Error(errMsg)
         }
 
-        const msg = (data.choices?.[0]?.message ?? {}) as AssistantMessage
+        if (!res.body) {
+          throw new Error('Stream response body is null')
+        }
 
-        const contentText =
-          typeof msg.content === 'string'
-            ? msg.content
-            : Array.isArray(msg.content)
-              ? msg.content
-                  .map((p) => {
-                    if (p && typeof p === 'object') {
-                      const t = (p as Record<string, unknown>).text
-                      if (typeof t === 'string') return t
-                    }
-                    return ''
-                  })
-                  .filter(Boolean)
-                  .join('\n')
-              : ''
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder('utf-8')
+        let buffer = ''
+        let contentText = ''
+        let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined
 
-        const assistantMsgRaw: AssistantMessage = { ...msg, role: typeof msg.role === 'string' ? msg.role : 'assistant' }
-        if (typeof assistantMsgRaw.content !== 'string') assistantMsgRaw.content = contentText
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
 
-        return { contentText, assistantMsgRaw }
+          // Parse SSE lines
+          let hasMoreLines = true
+          while (hasMoreLines) {
+            const lineEnd = buffer.indexOf('\n')
+            if (lineEnd === -1) {
+              hasMoreLines = false
+              break
+            }
+            const line = buffer.slice(0, lineEnd).trim()
+            buffer = buffer.slice(lineEnd + 1)
+
+            if (!line.startsWith('data:')) continue
+            const dataStr = line.slice('data:'.length).trim()
+            if (!dataStr || dataStr === '[DONE]') continue
+
+            try {
+              const payload = JSON.parse(dataStr) as {
+                choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
+                usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+              }
+
+              // Extract usage from stream (some APIs include it in the last chunk)
+              if (payload.usage) {
+                usage = {
+                  promptTokens: payload.usage.prompt_tokens ?? 0,
+                  completionTokens: payload.usage.completion_tokens ?? 0,
+                  totalTokens: payload.usage.total_tokens ?? 0,
+                }
+              }
+
+              // Extract content delta
+              const choice = payload.choices?.[0]
+              const delta = choice?.delta?.content ?? choice?.message?.content ?? ''
+              if (delta) {
+                contentText += delta
+              }
+            } catch {
+              // Ignore parse errors for individual chunks
+            }
+          }
+        }
+
+        const assistantMsgRaw: AssistantMessage = { role: 'assistant', content: contentText }
+        return { contentText, assistantMsgRaw, usage }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (attempt === 0 && stripVisionFromUserMessage()) {
@@ -1443,6 +1501,10 @@ export class TaskService {
         it.live2dExpression = live2dExpression
         it.live2dMotion = live2dMotion
         it.toolRuns = toolRuns
+        // 保存累积的 usage 统计到任务（用于前端上下文悬浮球）
+        if (cumulativeUsage.totalTokens > 0) {
+          it.usage = { ...cumulativeUsage }
+        }
         it.updatedAt = now()
       })
       return out
@@ -1581,8 +1643,15 @@ export class TaskService {
         if (rt.canceled) throw new Error('canceled')
 
         pushLog(`[Agent] turn ${turn + 1}/${maxTurns}`)
-        const { contentText, assistantMsgRaw } = await callLlmText()
+        const { contentText, assistantMsgRaw, usage } = await callLlmText()
         messages.push(assistantMsgRaw)
+
+        // 累积本次 API 调用的 usage
+        if (usage) {
+          cumulativeUsage.promptTokens += usage.promptTokens
+          cumulativeUsage.completionTokens += usage.completionTokens
+          cumulativeUsage.totalTokens += usage.totalTokens
+        }
 
         const { cleaned, calls } = parseToolRequests(contentText)
         appendDraft(cleaned)

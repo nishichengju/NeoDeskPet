@@ -159,6 +159,7 @@ export type ContextUsageSnapshot = {
   historyTokens?: number
   trimmedCount?: number
   updatedAt?: number
+  isRealUsage?: boolean // true 表示来自 API 返回的真实值，false/undefined 表示估算值
 }
 
 export type TtsSettings = {
@@ -641,6 +642,12 @@ export type TaskRecord = {
     endedAt?: number
   }>
   lastError?: string
+  // API 返回的真实 token 使用统计（用于上下文悬浮球精确显示）
+  usage?: {
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+  }
 }
 
 export type TaskListResult = {

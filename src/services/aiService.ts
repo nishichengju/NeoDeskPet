@@ -9,11 +9,19 @@ export type ChatMessage = {
   content: string | ChatContentPart[]
 }
 
+/** API 返回的真实 token 使用统计 */
+export type ChatUsage = {
+  promptTokens: number // 输入 token 数（prompt_tokens）
+  completionTokens: number // 输出 token 数（completion_tokens）
+  totalTokens: number // 总 token 数（total_tokens）
+}
+
 export type ChatResponse = {
   content: string
   error?: string
   expression?: string // Extracted expression tag
   motion?: string // Extracted motion tag
+  usage?: ChatUsage // API 返回的真实 token 统计
 }
 export const ABORTED_ERROR = '__ABORTED__'
 
@@ -163,7 +171,17 @@ export class AIService {
       // Extract expression/motion tags
       const { cleanedText, expression, motion } = extractTags(rawContent)
 
-      return { content: cleanedText, expression, motion }
+      // 读取 API 返回的真实 token 统计
+      const usageData = data.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined
+      const usage: ChatUsage | undefined = usageData
+        ? {
+            promptTokens: usageData.prompt_tokens ?? 0,
+            completionTokens: usageData.completion_tokens ?? 0,
+            totalTokens: usageData.total_tokens ?? 0,
+          }
+        : undefined
+
+      return { content: cleanedText, expression, motion, usage }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return { content: '', error: ABORTED_ERROR }
@@ -227,6 +245,7 @@ export class AIService {
       let buffer = ''
       let rawContent = ''
       let streamEnded = false
+      let usage: ChatUsage | undefined // 用于存储流式响应中的 usage
 
       while (!streamEnded) {
         const { value, done } = await reader.read()
@@ -260,7 +279,20 @@ export class AIService {
             continue
           }
 
-          const choice = (payload as { choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }> }).choices?.[0]
+          // 尝试读取 usage（某些 API 在流式最后一条消息或每条消息中包含 usage）
+          const payloadObj = payload as {
+            choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+          }
+          if (payloadObj.usage) {
+            usage = {
+              promptTokens: payloadObj.usage.prompt_tokens ?? 0,
+              completionTokens: payloadObj.usage.completion_tokens ?? 0,
+              totalTokens: payloadObj.usage.total_tokens ?? 0,
+            }
+          }
+
+          const choice = payloadObj.choices?.[0]
           const delta = choice?.delta?.content ?? ''
           const msg = choice?.message?.content ?? ''
           const piece = delta || msg
@@ -272,7 +304,7 @@ export class AIService {
       }
 
       const { cleanedText, expression, motion } = extractTags(rawContent)
-      return { content: cleanedText, expression, motion }
+      return { content: cleanedText, expression, motion, usage }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return { content: '', error: ABORTED_ERROR }
