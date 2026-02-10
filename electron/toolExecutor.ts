@@ -3,6 +3,9 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { getSettings } from './store'
 import { isToolEnabled } from './toolRegistry'
+import { getLive2dCapabilities } from './live2dToolState'
+import { getWindowManagerInstance } from './runtimeRefs'
+import { readLive2dModelMetadata } from './live2dModelMetadata'
 import type { TaskRecord } from './types'
 
 export type ToolInput = string | Record<string, unknown> | Array<unknown> | null
@@ -14,6 +17,8 @@ export type ToolExecutionContext = {
   isCanceled: () => boolean
   setCancelCurrent: (fn: (() => void) | undefined) => void
 }
+
+type ThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
 
 function clampText(text: unknown, max: number): string {
   const s = typeof text === 'string' ? text : String(text ?? '')
@@ -63,6 +68,39 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delay))
 }
 
+function normalizeThinkingEffort(value: unknown): ThinkingEffort {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
+  return 'disabled'
+}
+
+function mapThinkingBudgetTokens(effort: ThinkingEffort, maxTokens: number): number {
+  const cap = Math.max(1024, Math.trunc(maxTokens) - 1)
+  if (effort === 'high') return Math.max(1024, Math.min(8192, cap))
+  if (effort === 'medium') return Math.max(1024, Math.min(4096, cap))
+  return Math.max(1024, Math.min(2048, cap))
+}
+
+function buildReasoningOptions(
+  model: string,
+  thinkingEffortRaw: unknown,
+  maxTokensRaw: number,
+): { maxTokens: number; extra: Record<string, unknown> } {
+  const modelId = String(model ?? '').trim().toLowerCase()
+  const requestedMaxTokens = Math.max(64, Math.min(262144, Math.trunc(maxTokensRaw)))
+  const isClaudeModel = modelId.includes('claude')
+  if (!isClaudeModel) return { maxTokens: requestedMaxTokens, extra: {} }
+
+  const thinkingEffort = normalizeThinkingEffort(thinkingEffortRaw)
+  if (thinkingEffort === 'disabled') {
+    return { maxTokens: Math.max(2048, requestedMaxTokens), extra: { thinking: { type: 'disabled' } } }
+  }
+  const budgetTokens = mapThinkingBudgetTokens(thinkingEffort, requestedMaxTokens)
+  return {
+    maxTokens: Math.max(requestedMaxTokens, budgetTokens + 1),
+    extra: { thinking: { type: 'enabled', budget_tokens: budgetTokens } },
+  }
+}
+
 export async function executeBuiltinTool(
   toolNameRaw: string,
   input: ToolInput,
@@ -75,6 +113,178 @@ export async function executeBuiltinTool(
   const settings = getSettings()
   if (!isToolEnabled(toolName, settings.tools)) {
     throw new Error(`tool disabled: ${toolName}`)
+  }
+
+  if (toolName === 'live2d.getCapabilities') {
+    const caps = getLive2dCapabilities()
+    if (!caps) throw new Error('Live2D capabilities not ready (pet window has not reported yet)')
+
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const maxParams = typeof obj?.maxParams === 'number' ? Math.max(1, Math.min(800, Math.trunc(obj.maxParams))) : 240
+
+    const meta = readLive2dModelMetadata(caps.modelJsonUrl)
+    const nameMap = meta?.parameterDisplayNames ?? {}
+
+    const paramsFromCaps = Array.isArray(caps.parameters)
+      ? caps.parameters.slice(0, maxParams).map((p) => ({
+          ...p,
+          name: typeof nameMap[p.id] === 'string' ? nameMap[p.id] : undefined,
+        }))
+      : []
+
+    const paramsFallback =
+      paramsFromCaps.length > 0
+        ? paramsFromCaps
+        : Object.keys(nameMap)
+            .filter((k) => k.trim().length > 0)
+            .sort((a, b) => a.localeCompare(b))
+            .slice(0, maxParams)
+            .map((id) => ({ id, name: nameMap[id] }))
+
+    const trimmed = {
+      ...caps,
+      parameters: paramsFallback,
+      expressions: (meta?.expressions ?? []).slice(0, 40).map((e) => ({
+        name: e.name,
+        file: e.file,
+        params: (e.params ?? []).slice(0, 8),
+      })),
+      motions: (meta?.motions ?? []).slice(0, 60),
+    }
+
+    return JSON.stringify({ ok: true, ...trimmed }, null, 2)
+  }
+
+  if (toolName === 'live2d.applyParamScript') {
+    const wm = getWindowManagerInstance()
+    const petWin = wm?.getPetWindow() ?? null
+    if (!petWin || petWin.isDestroyed()) throw new Error('Live2D pet window not ready')
+
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const mode = obj?.mode === 'queue' ? 'queue' : 'replace'
+    const scriptRaw = obj && 'script' in obj ? (obj.script as unknown) : input
+    if (!scriptRaw) throw new Error('missing script')
+
+    const isPlainObject = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === 'object' && !Array.isArray(v))
+
+    const toNumberRecord = (value: unknown): Record<string, number> => {
+      const obj = isPlainObject(value) ? value : null
+      if (!obj) return {}
+      const out: Record<string, number> = {}
+      for (const [k, v] of Object.entries(obj)) {
+        const key = typeof k === 'string' ? k.trim() : ''
+        if (!key) continue
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue
+        out[key] = v
+      }
+      return out
+    }
+
+    const normalizeOp = (raw: unknown): Record<string, unknown> => {
+      if (!isPlainObject(raw)) throw new Error('invalid script format: expected {op:"tween",to:{ParamId:0},durationMs:100}')
+
+      const op = typeof raw.op === 'string' ? raw.op.trim() : ''
+      if (!op) throw new Error('invalid script format: missing op')
+
+      if (op === 'reset') return { op: 'reset' }
+
+      if (op === 'wait') {
+        const durationMs =
+          typeof raw.durationMs === 'number' && Number.isFinite(raw.durationMs)
+            ? Math.trunc(raw.durationMs)
+            : typeof raw.ms === 'number' && Number.isFinite(raw.ms)
+              ? Math.trunc(raw.ms)
+              : 0
+        return { op: 'wait', durationMs }
+      }
+
+      if (op === 'sequence') {
+        const steps = Array.isArray(raw.steps) ? raw.steps.map(normalizeOp) : null
+        if (!steps) throw new Error('invalid script format: sequence.steps must be an array')
+        return { op: 'sequence', steps }
+      }
+
+      if (op === 'pulse') {
+        const id = typeof raw.id === 'string' ? raw.id.trim() : ''
+        const down = typeof raw.down === 'number' && Number.isFinite(raw.down) ? raw.down : Number.NaN
+        const up = typeof raw.up === 'number' && Number.isFinite(raw.up) ? raw.up : Number.NaN
+        const downMs = typeof raw.downMs === 'number' && Number.isFinite(raw.downMs) ? Math.trunc(raw.downMs) : 0
+        const holdMs = typeof raw.holdMs === 'number' && Number.isFinite(raw.holdMs) ? Math.trunc(raw.holdMs) : 0
+        const upMs = typeof raw.upMs === 'number' && Number.isFinite(raw.upMs) ? Math.trunc(raw.upMs) : 0
+        const ease = typeof raw.ease === 'string' && raw.ease.trim() ? raw.ease.trim() : 'inOut'
+
+        if (!id) throw new Error('invalid pulse script: missing id')
+        if (!Number.isFinite(down) || !Number.isFinite(up)) throw new Error('invalid pulse script: down/up must be numbers')
+        if (downMs < 0 || upMs < 0 || holdMs < 0) throw new Error('invalid pulse script: ms must be >= 0')
+
+        return {
+          op: 'sequence',
+          steps: [
+            { op: 'tween', to: { [id]: down }, durationMs: downMs, ease },
+            ...(holdMs > 0 ? [{ op: 'wait', durationMs: holdMs }] : []),
+            { op: 'tween', to: { [id]: up }, durationMs: upMs, ease },
+          ],
+        }
+      }
+
+      if (op === 'patch' || op === 'tween') {
+        const to = toNumberRecord(raw.to)
+
+        // 兼容：{op:"patch", id:"ParamEyeLOpen", value:0}
+        if (Object.keys(to).length === 0) {
+          const id = typeof raw.id === 'string' ? raw.id.trim() : ''
+          const value = raw.value
+          if (id && typeof value === 'number' && Number.isFinite(value)) {
+            to[id] = value
+          }
+        }
+
+        if (Object.keys(to).length === 0) {
+          throw new Error(`invalid ${op} script: expected to:{ParamId:number} (or id/value shorthand)`)
+        }
+
+        const out: Record<string, unknown> = { op, to }
+        if (typeof raw.holdMs === 'number' && Number.isFinite(raw.holdMs)) out.holdMs = Math.trunc(raw.holdMs)
+
+        if (op === 'tween') {
+          const durationMs =
+            typeof raw.durationMs === 'number' && Number.isFinite(raw.durationMs)
+              ? Math.trunc(raw.durationMs)
+              : typeof raw.duration === 'number' && Number.isFinite(raw.duration)
+                ? Math.trunc(raw.duration)
+                : 0
+          out.durationMs = durationMs
+          if (typeof raw.ease === 'string' && raw.ease.trim()) out.ease = raw.ease.trim()
+        }
+
+        return out
+      }
+
+      throw new Error(`invalid script op: ${op}`)
+    }
+
+    const normalizeScript = (raw: unknown): unknown => {
+      if (Array.isArray(raw)) {
+        if (raw.length === 0) throw new Error('empty script')
+        return raw.map(normalizeOp)
+      }
+      return normalizeOp(raw)
+    }
+
+    const script = normalizeScript(scriptRaw)
+
+    // 基本大小限制：避免一次性发送过大的 payload 卡死渲染线程
+    const approx = (() => {
+      try {
+        return JSON.stringify({ mode, script }).length
+      } catch {
+        return 0
+      }
+    })()
+    if (approx > 200000) throw new Error(`script too large: ${approx} chars`)
+
+    petWin.webContents.send('live2d:paramScript', { mode, script })
+    return JSON.stringify({ ok: true, sent: true, mode, approxChars: approx }, null, 2)
   }
 
   if (toolName === 'browser.open') {
@@ -827,7 +1037,10 @@ export async function executeBuiltinTool(
       typeof obj?.temperature === 'number'
         ? Math.max(0, Math.min(2, obj.temperature))
         : Math.max(0, Math.min(2, appSettings.ai.temperature))
-    const maxTokens = typeof obj?.maxTokens === 'number' ? Math.max(64, Math.min(8192, Math.trunc(obj.maxTokens))) : 1200
+    const maxTokensRaw = typeof obj?.maxTokens === 'number' && Number.isFinite(obj.maxTokens) ? Math.trunc(obj.maxTokens) : 1200
+    const thinkingEffortRaw = obj?.thinkingEffort ?? appSettings.ai.thinkingEffort
+    const reasoningOptions = buildReasoningOptions(model, thinkingEffortRaw, maxTokensRaw)
+    const maxTokens = reasoningOptions.maxTokens
     const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(2000, Math.min(180000, Math.trunc(obj.timeoutMs))) : 60000
 
     // 只有一个“人设”来源：AI 设置里的 systemPrompt（除非调用方显式传入 system 覆盖）
@@ -857,6 +1070,7 @@ export async function executeBuiltinTool(
           model,
           temperature,
           max_tokens: maxTokens,
+          ...reasoningOptions.extra,
           messages: [
             ...(system ? [{ role: 'system', content: system }] : []),
             { role: 'user', content: userPrompt },

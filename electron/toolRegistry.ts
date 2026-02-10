@@ -321,6 +321,72 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     version: '1.0',
   },
   {
+    name: 'live2d.getCapabilities',
+    callName: 'ndp_live2d_get_capabilities',
+    description: '获取当前 Live2D 模型的参数清单（param id + min/max/default 等），用于让 Agent 生成可执行的参数脚本。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        maxParams: { type: 'integer', description: '最多返回多少个参数（默认 240）', minimum: 1, maximum: 800 },
+      },
+    },
+    examples: [{ title: '获取参数能力清单', input: {} }],
+    risk: 'low',
+    cost: 'low',
+    tags: ['live2d', 'capabilities', 'params'],
+    version: '1.0',
+  },
+  {
+    name: 'live2d.applyParamScript',
+    callName: 'ndp_live2d_apply_param_script',
+    description:
+      '向 Live2D 桌宠发送“参数脚本”并执行（支持 patch/tween/sequence/wait/reset/pulse）。注意：口型/呼吸/鼠标追踪等内置效果会覆盖同名参数，避免被 LLM 控制。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        mode: { type: 'string', description: 'queue=追加；replace=中断并替换', enum: ['queue', 'replace'] },
+        script: { description: '参数脚本（单个 op 或 op 数组）', anyOf: [{ type: 'object' }, { type: 'array' }] },
+      },
+      required: ['script'],
+    },
+    examples: [
+      {
+        title: '眨眼（示例）',
+        input: {
+          mode: 'replace',
+          script: {
+            op: 'sequence',
+            steps: [
+              { op: 'tween', to: { ParamEyeLOpen: 0 }, durationMs: 80, ease: 'inOut', holdMs: 40 },
+              { op: 'tween', to: { ParamEyeLOpen: 1 }, durationMs: 120, ease: 'out' },
+            ],
+          },
+        },
+      },
+      {
+        title: '单眼 wink（pulse 宏示例）',
+        input: {
+          mode: 'replace',
+          script: {
+            op: 'pulse',
+            id: 'ParamEyeLOpen',
+            down: 0,
+            up: 1,
+            downMs: 100,
+            holdMs: 150,
+            upMs: 100,
+          },
+        },
+      },
+    ],
+    risk: 'low',
+    cost: 'low',
+    tags: ['live2d', 'params', 'animation'],
+    version: '1.0',
+  },
+  {
     name: 'delay.sleep',
     callName: 'ndp_delay_sleep',
     description: '暂停一段时间（用于等待页面/节流）。',

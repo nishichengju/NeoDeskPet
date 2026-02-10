@@ -284,6 +284,10 @@ export class TtsPlayer {
     return clampNumber(rms, 0, 1)
   }
 
+  hasActiveAudio(): boolean {
+    return this.activeSources.length > 0
+  }
+
   async speak(
     text: string,
     settings: TtsSettings,

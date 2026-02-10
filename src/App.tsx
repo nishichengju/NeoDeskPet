@@ -1,6 +1,7 @@
 import './App.css'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type {
+  AIThinkingEffort,
   AppSettings,
   BubbleStyle,
   ChatMessageBlock,
@@ -588,6 +589,10 @@ function PetWindow() {
   const containerRef = useRef<HTMLDivElement>(null)
   const isOverModel = useRef(true)
   const clickStartTime = useRef(0)
+  const dragPointerId = useRef<number | null>(null)
+  const lastDragPoint = useRef<{ x: number; y: number } | null>(null)
+  const dragMoveRafRef = useRef<number>(0)
+  const pendingDragPointRef = useRef<{ x: number; y: number } | null>(null)
 
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const settingsRef = useRef<AppSettings | null>(null)
@@ -1520,6 +1525,8 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
 
   const petScale = settings?.petScale ?? 1.0
   const petOpacity = settings?.petOpacity ?? 1.0
+  const live2dMouseTrackingEnabled = settings?.live2dMouseTrackingEnabled !== false
+  const live2dIdleSwayEnabled = settings?.live2dIdleSwayEnabled !== false
   const bubbleSettings = settings?.bubble
   const taskPanelX = settings?.taskPanel?.positionX ?? 50
   const taskPanelY = settings?.taskPanel?.positionY ?? 78
@@ -1577,36 +1584,117 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
     return normalizedX * normalizedX + normalizedY * normalizedY <= 1
   }
 
-  const handleMouseDown = (e: React.MouseEvent) => {
+  const cancelQueuedDragMove = useCallback(() => {
+    if (!dragMoveRafRef.current) return
+    window.cancelAnimationFrame(dragMoveRafRef.current)
+    dragMoveRafRef.current = 0
+  }, [])
+
+  const flushQueuedDragMove = useCallback(
+    (point?: { x: number; y: number }) => {
+      if (point) pendingDragPointRef.current = point
+      const next = pendingDragPointRef.current
+      if (!next) return
+      pendingDragPointRef.current = null
+      api?.dragMove(next)
+    },
+    [api],
+  )
+
+  const scheduleDragMove = useCallback(
+    (point: { x: number; y: number }) => {
+      pendingDragPointRef.current = point
+      if (dragMoveRafRef.current) return
+      dragMoveRafRef.current = window.requestAnimationFrame(() => {
+        dragMoveRafRef.current = 0
+        flushQueuedDragMove()
+      })
+    },
+    [flushQueuedDragMove],
+  )
+
+  const stopWindowDrag = useCallback(
+    (point?: { x: number; y: number }) => {
+      if (!isDragging.current) return
+      cancelQueuedDragMove()
+      flushQueuedDragMove(point)
+      pendingDragPointRef.current = null
+      isDragging.current = false
+      dragPointerId.current = null
+      setWindowDragging(false)
+      api?.stopDrag(point)
+    },
+    [api, cancelQueuedDragMove, flushQueuedDragMove],
+  )
+
+  const handlePointerDown = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement | null)?.closest?.('[data-no-window-drag="true"]')) return
+    if (e.button !== 0) return
     isOverModel.current = isPointOverLive2D(e.clientX, e.clientY)
-    if (e.button === 0 && isOverModel.current) {
-      // Left click on model - start drag
-      isDragging.current = true
-      clickStartTime.current = Date.now()
-      setWindowDragging(true)
-      api?.startDrag()
+    if (!isOverModel.current) return
+
+    isDragging.current = true
+    dragPointerId.current = e.pointerId
+    clickStartTime.current = Date.now()
+
+    const point = { x: e.screenX, y: e.screenY }
+    lastDragPoint.current = point
+    pendingDragPointRef.current = null
+    cancelQueuedDragMove()
+    setWindowDragging(true)
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    } catch {
+      // ignore
+    }
+    api?.startDrag(point)
+  }
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!containerRef.current) return
+
+    if (!isDragging.current) {
+      isOverModel.current = isPointOverLive2D(e.clientX, e.clientY)
+      return
+    }
+
+    if (dragPointerId.current !== null && e.pointerId !== dragPointerId.current) return
+
+    const point = { x: e.screenX, y: e.screenY }
+    lastDragPoint.current = point
+    scheduleDragMove(point)
+  }
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (dragPointerId.current !== null && e.pointerId !== dragPointerId.current) return
+    if (e.button !== 0) return
+    if (!isDragging.current) return
+
+    const point = { x: e.screenX, y: e.screenY }
+    lastDragPoint.current = point
+    stopWindowDrag(point)
+
+    const clickDuration = Date.now() - clickStartTime.current
+    if (clickDuration < 200 && bubbleSettings?.showOnClick) {
+      const phrases = bubbleSettings?.clickPhrases?.length > 0 ? bubbleSettings.clickPhrases : defaultPhrases
+      if (phrases.length > 0) {
+        const phrase = phrases[Math.floor(Math.random() * phrases.length)]
+        setBubblePayload({ text: phrase, startAt: Date.now(), mode: 'typing' })
+      }
     }
   }
 
-  const handleMouseUp = (e: React.MouseEvent) => {
-    if (e.button === 0 && isDragging.current) {
-      isDragging.current = false
-      setWindowDragging(false)
-      api?.stopDrag()
+  const handlePointerCancel = (e: React.PointerEvent) => {
+    if (dragPointerId.current !== null && e.pointerId !== dragPointerId.current) return
+    const point = { x: e.screenX, y: e.screenY }
+    stopWindowDrag(point)
+  }
 
-      // Check if it was a click (not a drag) - less than 200ms
-        const clickDuration = Date.now() - clickStartTime.current
-        if (clickDuration < 200 && bubbleSettings?.showOnClick) {
-          // Show random phrase from settings or defaults
-          const phrases = bubbleSettings?.clickPhrases?.length > 0 ? bubbleSettings.clickPhrases : defaultPhrases
-          if (phrases.length > 0) {
-            const phrase = phrases[Math.floor(Math.random() * phrases.length)]
-            setBubblePayload({ text: phrase, startAt: Date.now(), mode: 'typing' })
-          }
-        }
-      }
-    }
+  const handleLostPointerCapture = (e: React.PointerEvent) => {
+    if (dragPointerId.current !== null && e.pointerId !== dragPointerId.current) return
+    const point = { x: e.screenX, y: e.screenY }
+    stopWindowDrag(point)
+  }
 
   const handleContextMenu = (e: React.MouseEvent) => {
     isOverModel.current = isPointOverLive2D(e.clientX, e.clientY)
@@ -1616,35 +1704,46 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
     }
   }
 
-  // 主进程会根据鼠标位置动态切换窗口穿透；这里仅保留一个粗略命中用于决定是否允许拖拽/右键菜单。
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!containerRef.current || isDragging.current) return
-    isOverModel.current = isPointOverLive2D(e.clientX, e.clientY)
-  }
-
   const handleBubbleClose = useCallback(() => {
     setBubblePayload(null)
   }, [])
 
   useEffect(() => {
-    const handleGlobalMouseUp = () => {
-      if (isDragging.current) {
-        isDragging.current = false
-        setWindowDragging(false)
-        api?.stopDrag()
-      }
+    const handleGlobalMouseUp = (e: MouseEvent) => {
+      if (!isDragging.current) return
+      stopWindowDrag({ x: e.screenX, y: e.screenY })
     }
-    window.addEventListener('mouseup', handleGlobalMouseUp)
-    return () => window.removeEventListener('mouseup', handleGlobalMouseUp)
-  }, [api])
+    const handleWindowBlur = () => {
+      if (!isDragging.current) return
+      stopWindowDrag(undefined)
+    }
+    const handleVisibilityChange = () => {
+      if (!document.hidden) return
+      if (!isDragging.current) return
+      stopWindowDrag(undefined)
+    }
+
+    window.addEventListener('mouseup', handleGlobalMouseUp, true)
+    window.addEventListener('blur', handleWindowBlur)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.removeEventListener('mouseup', handleGlobalMouseUp, true)
+      window.removeEventListener('blur', handleWindowBlur)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      cancelQueuedDragMove()
+      pendingDragPointRef.current = null
+    }
+  }, [cancelQueuedDragMove, stopWindowDrag])
 
   return (
     <div
       ref={containerRef}
       className="ndp-pet-root"
-      onMouseDown={handleMouseDown}
-      onMouseUp={handleMouseUp}
-      onMouseMove={handleMouseMove}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handleLostPointerCapture}
       onContextMenu={handleContextMenu}
     >
       <Live2DView
@@ -1653,6 +1752,8 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
         opacity={petOpacity}
         mouthOpen={mouthOpen}
         windowDragging={windowDragging}
+        mouseTrackingEnabled={live2dMouseTrackingEnabled}
+        idleSwayEnabled={live2dIdleSwayEnabled}
       />
       <ContextUsageOrb
         enabled={bubbleSettings?.contextOrbEnabled ?? false}
@@ -6027,6 +6128,8 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
   const petScale = settings?.petScale ?? 1.0
   const petOpacity = settings?.petOpacity ?? 1.0
   const live2dModelId = settings?.live2dModelId ?? 'haru'
+  const live2dMouseTrackingEnabled = settings?.live2dMouseTrackingEnabled !== false
+  const live2dIdleSwayEnabled = settings?.live2dIdleSwayEnabled !== false
   const aiSettings = settings?.ai
   const bubbleSettings = settings?.bubble
   const chatUi = settings?.chatUi
@@ -6164,6 +6267,8 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
             petScale={petScale}
             petOpacity={petOpacity}
             live2dModelId={live2dModelId}
+            live2dMouseTrackingEnabled={live2dMouseTrackingEnabled}
+            live2dIdleSwayEnabled={live2dIdleSwayEnabled}
             availableModels={availableModels}
             selectedModelInfo={selectedModelInfo}
             isLoadingModels={isLoadingModels}
@@ -6172,7 +6277,15 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
         )}
         {activeTab === 'bubble' && <BubbleSettingsTab api={api} bubbleSettings={bubbleSettings} />}
         {activeTab === 'taskPanel' && <TaskPanelSettingsTab api={api} taskPanelSettings={settings?.taskPanel} />}
-        {activeTab === 'ai' && <AISettingsTab api={api} aiSettings={aiSettings} orchestrator={settings?.orchestrator} />}
+        {activeTab === 'ai' && (
+          <AISettingsTab
+            api={api}
+            aiSettings={aiSettings}
+            orchestrator={settings?.orchestrator}
+            aiProfiles={settings?.aiProfiles}
+            activeAiProfileId={settings?.activeAiProfileId}
+          />
+        )}
         {activeTab === 'tools' && <ToolsSettingsTab api={api} settings={settings} />}
         {activeTab === 'persona' && <PersonaSettingsTab api={api} settings={settings} />}
         {activeTab === 'chat' && <ChatUiSettingsTab api={api} chatUi={chatUi} />}
@@ -7973,12 +8086,25 @@ function Live2DSettingsTab(props: {
   petScale: number
   petOpacity: number
   live2dModelId: string
+  live2dMouseTrackingEnabled: boolean
+  live2dIdleSwayEnabled: boolean
   availableModels: Live2DModelInfo[]
   selectedModelInfo: Live2DModelInfo | null
   isLoadingModels: boolean
   refreshModels: (opts?: { force?: boolean }) => Promise<void>
 }) {
-  const { api, petScale, petOpacity, live2dModelId, availableModels, selectedModelInfo, isLoadingModels, refreshModels } = props
+  const {
+    api,
+    petScale,
+    petOpacity,
+    live2dModelId,
+    live2dMouseTrackingEnabled,
+    live2dIdleSwayEnabled,
+    availableModels,
+    selectedModelInfo,
+    isLoadingModels,
+    refreshModels,
+  } = props
   const triggerRefresh = useCallback(() => {
     void refreshModels()
   }, [refreshModels])
@@ -8074,6 +8200,30 @@ function Live2DSettingsTab(props: {
           </div>
         </div>
       )}
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={live2dMouseTrackingEnabled}
+            onChange={(e) => api?.setLive2dMouseTrackingEnabled(e.target.checked)}
+          />
+          <span>鼠标跟随</span>
+        </label>
+        <p className="ndp-setting-hint">开启后模型会跟随鼠标方向。</p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={live2dIdleSwayEnabled}
+            onChange={(e) => api?.setLive2dIdleSwayEnabled(e.target.checked)}
+          />
+          <span>物理摇摆</span>
+        </label>
+        <p className="ndp-setting-hint">关闭后禁用待机摇摆，模型姿态更稳定。</p>
+      </div>
 
       <div className="ndp-setting-item">
         <label>模型大小</label>
@@ -9238,8 +9388,10 @@ function AISettingsTab(props: {
   api: ReturnType<typeof getApi>
   aiSettings: AppSettings['ai'] | undefined
   orchestrator: AppSettings['orchestrator'] | undefined
+  aiProfiles: AppSettings['aiProfiles'] | undefined
+  activeAiProfileId: string | undefined
 }) {
-  const { api, aiSettings, orchestrator } = props
+  const { api, aiSettings, orchestrator, aiProfiles, activeAiProfileId } = props
 
   const apiKey = aiSettings?.apiKey ?? ''
   const baseUrl = aiSettings?.baseUrl ?? 'https://api.openai.com/v1'
@@ -9247,9 +9399,64 @@ function AISettingsTab(props: {
   const temperature = aiSettings?.temperature ?? 0.7
   const maxTokens = aiSettings?.maxTokens ?? 64000
   const maxContextTokens = aiSettings?.maxContextTokens ?? 128000
+  const thinkingEffort = aiSettings?.thinkingEffort ?? 'disabled'
   const systemPrompt = aiSettings?.systemPrompt ?? ''
   const enableVision = aiSettings?.enableVision ?? false
   const enableChatStreaming = aiSettings?.enableChatStreaming ?? false
+
+  const profiles = Array.isArray(aiProfiles) ? aiProfiles : []
+  const activeProfile = profiles.find((p) => p.id === (activeAiProfileId ?? '')) ?? null
+  const [profileName, setProfileName] = useState('')
+  const [modelOptions, setModelOptions] = useState<string[]>([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [modelsError, setModelsError] = useState('')
+
+  useEffect(() => {
+    setProfileName(activeProfile?.name ?? '')
+  }, [activeProfile?.id, activeProfile?.name])
+
+  const saveApiProfile = async (opts?: { overwrite?: boolean }) => {
+    if (!api) return
+    const overwrite = opts?.overwrite ?? false
+    const id = overwrite ? activeProfile?.id : undefined
+    const fallbackName = `${baseUrl || '接口'} ${model || ''}`.trim() || '新配置'
+    const name = profileName.trim() || fallbackName
+    await api.saveAIProfile({ id, name, apiKey, baseUrl, model })
+  }
+
+  const deleteApiProfile = async () => {
+    if (!api || !activeProfile?.id) return
+    await api.deleteAIProfile(activeProfile.id)
+  }
+
+  const applyApiProfile = async (id: string) => {
+    if (!api || !id) return
+    await api.applyAIProfile(id)
+  }
+
+  const fetchModelList = async () => {
+    if (!api) return
+    setModelsLoading(true)
+    setModelsError('')
+    try {
+      const res = await api.listAIModels({ apiKey, baseUrl })
+      if (!res.ok) {
+        setModelOptions([])
+        setModelsError(res.error || '拉取模型列表失败')
+        return
+      }
+      const incoming = Array.isArray(res.models) ? res.models : []
+      const merged = Array.from(new Set([model, ...incoming].map((x) => String(x ?? '').trim()).filter(Boolean)))
+      setModelOptions(merged)
+      setModelsError('')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setModelOptions([])
+      setModelsError(msg || '拉取模型列表失败')
+    } finally {
+      setModelsLoading(false)
+    }
+  }
 
   const toolMode = orchestrator?.toolCallingMode ?? 'auto'
   const toolUseCustomAi = orchestrator?.toolUseCustomAi ?? false
@@ -9270,6 +9477,39 @@ function AISettingsTab(props: {
   return (
     <div className="ndp-settings-section">
       <h3>API 设置</h3>
+
+      <div className="ndp-setting-item">
+        <label>已保存的 API 配置</label>
+        <div className="ndp-row">
+          <select className="ndp-select" value={activeAiProfileId ?? ''} onChange={(e) => void applyApiProfile(e.target.value)}>
+            <option value="">（无）</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="ndp-setting-actions">
+          <input
+            type="text"
+            className="ndp-input"
+            value={profileName}
+            placeholder="配置名称"
+            onChange={(e) => setProfileName(e.target.value)}
+          />
+          <button className="ndp-btn" onClick={() => void saveApiProfile()}>
+            保存新配置
+          </button>
+          <button className="ndp-btn" disabled={!activeProfile?.id} onClick={() => void saveApiProfile({ overwrite: true })}>
+            覆盖当前配置
+          </button>
+          <button className="ndp-btn ndp-btn-danger" disabled={!activeProfile?.id} onClick={() => void deleteApiProfile()}>
+            删除配置
+          </button>
+        </div>
+        <p className="ndp-setting-hint">可在多个 API 之间快速切换，不需要重复输入 Key / Base URL / 模型。</p>
+      </div>
 
       {/* API Key */}
       <div className="ndp-setting-item">
@@ -9307,7 +9547,22 @@ function AISettingsTab(props: {
           placeholder="gpt-4o-mini"
           onChange={(e) => api?.setAISettings({ model: e.target.value })}
         />
-        <p className="ndp-setting-hint">输入模型 ID，如 gpt-4o、claude-3-5-sonnet 等</p>
+        <div className="ndp-setting-actions">
+          <button className="ndp-btn" onClick={() => void fetchModelList()} disabled={modelsLoading}>
+            {modelsLoading ? '加载中...' : '拉取模型列表'}
+          </button>
+          {modelOptions.length > 0 ? (
+            <select className="ndp-select" value={model} onChange={(e) => api?.setAISettings({ model: e.target.value })}>
+              {modelOptions.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          ) : null}
+        </div>
+        {modelsError ? <p className="ndp-setting-hint">{modelsError}</p> : null}
+        <p className="ndp-setting-hint">可手动输入模型 ID，也可以先拉取后选择。</p>
       </div>
 
       <div className="ndp-setting-item">
@@ -9335,6 +9590,23 @@ function AISettingsTab(props: {
       </div>
 
       <h3>生成设置</h3>
+
+      <div className="ndp-setting-item">
+        <label>思考强度</label>
+        <select
+          className="ndp-select"
+          value={thinkingEffort}
+          onChange={(e) => api?.setAISettings({ thinkingEffort: e.target.value as AIThinkingEffort })}
+        >
+          <option value="disabled">禁用（disabled）</option>
+          <option value="low">低（low）</option>
+          <option value="medium">中（medium）</option>
+          <option value="high">高（high）</option>
+        </select>
+        <p className="ndp-setting-hint">
+          Claude 会映射为 thinking(type=enabled/budget_tokens)，OpenAI 推理模型会映射为 reasoning_effort。
+        </p>
+      </div>
 
       {/* Temperature */}
       <div className="ndp-setting-item">

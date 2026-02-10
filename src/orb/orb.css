@@ -1,0 +1,929 @@
+:root {
+  /* macOS-like frosted glass */
+  --ndp-orb-bg: rgba(18, 18, 22, 0.72);
+  --ndp-orb-border: rgba(255, 255, 255, 0.12);
+  --ndp-orb-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+  --ndp-orb-glow: rgba(102, 126, 234, 0.42);
+  --ndp-orb-popover-bg: rgba(26, 26, 30, 0.72);
+  --ndp-orb-popover-border: rgba(255, 255, 255, 0.12);
+  --ndp-orb-popover-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+}
+
+.ndp-orbapp-root {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  user-select: none;
+  position: relative;
+}
+
+.ndp-orbapp-dragging * {
+  transition: none !important;
+  animation: none !important;
+}
+
+.ndp-orbapp-ball,
+.ndp-orbapp-bar-frame,
+.ndp-orbpanel {
+  will-change: transform, opacity, filter;
+}
+
+/* ========== Ball ========== */
+.ndp-orbapp-ball {
+  width: 40px;
+  height: 40px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 30% 30%, rgba(102, 126, 234, 0.42), rgba(24, 24, 30, 0.92) 55%);
+  border: 0;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 0 1px var(--ndp-orb-border),
+    inset 0 -10px 24px rgba(0, 0, 0, 0.35),
+    0 0 0 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(14px);
+  cursor: pointer;
+  transition:
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.ndp-orbapp-ball-fixed {
+  width: 40px;
+  height: 40px;
+  margin-top: 0;
+}
+
+.ndp-orbapp-ball:hover {
+  background: radial-gradient(circle at 30% 30%, rgba(102, 126, 234, 0.55), rgba(24, 24, 30, 0.92) 55%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 -10px 24px rgba(0, 0, 0, 0.35),
+    0 0 20px rgba(102, 126, 234, 0.18);
+}
+
+.ndp-orbapp-ball:active {
+  background: radial-gradient(circle at 30% 30%, rgba(102, 126, 234, 0.65), rgba(24, 24, 30, 0.92) 55%);
+}
+
+.ndp-orbapp-ball-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* ========== Bar ========== */
+.ndp-orbapp-bar-frame {
+  width: 100%;
+  height: 80px;
+  border-radius: 20px;
+  overflow: hidden;
+  border: 1px solid var(--ndp-orb-border);
+  background: var(--ndp-orb-bg);
+  box-shadow: var(--ndp-orb-shadow), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.ndp-orbapp-mode-bar .ndp-orbapp-bar-frame {
+  height: 100%;
+}
+
+:root[data-ndp-orb-overlay='true'] .ndp-orbapp-mode-bar .ndp-orbapp-bar-frame {
+  height: 80px;
+}
+
+.ndp-orbapp-bar-pill {
+  display: none;
+}
+
+.ndp-orbapp-mode-bar .ndp-orbapp-bar-pill {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: var(--ndp-orbapp-bar-progress-inv, 0);
+  transition: none;
+}
+
+.ndp-orbapp-bar {
+  width: 100%;
+  height: 80px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  box-sizing: border-box;
+  opacity: 1;
+  transform: none;
+  transition: none;
+}
+
+.ndp-orbapp-mode-bar .ndp-orbapp-bar {
+  height: 100%;
+  opacity: var(--ndp-orbapp-bar-progress, 1);
+  transform: none;
+  pointer-events: none;
+}
+
+:root[data-ndp-orb-overlay='true'] .ndp-orbapp-mode-bar .ndp-orbapp-bar {
+  height: 80px;
+}
+
+:root[data-ndp-orb-bar-open='true'] .ndp-orbapp-mode-bar .ndp-orbapp-bar {
+  pointer-events: auto;
+}
+
+.ndp-orbapp-bar-left,
+.ndp-orbapp-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-orbapp-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.12);
+  max-width: 170px;
+  overflow: hidden;
+}
+
+.ndp-orbapp-pending-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.ndp-orbapp-pending-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.ndp-orbapp-pending-video {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.ndp-orbapp-pending-x {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  transform: scale(0.92);
+}
+
+.ndp-orbapp-pending-more {
+  color: rgba(255, 255, 255, 0.70);
+  font-size: 12px;
+}
+
+.ndp-orbapp-session-hint {
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.16);
+  color: rgba(255, 255, 255, 0.70);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ndp-orbapp-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 14px;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.ndp-orbapp-btn:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.ndp-orbapp-input {
+  flex: 1;
+  min-width: 160px;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(255, 255, 255, 0.92);
+  border-radius: 14px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+.ndp-orbapp-input:focus {
+  border-color: rgba(102, 126, 234, 0.55);
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.18);
+}
+
+.ndp-orbapp-send {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(180deg, rgba(52, 52, 58, 0.92), rgba(20, 20, 24, 0.92));
+  color: rgba(255, 255, 255, 0.96);
+  border-radius: 999px;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-weight: 700;
+  margin-right: 2px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 10px 26px rgba(0, 0, 0, 0.18);
+}
+
+.ndp-orbapp-send:hover {
+  background: linear-gradient(180deg, rgba(72, 72, 80, 0.92), rgba(26, 26, 32, 0.92));
+}
+
+.ndp-orbapp-send:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ========== Panel (Iteration 2) ========== */
+.ndp-orbpanel {
+  width: 100%;
+  flex: 1;
+  margin-top: 10px;
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid var(--ndp-orb-border);
+  background: var(--ndp-orb-bg);
+  box-shadow: var(--ndp-orb-shadow), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ndp-orbpanel-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ndp-orbpanel-attachment {
+  width: 220px;
+  max-width: 48vw;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.ndp-orbpanel-image,
+.ndp-orbpanel-video {
+  width: 100%;
+  display: block;
+  border-radius: 0;
+}
+
+.ndp-orbpanel-image {
+  max-height: 240px;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+
+.ndp-orbpanel-video {
+  max-height: 240px;
+  object-fit: cover;
+}
+
+.ndp-orbpanel-attachment-meta {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.70);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ndp-orbpanel-header {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.ndp-orbpanel-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-orbpanel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-orbpanel-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.16);
+  white-space: nowrap;
+}
+
+.ndp-orbpanel-action {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(255, 255, 255, 0.92);
+  border-radius: 12px;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.ndp-orbpanel-action:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.ndp-orbpanel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  user-select: text;
+}
+
+.ndp-orbpanel-empty {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.ndp-orbpanel-empty-error {
+  color: rgba(248, 113, 113, 0.9);
+}
+
+.ndp-orbpanel-msg {
+  max-width: 92%;
+  padding: 8px 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.20);
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.35;
+}
+
+.ndp-orbpanel-msg-user {
+  align-self: flex-end;
+  background: rgba(80, 140, 255, 0.18);
+  padding: 6px 10px;
+}
+
+.ndp-orbpanel-msg-assistant {
+  align-self: flex-start;
+}
+
+.ndp-orbapp-msgmenu {
+  position: absolute;
+  z-index: 12;
+  padding: 8px;
+  box-sizing: border-box;
+  background: var(--ndp-orb-popover-bg);
+  border: 1px solid var(--ndp-orb-popover-border);
+  box-shadow: var(--ndp-orb-popover-shadow), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  will-change: transform, opacity;
+  transform-origin: 18px 0px;
+  animation: ndp-orbapp-popover-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ndp-orbapp-msgmenu-item {
+  width: 100%;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+}
+
+.ndp-orbapp-msgmenu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ndp-orbpanel-edit-textarea {
+  width: 100%;
+  min-height: 70px;
+  resize: vertical;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(255, 255, 255, 0.92);
+  padding: 8px 10px;
+  box-sizing: border-box;
+  outline: none;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.ndp-orbpanel-edit-textarea:focus {
+  border-color: rgba(102, 126, 234, 0.40);
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.14);
+}
+
+.ndp-orbpanel-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ndp-orbpanel-edit-btn {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.20);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ndp-orbpanel-edit-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ndp-orbpanel-edit-btn-ghost {
+  border-color: rgba(255, 255, 255, 0.10);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.ndp-orbpanel-edit-btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.ndp-orbpanel-status {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.ndp-orbpanel-tool {
+  margin: 10px 0 2px 0;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.16);
+  overflow: hidden;
+}
+
+.ndp-orbimg-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  background: rgba(6, 8, 12, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+}
+
+.ndp-orbimg-viewer-shell {
+  width: min(1100px, 96vw);
+  height: min(84vh, 820px);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(180deg, rgba(24, 28, 37, 0.96), rgba(12, 15, 22, 0.96));
+  box-shadow: 0 20px 62px rgba(0, 0, 0, 0.46);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ndp-orbimg-viewer-toolbar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.ndp-orbimg-viewer-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ndp-orbimg-viewer-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.ndp-orbimg-viewer-tools {
+  display: flex;
+  gap: 8px;
+}
+
+.ndp-orbimg-viewer-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.26);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ndp-orbimg-viewer-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ndp-orbimg-viewer-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.ndp-orbimg-viewer-img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  margin: auto;
+  object-fit: contain;
+  transform-origin: center center;
+  transition: transform 0.08s linear;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.ndp-orbimg-viewer-nav {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.34);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+}
+
+.ndp-orbimg-viewer-nav:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.ndp-orbimg-viewer-tip {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.64);
+}
+
+.ndp-orbpanel-tool-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+}
+
+.ndp-orbpanel-tool-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ndp-orbpanel-tool-title {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-orbpanel-duration {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+}
+
+.ndp-orbpanel-tool-caret {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.ndp-orbpanel-tool-body {
+  padding: 10px;
+  box-sizing: border-box;
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.ndp-orbpanel-tool-run {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ndp-orbpanel-tool-run:last-child {
+  border-bottom: 0;
+}
+
+.ndp-orbpanel-tool-run-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.ndp-orbpanel-tool-run-status {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.ndp-orbpanel-tool-run-status-running {
+  border-color: rgba(102, 126, 234, 0.35);
+  background: rgba(102, 126, 234, 0.18);
+}
+
+.ndp-orbpanel-tool-run-status-error {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.15);
+}
+
+.ndp-orbpanel-tool-run-name {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-orbpanel-tool-io {
+  margin: 6px 0 0 0;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.20);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ndp-orbpanel-tool-io-error {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.ndp-orbpanel-tool-empty {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
+/* ========== Popover ========== */
+.ndp-orbapp-popover {
+  position: absolute;
+  z-index: 10;
+  padding: 8px;
+  box-sizing: border-box;
+  background: var(--ndp-orb-popover-bg);
+  border: 1px solid var(--ndp-orb-popover-border);
+  box-shadow: var(--ndp-orb-popover-shadow), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  will-change: transform, opacity;
+  transform-origin: calc(var(--ndp-orbapp-popover-arrow-x, 20px)) 0px;
+  animation: ndp-orbapp-popover-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ndp-orbapp-popover::before {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: calc(var(--ndp-orbapp-popover-arrow-x, 20px) - 7px);
+  width: 14px;
+  height: 14px;
+  transform: rotate(45deg);
+  background: var(--ndp-orb-popover-bg);
+  border-left: 1px solid var(--ndp-orb-popover-border);
+  border-top: 1px solid var(--ndp-orb-popover-border);
+  border-top-left-radius: 3px;
+  filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.20));
+}
+
+@keyframes ndp-orbapp-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.ndp-orbapp-popover-item {
+  width: 100%;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 14px;
+}
+
+.ndp-orbapp-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ndp-orbapp-popover-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ndp-orbapp-popover-action {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.ndp-orbapp-popover-action:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.ndp-orbapp-popover-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ndp-orbapp-popover-icon {
+  width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.ndp-orbapp-popover-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ndp-orbapp-popover-count {
+  margin-left: 8px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.ndp-orbapp-popover-divider {
+  height: 1px;
+  margin: 8px 6px;
+  background: rgba(255, 255, 255, 0.10);
+}
+
+.ndp-orbapp-popover-empty {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.60);
+  font-size: 13px;
+}

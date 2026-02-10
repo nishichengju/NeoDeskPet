@@ -44,12 +44,16 @@ import type {
   McpSettings,
   McpStateSnapshot,
   ContextUsageSnapshot,
+  DisplayMode,
+  OrbUiState,
 } from '../electron/types'
 import type { TtsOptions } from '../electron/ttsOptions'
 
 export type SettingsChangeListener = (settings: AppSettings) => void
 export type Live2DExpressionListener = (expressionName: string) => void
 export type Live2DMotionListener = (motionGroup: string, index: number) => void
+export type Live2DParamScriptListener = (payload: unknown) => void
+export type Live2DMouseTargetListener = (payload: { x: number; y: number; t?: number }) => void
 export type BubbleMessageListener = (message: string) => void
 
 export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[]; fullText?: string }
@@ -81,8 +85,14 @@ export type NeoDeskPetApi = {
   setPetScale(value: number): Promise<AppSettings>
   setPetOpacity(value: number): Promise<AppSettings>
   setLive2dModel(modelId: string, modelFile: string): Promise<AppSettings>
+  setLive2dMouseTrackingEnabled(enabled: boolean): Promise<AppSettings>
+  setLive2dIdleSwayEnabled(enabled: boolean): Promise<AppSettings>
   // AI settings
   setAISettings(aiSettings: Partial<AISettings>): Promise<AppSettings>
+  saveAIProfile(payload: { id?: string; name: string; apiKey: string; baseUrl: string; model: string }): Promise<AppSettings>
+  deleteAIProfile(id: string): Promise<AppSettings>
+  applyAIProfile(id: string): Promise<AppSettings>
+  listAIModels(payload?: { apiKey?: string; baseUrl?: string }): Promise<{ ok: boolean; models: string[]; error?: string }>
   // Bubble settings
   setBubbleSettings(bubbleSettings: Partial<BubbleSettings>): Promise<AppSettings>
   // Task panel settings (M2)
@@ -128,6 +138,7 @@ export type NeoDeskPetApi = {
   // ASR hotkey / transcript (pet <-> main <-> chat)
   onAsrHotkeyToggle(listener: () => void): () => void
   reportAsrTranscript(text: string): void
+  notifyAsrTranscriptReady(): void
   takeAsrTranscript(): Promise<string>
   onAsrTranscript(listener: (text: string) => void): () => void
   // Model scanner
@@ -210,15 +221,30 @@ export type NeoDeskPetApi = {
   // Live2D expression/motion listeners
   onLive2dExpression(listener: Live2DExpressionListener): () => void
   onLive2dMotion(listener: Live2DMotionListener): () => void
+  onLive2dParamScript(listener: Live2DParamScriptListener): () => void
+  onLive2dMouseTarget(listener: Live2DMouseTargetListener): () => void
+  // Live2D capabilities report (pet window -> main, for tool/agent usage)
+  reportLive2dCapabilities(payload: unknown): void
   // Window operations
   openChat(): Promise<void>
   openSettings(): Promise<void>
   openMemory(): Promise<void>
+  setDisplayMode(mode: DisplayMode): Promise<void>
   hideAll(): Promise<void>
   closeCurrent(): Promise<void>
   quit(): Promise<void>
-  startDrag(): void
-  stopDrag(): void
+
+  // Orb window state
+  getOrbUiState(): Promise<{ state: OrbUiState }>
+  setOrbUiState(state: OrbUiState, opts?: { focus?: boolean }): Promise<{ state: OrbUiState }>
+  toggleOrbUiState(): Promise<{ state: OrbUiState }>
+  setOrbOverlayBounds(payload: { width: number; height: number; focus?: boolean }): Promise<{ ok: true }>
+  clearOrbOverlayBounds(payload?: { focus?: boolean }): Promise<{ ok: true }>
+  onOrbStateChanged(listener: (payload: { state: OrbUiState }) => void): () => void
+  showOrbContextMenu(point: { x: number; y: number }): Promise<{ ok: true }>
+  startDrag(point?: { x: number; y: number }): void
+  dragMove(point: { x: number; y: number }): void
+  stopDrag(point?: { x: number; y: number }): void
   showContextMenu(): void
   setPetOverlayHover(hovering: boolean): void
   setIgnoreMouseEvents(ignore: boolean, forward: boolean): void

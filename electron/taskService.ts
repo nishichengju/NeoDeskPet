@@ -1,8 +1,7 @@
 import Store from 'electron-store'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { app } from 'electron'
 import { getSettings } from './store'
 import { executeBuiltinTool, type ToolInput } from './toolExecutor'
 import {
@@ -13,6 +12,8 @@ import {
   type OpenAIFunctionToolSpec,
   type ToolDefinition,
 } from './toolRegistry'
+import { getLive2dCapabilities } from './live2dToolState'
+import { readLive2dModelMetadata } from './live2dModelMetadata'
 import type { McpManager } from './mcpManager'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, TaskStatus } from './types'
 
@@ -28,6 +29,8 @@ type TaskRuntime = {
   cancelCurrent?: () => void
 }
 
+type ThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
+
 const MAX_TASKS = 200
 const MAX_STEP_INPUT_CHARS = 8000
 const MAX_STEP_OUTPUT_CHARS = 5000
@@ -36,7 +39,40 @@ const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
 type Live2dTagExtracted = { cleanedText: string; expression?: string; motion?: string }
 type Live2dModelTagHints = { expressions: string[]; motions: string[] }
 
-const live2dTagHintsCache = new Map<string, Live2dModelTagHints>()
+function normalizeThinkingEffort(value: unknown): ThinkingEffort {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
+  return 'disabled'
+}
+
+function mapThinkingBudgetTokens(effort: ThinkingEffort, maxTokens: number): number {
+  const cap = Math.max(1024, Math.trunc(maxTokens) - 1)
+  if (effort === 'high') return Math.max(1024, Math.min(8192, cap))
+  if (effort === 'medium') return Math.max(1024, Math.min(4096, cap))
+  return Math.max(1024, Math.min(2048, cap))
+}
+
+function buildReasoningOptions(
+  model: string,
+  thinkingEffortRaw: unknown,
+  maxTokensRaw: number,
+): { maxTokens: number; extra: Record<string, unknown> } {
+  const modelId = String(model ?? '').trim().toLowerCase()
+  const requestedMaxTokens = Math.max(64, Math.min(262144, Math.trunc(maxTokensRaw)))
+  const isClaudeModel = modelId.includes('claude')
+  if (!isClaudeModel) return { maxTokens: requestedMaxTokens, extra: {} }
+
+  const thinkingEffort = normalizeThinkingEffort(thinkingEffortRaw)
+  if (thinkingEffort === 'disabled') {
+    // Vertex/OpenAI 兼容网关有时会为 Claude 注入默认 thinking 预算；这里抬高下限避免 max_tokens 触发 400。
+    return { maxTokens: Math.max(2048, requestedMaxTokens), extra: { thinking: { type: 'disabled' } } }
+  }
+
+  const budgetTokens = mapThinkingBudgetTokens(thinkingEffort, requestedMaxTokens)
+  return {
+    maxTokens: Math.max(requestedMaxTokens, budgetTokens + 1),
+    extra: { thinking: { type: 'enabled', budget_tokens: budgetTokens } },
+  }
+}
 
 function extractLive2dTags(text: string): Live2dTagExtracted {
   const raw = String(text ?? '')
@@ -72,53 +108,11 @@ function extractLive2dTags(text: string): Live2dTagExtracted {
   return { cleanedText: cleaned, expression, motion }
 }
 
-function getLive2dDir(): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'live2d')
-  }
-  return path.join(app.getAppPath(), 'public', 'live2d')
-}
-
 function readLive2dTagHintsFromModelFile(modelFileUrl: string): Live2dModelTagHints {
-  const raw = String(modelFileUrl ?? '').trim()
-  if (!raw) return { expressions: [], motions: [] }
-  if (live2dTagHintsCache.has(raw)) return live2dTagHintsCache.get(raw)!
-
-  try {
-    const normalized = raw.replace(/\\/g, '/')
-    const idx = normalized.indexOf('/live2d/')
-    if (idx < 0) return { expressions: [], motions: [] }
-    const rel = normalized.slice(idx + '/live2d/'.length).replace(/^\/+/, '')
-    if (!rel) return { expressions: [], motions: [] }
-
-    const filePath = path.join(getLive2dDir(), rel)
-    if (!fs.existsSync(filePath)) return { expressions: [], motions: [] }
-    const jsonText = fs.readFileSync(filePath, 'utf-8')
-    const modelJson = JSON.parse(jsonText) as Record<string, unknown>
-    const fileRefs = (modelJson?.FileReferences ?? {}) as Record<string, unknown>
-
-    const expressionsRaw = (fileRefs?.Expressions ?? null) as unknown
-    const expressions =
-      Array.isArray(expressionsRaw)
-        ? expressionsRaw
-            .map((e) => (e && typeof e === 'object' ? String((e as Record<string, unknown>).Name ?? '').trim() : ''))
-            .filter(Boolean)
-        : []
-
-    const motionsRaw = (fileRefs?.Motions ?? null) as unknown
-    const motions =
-      motionsRaw && typeof motionsRaw === 'object' && !Array.isArray(motionsRaw)
-        ? Object.keys(motionsRaw as Record<string, unknown>).map((k) => String(k).trim()).filter(Boolean)
-        : []
-
-    const hints = {
-      expressions: expressions.slice(0, 200),
-      motions: motions.slice(0, 200),
-    }
-    live2dTagHintsCache.set(raw, hints)
-    return hints
-  } catch {
-    return { expressions: [], motions: [] }
+  const meta = readLive2dModelMetadata(modelFileUrl)
+  return {
+    expressions: (meta?.expressions ?? []).map((e) => e.name).filter(Boolean).slice(0, 200),
+    motions: (meta?.motions ?? []).slice(0, 200),
   }
 }
 
@@ -131,18 +125,154 @@ function buildLive2dTagSystemAddon(hints: Live2dModelTagHints): string {
   if (exps.length) {
     lines.push(
       `【表情系统】可用表情：${exps.join('、')}\n` +
-        `请在你每次输出自然语言文本的末尾都附加 1 个表情标签（包括调用工具前的前置话术、以及拿到工具结果后的收尾话术），格式：[表情:表情名]。` +
-        `注意：表情标签只放在自然语言文本的末尾，不要放进工具参数/JSON 里。`,
+        `说明：这是“可选标签”，用于在不调用 live2d.applyParamScript 时快速触发表情。` +
+        `当你已经用 live2d.applyParamScript 完成表情/动作时，不要再额外追加标签，避免覆盖脚本效果。` +
+        `格式：[表情:表情名]（只放在自然语言文本末尾，不要放进工具参数/JSON）。`,
     )
   }
   if (motions.length) {
     lines.push(
       `【动作系统】可用动作组：${motions.join('、')}\n` +
-        `如需触发动作，可在自然语言文本末尾附加 1 个动作标签，格式：[动作:动作组名]。` +
-        `注意：动作标签只放在自然语言文本的末尾，不要放进工具参数/JSON 里。`,
+        `说明：这是“可选标签”，用于在不调用 live2d.applyParamScript 时快速触发动作。` +
+        `当你已经用 live2d.applyParamScript 完成表情/动作时，不要再额外追加标签，避免覆盖脚本效果。` +
+        `格式：[动作:动作组名]（只放在自然语言文本末尾，不要放进工具参数/JSON）。`,
     )
   }
   return lines.join('\n\n')
+}
+
+function buildLive2dParamSystemAddon(modelJsonUrlFallback?: string): string {
+  const caps = getLive2dCapabilities()
+  const modelJsonUrl = String(caps?.modelJsonUrl ?? modelJsonUrlFallback ?? '').trim()
+  if (!modelJsonUrl) return ''
+
+  const meta = readLive2dModelMetadata(modelJsonUrl)
+  const nameMap = meta?.parameterDisplayNames ?? {}
+
+  const maxList = 80
+  const items = (() => {
+    const fromCaps = Array.isArray(caps?.parameters) ? caps.parameters : []
+    const mapped = fromCaps
+      .filter((p) => p && typeof (p as { id?: unknown }).id === 'string')
+      .slice(0, 800)
+      .map((p) => ({
+        id: String((p as { id: string }).id).trim(),
+        min: typeof (p as { min?: unknown }).min === 'number' ? (p as { min: number }).min : undefined,
+        max: typeof (p as { max?: unknown }).max === 'number' ? (p as { max: number }).max : undefined,
+        def: typeof (p as { def?: unknown }).def === 'number' ? (p as { def: number }).def : undefined,
+      }))
+      .filter((p) => p.id.length > 0)
+      .sort((a, b) => a.id.localeCompare(b.id))
+
+    const idPool = (() => {
+      if (mapped.length > 0) return mapped.map((x) => x.id)
+      return Object.keys(nameMap).filter((k) => k.trim().length > 0)
+    })()
+
+    const exprIds = (() => {
+      const exps = meta?.expressions ?? []
+      const ids: string[] = []
+      for (const e of exps) {
+        for (const p of e.params ?? []) {
+          const id = String(p.id ?? '').trim()
+          if (id) ids.push(id)
+          if (ids.length >= 120) break
+        }
+        if (ids.length >= 120) break
+      }
+      return ids
+    })()
+
+    const commonIds = [
+      'ParamEyeLOpen',
+      'ParamEyeROpen',
+      'ParamEyeLSmile',
+      'ParamEyeRSmile',
+      'ParamBrowLAngle',
+      'ParamBrowRAngle',
+      'ParamCheek',
+      'ParamMouthForm',
+      'ParamAngleX',
+      'ParamAngleY',
+      'ParamAngleZ',
+      'ParamBodyAngleX',
+      'ParamBodyAngleY',
+      'ParamBodyAngleZ',
+      'Param13',
+    ]
+
+    const pick = (ids: string[]) => ids.map((s) => s.trim()).filter(Boolean)
+    const uniq = (xs: string[]) => Array.from(new Set(xs))
+    const prioritized = uniq([...pick(commonIds), ...pick(exprIds)])
+    const rest = uniq([...pick(idPool)]).filter((id) => !prioritized.includes(id)).sort((a, b) => a.localeCompare(b))
+    const finalIds = [...prioritized, ...rest].slice(0, maxList)
+
+    const byId = new Map<string, { min?: number; max?: number; def?: number }>()
+    for (const p of mapped) byId.set(p.id, { min: p.min, max: p.max, def: p.def })
+
+    return finalIds.map((id) => {
+      const mm = byId.get(id) ?? {}
+      return { id, min: mm.min, max: mm.max, def: mm.def }
+    })
+  })()
+
+  const fmt = (v: number | undefined) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : '')
+  const hasParam = (id: string): boolean => Boolean(items.some((p) => p.id === id) || typeof nameMap[id] === 'string')
+
+  const lines: string[] = []
+  lines.push('【Live2D 参数系统】')
+  lines.push('你可以通过工具 live2d.applyParamScript 控制模型参数。')
+  lines.push('当前系统提示已包含“当前模型参数清单”，通常不需要每次再调用 live2d.getCapabilities。仅当参数清单为空/明显不匹配当前模型时，再调用 live2d.getCapabilities。')
+  lines.push('硬规则：当用户明确要求“眨眼/wink/单眼眨眼”时，你的参数脚本必须包含 ParamEyeLOpen 或 ParamEyeROpen 的变化（否则视为没完成 wink）。')
+  lines.push('常见意图提示（优先改这些“语义参数”，不要用 ArtMesh 旋转类参数去硬凑表情）：')
+  if (hasParam('ParamEyeLOpen') || hasParam('ParamEyeROpen')) {
+    lines.push('- 眨眼/单眼 wink：用 ParamEyeLOpen / ParamEyeROpen 把其中一只眼睛从 1 → 0 → 1（另一只保持 1）')
+  }
+  if (hasParam('ParamEyeLSmile') || hasParam('ParamEyeRSmile')) {
+    lines.push('- 眯眼/笑眼：用 ParamEyeLSmile / ParamEyeRSmile（可与 EyeOpen 联动）')
+  }
+  if (hasParam('Param13') && (nameMap.Param13?.includes('脸红') ?? false)) {
+    lines.push('- 脸红：Param13（脸红）')
+  }
+  if (hasParam('ParamBodyAngleX') || hasParam('ParamBodyAngleZ')) {
+    lines.push('- 扭扭捏捏/身体摆动：ParamBodyAngleX / ParamBodyAngleZ / ParamAngleX / ParamAngleZ')
+  }
+  lines.push('脚本格式（推荐）：')
+  lines.push('- tween: {op:"tween", to:{ParamId: number}, durationMs:number, ease:"linear|in|out|inOut", holdMs?:number}')
+  lines.push('- patch: {op:"patch", to:{ParamId: number}, holdMs?:number}')
+  lines.push('- wait: {op:"wait", durationMs:number}')
+  lines.push('- sequence: {op:"sequence", steps:[...] }')
+  lines.push('- pulse(宏): {op:"pulse", id:"ParamId", down:0, up:1, downMs:100, holdMs:150, upMs:100}（等价于 tween+wait+tween）')
+  lines.push('注意：口型/呼吸/鼠标追踪等桌宠内置效果可能会覆盖同名参数，避免被 LLM 控制。')
+  lines.push('例如：若用户开启了“鼠标追踪”，可能会持续写入 ParamAngleX/Y、ParamBodyAngleX/Y、ParamEyeBallX/Y 等；此时尽量避免用这些参数做动作，或提示用户先关闭鼠标追踪。')
+  const totalCount = Array.isArray(caps?.parameters) ? caps.parameters.length : 0
+  lines.push(`当前模型参数（展示前 ${items.length}/${totalCount || items.length} 个，model=${modelJsonUrl}）：`)
+  for (const p of items) {
+    const display = nameMap[p.id]
+    const nameSuffix = display ? ` (${display})` : ''
+    const suffix = [fmt(p.min) && `min=${fmt(p.min)}`, fmt(p.max) && `max=${fmt(p.max)}`, fmt(p.def) && `def=${fmt(p.def)}`]
+      .filter(Boolean)
+      .join(' ')
+    lines.push(`- ${p.id}${nameSuffix}${suffix ? ` ${suffix}` : ''}`)
+  }
+
+  const expressions = meta?.expressions ?? []
+  if (expressions.length > 0) {
+    lines.push('')
+    lines.push('【Live2D 表情速查（来自模型 Expressions/*.exp3.json）】')
+    lines.push('说明：表情本质上也是一组参数变化；你可以直接用 applyParamScript 复现，不必盲猜 ParamXX。')
+    for (const e of expressions.slice(0, 16)) {
+      const ps = (e.params ?? []).slice(0, 5).map((x) => {
+        const dn = nameMap[x.id]
+        const dnSuffix = dn ? `(${dn})` : ''
+        const blend = x.blend ? x.blend : 'Set'
+        return `${x.id}${dnSuffix} ${blend} ${x.value}`
+      })
+      lines.push(`- ${e.name}${ps.length ? `: ${ps.join(', ')}` : ''}`)
+    }
+  }
+
+  return lines.join('\n')
 }
 
 function now(): number {
@@ -212,6 +342,13 @@ function normalizeTaskRecord(value: unknown): TaskRecord | null {
             | 'error',
           inputPreview: typeof r.inputPreview === 'string' ? clampText(r.inputPreview, 500) : undefined,
           outputPreview: typeof r.outputPreview === 'string' ? clampText(r.outputPreview, 800) : undefined,
+          imagePaths: Array.isArray(r.imagePaths)
+            ? (r.imagePaths as unknown[])
+                .filter((x) => typeof x === 'string')
+                .map((x) => String(x).trim())
+                .filter(Boolean)
+                .slice(0, 8)
+            : undefined,
           error: typeof r.error === 'string' ? clampText(r.error, 800) : undefined,
           startedAt: typeof r.startedAt === 'number' ? r.startedAt : now(),
           endedAt: typeof r.endedAt === 'number' ? r.endedAt : undefined,
@@ -316,6 +453,78 @@ function resolveTemplates(value: ToolInput, task: TaskRecord): ToolInput {
 
 function clampStepOutput(text: string): string {
   return clampText(text, MAX_STEP_OUTPUT_CHARS)
+}
+
+function pickImageExtByMime(mimeType: string): string {
+  const m = String(mimeType ?? '').trim().toLowerCase()
+  if (m === 'image/jpeg') return '.jpg'
+  if (m === 'image/webp') return '.webp'
+  if (m === 'image/gif') return '.gif'
+  if (m === 'image/bmp') return '.bmp'
+  return '.png'
+}
+
+const IMAGE_REF_RE = /\.(?:png|jpe?g|webp|gif|bmp|svg)(?:[?#][^\s"')\]]*)?$/i
+
+function isLikelyImageRef(raw: string): boolean {
+  const s = String(raw ?? '').trim()
+  if (!s) return false
+  if (/^data:image\//i.test(s)) return true
+  return IMAGE_REF_RE.test(s)
+}
+
+function extractImageRefsFromToolText(text: string): string[] {
+  const raw = String(text ?? '')
+  if (!raw.trim()) return []
+
+  const out = new Set<string>()
+  const add = (value: unknown) => {
+    const s = String(value ?? '').trim()
+    if (!s) return
+    if (!isLikelyImageRef(s)) return
+    out.add(s)
+  }
+
+  const walk = (v: unknown) => {
+    if (typeof v === 'string') {
+      add(v)
+      return
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) walk(x)
+      return
+    }
+    if (!v || typeof v !== 'object') return
+    for (const x of Object.values(v as Record<string, unknown>)) walk(x)
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    walk(parsed)
+  } catch {
+    // ignore
+  }
+
+  for (const m of raw.matchAll(/!\[[^\]]*]\(([^)\s]+)\)/g)) add(m[1])
+  for (const m of raw.matchAll(/https?:\/\/[^\s<>()"'`]+/g)) add(m[0])
+  for (const m of raw.matchAll(/(?:[a-zA-Z]:\\|\\\\|\/)[^\r\n"'`<>|?*]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'`<>]*)?/g)) add(m[0])
+
+  return Array.from(out).slice(0, 8)
+}
+
+function normalizeImagePathList(values: unknown[], limit = 8): string[] {
+  const max = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 8
+  if (!Array.isArray(values) || max <= 0) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const s = String(value ?? '').trim()
+    if (!s || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+    if (out.length >= max) break
+  }
+  return out
 }
 
 export class TaskService {
@@ -564,6 +773,61 @@ export class TaskService {
       },
       { maxStepOutputChars: MAX_STEP_OUTPUT_CHARS },
     )
+  }
+
+  private async persistToolImages(taskId: string, images: Array<{ mimeType: string; data: string }>): Promise<string[]> {
+    if (!Array.isArray(images) || images.length === 0) return []
+
+    const baseDir = path.join(this.userDataDir, 'chat-attachments')
+    await fs.promises.mkdir(baseDir, { recursive: true })
+
+    const out: string[] = []
+    const seenImageHashes = new Set<string>()
+    const safeTaskId = String(taskId ?? '').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 24) || 'task'
+    for (const it of images.slice(0, 8)) {
+      const rawData = typeof it?.data === 'string' ? it.data.trim() : ''
+      if (!rawData) continue
+
+      let mimeType = typeof it?.mimeType === 'string' && it.mimeType.trim() ? it.mimeType.trim() : 'image/png'
+      let base64 = rawData
+      const dataUrlMatch = rawData.match(/^data:([^;,]+);base64,(.+)$/i)
+      if (dataUrlMatch) {
+        mimeType = dataUrlMatch[1] || mimeType
+        base64 = dataUrlMatch[2] || ''
+      }
+
+      if (!base64) continue
+
+      let buf: Buffer
+      try {
+        buf = Buffer.from(base64, 'base64')
+      } catch {
+        continue
+      }
+      if (!buf.length) continue
+      const hash = createHash('sha1').update(buf).digest('hex')
+      const imageKey = `${mimeType}:${hash}`
+      if (seenImageHashes.has(imageKey)) continue
+      seenImageHashes.add(imageKey)
+
+      const ext = pickImageExtByMime(mimeType)
+      const filename = `${safeTaskId}-${randomUUID()}${ext}`
+      const filePath = path.join(baseDir, filename)
+      await fs.promises.writeFile(filePath, buf)
+      out.push(filePath)
+    }
+
+    return out
+  }
+
+  private async resolveToolImagePaths(
+    taskId: string,
+    toolText: string,
+    images: Array<{ mimeType: string; data: string }>,
+  ): Promise<string[]> {
+    const persisted = await this.persistToolImages(taskId, images)
+    if (persisted.length > 0) return normalizeImagePathList(persisted, 8)
+    return normalizeImagePathList(extractImageRefsFromToolText(toolText), 8)
   }
 
   private async runTool(tool: string | undefined, input: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
@@ -845,6 +1109,8 @@ export class TaskService {
     const live2dHints = readLive2dTagHintsFromModelFile(String(settings.live2dModelFile ?? ''))
     const live2dAddon = buildLive2dTagSystemAddon(live2dHints)
     if (live2dAddon) messages.push({ role: 'system', content: live2dAddon })
+    const live2dParamAddon = buildLive2dParamSystemAddon(String(settings.live2dModelFile ?? ''))
+    if (live2dParamAddon) messages.push({ role: 'system', content: live2dParamAddon })
     messages.push({
       role: 'system',
       content:
@@ -862,6 +1128,13 @@ export class TaskService {
         messages.push({ role, content })
       }
     }
+    const requestText = request.trim()
+    const lastHistoryMessage = [...messages].reverse().find((m) => m.role === 'user' || m.role === 'assistant')
+    const lastHistoryUserText =
+      lastHistoryMessage?.role === 'user' && typeof lastHistoryMessage.content === 'string'
+        ? String(lastHistoryMessage.content).trim()
+        : ''
+    const hasSameTailUserRequest = Boolean(requestText) && lastHistoryUserText === requestText
 
     if (visionImagePaths.length > 0) {
       const mimeFromExt = (p: string): string => {
@@ -892,10 +1165,13 @@ export class TaskService {
         if (!url) continue
         parts.push({ type: 'image_url', image_url: { url } })
       }
-      if (parts.length === 0) messages.push({ role: 'user', content: request })
-      else messages.push({ role: 'user', content: parts })
+      if (parts.length === 0) {
+        if (!hasSameTailUserRequest) messages.push({ role: 'user', content: request })
+      } else {
+        messages.push({ role: 'user', content: parts })
+      }
     } else {
-      messages.push({ role: 'user', content: request })
+      if (!hasSameTailUserRequest) messages.push({ role: 'user', content: request })
     }
 
     const userMsgRef = messages.find((m) => m.role === 'user') as Record<string, unknown> | undefined
@@ -917,7 +1193,7 @@ export class TaskService {
     let live2dMotion: string | undefined
     let toolRuns: TaskRecord['toolRuns'] = []
     // 累积 API 返回的 token 使用统计（多轮工具调用会累加）
-    let cumulativeUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+    const cumulativeUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
 
     // 初始化一次：避免复用上次残留的 draft/toolRuns
     this.writeState((draft) => {
@@ -956,22 +1232,6 @@ export class TaskService {
       updateProgress(force)
     }
 
-    const appendDraft = (text: string) => {
-      const cleaned = (text ?? '').trim()
-      if (!cleaned) return
-      const extracted = extractLive2dTags(cleaned)
-      if (extracted.expression) live2dExpression = extracted.expression
-      if (extracted.motion) live2dMotion = extracted.motion
-      const piece = extracted.cleanedText
-      // 允许“只输出标签不输出文本”的情况：此时不更新 draftReply，但也要把表情/动作变更落到任务状态里
-      if (piece) {
-        draftReply = draftReply ? `${draftReply}\n${piece}` : piece
-        updateProgress(true)
-        return
-      }
-      if (extracted.expression || extracted.motion) updateProgress(true)
-    }
-
     const toolPreview = (v: unknown, max: number) => clampText(typeof v === 'string' ? v : JSON.stringify(v ?? ''), max)
 
     const upsertToolRun = (patch: {
@@ -980,6 +1240,7 @@ export class TaskService {
       status: 'running' | 'done' | 'error'
       inputPreview?: string
       outputPreview?: string
+      imagePaths?: string[]
       error?: string
       startedAt?: number
       endedAt?: number
@@ -993,6 +1254,10 @@ export class TaskService {
         status: patch.status,
         inputPreview: patch.inputPreview ?? base?.inputPreview,
         outputPreview: patch.outputPreview ?? base?.outputPreview,
+        imagePaths:
+          Array.isArray(patch.imagePaths)
+            ? normalizeImagePathList(patch.imagePaths, 8)
+            : base?.imagePaths,
         error: patch.error ?? base?.error,
         startedAt: typeof patch.startedAt === 'number' ? patch.startedAt : base?.startedAt ?? now(),
         endedAt: typeof patch.endedAt === 'number' ? patch.endedAt : base?.endedAt,
@@ -1041,7 +1306,13 @@ export class TaskService {
     const temperature = Math.max(0, Math.min(2, tempOverride ?? prefer.temperature))
 
     const maxTokensOverride = readNumber(apiOverride, 'maxTokens')
-    const maxTokens = Math.max(64, Math.min(8192, Math.trunc(maxTokensOverride ?? prefer.maxTokens)))
+    const maxTokensCandidate = maxTokensOverride ?? prefer.maxTokens
+    const maxTokensRaw =
+      typeof maxTokensCandidate === 'number' && Number.isFinite(maxTokensCandidate) ? Math.trunc(maxTokensCandidate) : 900
+    const thinkingEffortOverride = readString(apiOverride, 'thinkingEffort')
+    const baseThinkingEffort = normalizeThinkingEffort((baseAi as { thinkingEffort?: unknown }).thinkingEffort)
+    const reasoningOptions = buildReasoningOptions(model, thinkingEffortOverride || baseThinkingEffort, maxTokensRaw)
+    const maxTokens = reasoningOptions.maxTokens
     const timeoutMs =
       typeof obj?.timeoutMs === 'number'
         ? Math.max(2000, Math.min(180000, Math.trunc(obj.timeoutMs)))
@@ -1059,35 +1330,15 @@ export class TaskService {
 
     const callLlmNative = async (
       attempt = 0,
+      opts?: { onDelta?: (delta: string) => void },
     ): Promise<{ contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage }> => {
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
       rt.cancelCurrent = () => ac.abort(new Error('canceled'))
 
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          signal: ac.signal,
-          headers,
-          body: JSON.stringify({
-            model,
-            temperature,
-            max_tokens: maxTokens,
-            messages,
-            tools,
-            tool_choice: 'auto',
-            sessionId,
-          }),
-        })
-
-        const data = (await res.json().catch(() => ({}))) as { error?: { message?: string }; choices?: Array<{ message?: AssistantMessage }> }
-        if (!res.ok) {
-          const errMsg = data?.error?.message || `HTTP ${res.status}`
-          throw new Error(errMsg)
-        }
-
-        const msg = (data.choices?.[0]?.message ?? {}) as AssistantMessage
-
+      const parseNativeAssistantMessage = (
+        msg: AssistantMessage,
+      ): { contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage } => {
         const contentText =
           typeof msg.content === 'string'
             ? msg.content
@@ -1168,11 +1419,212 @@ export class TaskService {
         if (rawToolCalls.length) assistantMsgRaw.tool_calls = rawToolCalls.map((c, idx) => ensureToolCallId(c, idx))
 
         return { contentText, toolCalls, rawToolCalls: rawToolCalls.map((c, idx) => ensureToolCallId(c, idx)), assistantMsgRaw }
+      }
+
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          signal: ac.signal,
+          headers: { ...headers, Accept: 'text/event-stream' },
+          body: JSON.stringify({
+            model,
+            temperature,
+            max_tokens: maxTokens,
+            ...reasoningOptions.extra,
+            messages,
+            tools,
+            tool_choice: 'auto',
+            sessionId,
+            stream: true,
+          }),
+        })
+
+        if (!res.ok) {
+          const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
+          const errMsg = errData?.error?.message || `HTTP ${res.status}`
+          throw new Error(errMsg)
+        }
+
+        let msg: AssistantMessage = { role: 'assistant' }
+        const contentType = String(res.headers.get('content-type') ?? '')
+        const isSse = contentType.includes('text/event-stream')
+        if (isSse && res.body) {
+          const reader = res.body.getReader()
+          const decoder = new TextDecoder('utf-8')
+          let buffer = ''
+
+          let role: string | undefined
+          let contentText = ''
+          let legacyFnName = ''
+          let legacyFnArgs = ''
+          const toolCallsAcc: Array<{
+            id?: string
+            type?: string
+            function?: { name?: string; arguments?: string }
+          }> = []
+
+          const mergeStreamStr = (prev: string, next: string): string => {
+            const p = prev ?? ''
+            const n = next ?? ''
+            if (!n) return p
+            if (!p) return n
+            if (n.startsWith(p)) return n
+            if (p.startsWith(n)) return p
+            return p + n
+          }
+
+          const ensureToolAcc = (idx: number) => {
+            if (!toolCallsAcc[idx]) toolCallsAcc[idx] = { type: 'function', function: { name: '', arguments: '' } }
+            const it = toolCallsAcc[idx]!
+            if (!it.function) it.function = { name: '', arguments: '' }
+            if (typeof it.type !== 'string' || !it.type) it.type = 'function'
+            return it
+          }
+
+          let streamDone = false
+          while (!streamDone) {
+            const { value, done } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+
+            let hasMoreLines = true
+            while (hasMoreLines) {
+              const lineEnd = buffer.indexOf('\n')
+              if (lineEnd === -1) {
+                hasMoreLines = false
+                break
+              }
+              const line = buffer.slice(0, lineEnd).trim()
+              buffer = buffer.slice(lineEnd + 1)
+              if (!line.startsWith('data:')) continue
+              const dataStr = line.slice('data:'.length).trim()
+              if (!dataStr) continue
+              if (dataStr === '[DONE]') {
+                streamDone = true
+                hasMoreLines = false
+                break
+              }
+
+              let payload: unknown
+              try {
+                payload = JSON.parse(dataStr)
+              } catch {
+                continue
+              }
+
+              const payloadObj = payload as {
+                choices?: Array<{ delta?: Record<string, unknown>; message?: Record<string, unknown> }>
+              }
+              const choice = payloadObj.choices?.[0]
+              const deltaObj = choice?.delta ?? null
+              const msgObj = choice?.message ?? null
+
+              if (deltaObj && typeof deltaObj === 'object') {
+                const deltaRole = (deltaObj as { role?: unknown }).role
+                if (!role && typeof deltaRole === 'string' && deltaRole.trim()) role = deltaRole.trim()
+              }
+
+              const deltaContent = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { content?: unknown }).content : undefined
+              const msgContent = msgObj && typeof msgObj === 'object' ? (msgObj as { content?: unknown }).content : undefined
+
+              const piece = (() => {
+                if (typeof deltaContent === 'string' && deltaContent) return deltaContent
+                if (typeof msgContent !== 'string' || !msgContent) return ''
+                return msgContent.startsWith(contentText) ? msgContent.slice(contentText.length) : msgContent
+              })()
+              if (piece) {
+                contentText += piece
+                opts?.onDelta?.(piece)
+              }
+
+              const toolCallsDelta = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { tool_calls?: unknown }).tool_calls : undefined
+              if (Array.isArray(toolCallsDelta)) {
+                for (let i = 0; i < toolCallsDelta.length; i += 1) {
+                  const raw = toolCallsDelta[i]
+                  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+                  const rec = raw as Record<string, unknown>
+                  const idx = typeof rec.index === 'number' ? rec.index : i
+                  const acc = ensureToolAcc(Math.max(0, idx))
+
+                  const id = typeof rec.id === 'string' ? rec.id : ''
+                  if (id.trim()) acc.id = id.trim()
+
+                  const type = typeof rec.type === 'string' ? rec.type : ''
+                  if (type.trim()) acc.type = type.trim()
+
+                  const fnRaw = rec.function
+                  if (fnRaw && typeof fnRaw === 'object' && !Array.isArray(fnRaw)) {
+                    const fn = fnRaw as Record<string, unknown>
+                    const name = typeof fn.name === 'string' ? fn.name : ''
+                    if (name) acc.function!.name = mergeStreamStr(acc.function!.name ?? '', name)
+
+                    const argsVal = fn.arguments
+                    const argsStr =
+                      typeof argsVal === 'string'
+                        ? argsVal
+                        : argsVal != null
+                          ? (() => {
+                              try {
+                                return JSON.stringify(argsVal)
+                              } catch {
+                                return ''
+                              }
+                            })()
+                          : ''
+                    if (argsStr) acc.function!.arguments = mergeStreamStr(acc.function!.arguments ?? '', argsStr)
+                  }
+                }
+              }
+
+              const legacyFn = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { function_call?: unknown }).function_call : undefined
+              if (legacyFn && typeof legacyFn === 'object' && !Array.isArray(legacyFn)) {
+                const fc = legacyFn as Record<string, unknown>
+                const name = typeof fc.name === 'string' ? fc.name : ''
+                if (name) legacyFnName = mergeStreamStr(legacyFnName, name)
+
+                const argsVal = fc.arguments
+                const argsStr =
+                  typeof argsVal === 'string'
+                    ? argsVal
+                    : argsVal != null
+                      ? (() => {
+                          try {
+                            return JSON.stringify(argsVal)
+                          } catch {
+                            return ''
+                          }
+                        })()
+                      : ''
+                if (argsStr) legacyFnArgs = mergeStreamStr(legacyFnArgs, argsStr)
+              }
+            }
+          }
+
+          const toolCallsRaw = toolCallsAcc
+            .map((c, idx) => {
+              if (!c) return null
+              const fn = c.function ?? {}
+              const name = typeof fn.name === 'string' ? fn.name : ''
+              const args = typeof fn.arguments === 'string' ? fn.arguments : ''
+              if (!name.trim()) return null
+              return { id: typeof c.id === 'string' && c.id.trim() ? c.id : `call_${idx}`, type: 'function', function: { name, arguments: args } }
+            })
+            .filter((x): x is { id: string; type: string; function: { name: string; arguments: string } } => Boolean(x))
+
+          msg = { role: role || 'assistant', content: contentText }
+          if (toolCallsRaw.length) msg.tool_calls = toolCallsRaw
+          else if (legacyFnName.trim()) msg.function_call = { name: legacyFnName, arguments: legacyFnArgs }
+        } else {
+          const data = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: AssistantMessage }> }
+          msg = (data.choices?.[0]?.message ?? {}) as AssistantMessage
+        }
+
+        return parseNativeAssistantMessage(msg)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (attempt === 0 && stripVisionFromUserMessage()) {
           pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
-          return callLlmNative(1)
+          return callLlmNative(1, opts)
         }
         throw err
       } finally {
@@ -1181,8 +1633,50 @@ export class TaskService {
       }
     }
 
+    const TOOL_REQUEST_START = '<<<[TOOL_REQUEST]>>>'
+    const TOOL_REQUEST_END = '<<<[END_TOOL_REQUEST]>>>'
+    const TOOL_RESULT_START = '<<<[TOOL_RESULT]>>>'
+    const TOOL_RESULT_END = '<<<[END_TOOL_RESULT]>>>'
+    const VCP_VALUE_START = '「始」'
+    const VCP_VALUE_END = '「末」'
+
+    const findLastCompleteToolRequestEnd = (text: string): number => {
+      const raw = String(text ?? '')
+      let cursor = 0
+      let lastEnd = -1
+      while (cursor < raw.length) {
+        const s = raw.indexOf(TOOL_REQUEST_START, cursor)
+        if (s < 0) break
+        const e = raw.indexOf(TOOL_REQUEST_END, s + TOOL_REQUEST_START.length)
+        if (e < 0) break
+        lastEnd = e + TOOL_REQUEST_END.length
+        cursor = lastEnd
+      }
+      return lastEnd
+    }
+
+    const stripToolRequestBlocksForDisplay = (text: string): string => {
+      const raw = String(text ?? '')
+      if (!raw.includes(TOOL_REQUEST_START)) return raw
+      let out = ''
+      let cursor = 0
+      while (cursor < raw.length) {
+        const s = raw.indexOf(TOOL_REQUEST_START, cursor)
+        if (s < 0) {
+          out += raw.slice(cursor)
+          break
+        }
+        out += raw.slice(cursor, s)
+        const e = raw.indexOf(TOOL_REQUEST_END, s + TOOL_REQUEST_START.length)
+        if (e < 0) break // 未闭合：隐藏剩余部分，避免 UI 暴露协议块
+        cursor = e + TOOL_REQUEST_END.length
+      }
+      return out
+    }
+
     const callLlmText = async (
       attempt = 0,
+      opts?: { onDelta?: (delta: string) => void; stopOnToolRequest?: boolean },
     ): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> => {
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
@@ -1197,6 +1691,7 @@ export class TaskService {
             model,
             temperature,
             max_tokens: maxTokens,
+            ...reasoningOptions.extra,
             messages,
             sessionId,
             stream: true,
@@ -1219,14 +1714,17 @@ export class TaskService {
         let contentText = ''
         let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined
 
-        while (true) {
+        let stoppedEarly = false
+        let streamDone = false
+        while (!streamDone && !stoppedEarly) {
           const { value, done } = await reader.read()
+          streamDone = done
           if (done) break
           buffer += decoder.decode(value, { stream: true })
 
           // Parse SSE lines
           let hasMoreLines = true
-          while (hasMoreLines) {
+          while (hasMoreLines && !stoppedEarly) {
             const lineEnd = buffer.indexOf('\n')
             if (lineEnd === -1) {
               hasMoreLines = false
@@ -1258,11 +1756,33 @@ export class TaskService {
               const choice = payload.choices?.[0]
               const delta = choice?.delta?.content ?? choice?.message?.content ?? ''
               if (delta) {
+                const prevLen = contentText.length
                 contentText += delta
+
+                if (opts?.stopOnToolRequest) {
+                  const lastEnd = findLastCompleteToolRequestEnd(contentText)
+                  if (lastEnd >= 0) {
+                    const keptDelta = contentText.slice(prevLen, Math.min(lastEnd, contentText.length))
+                    if (keptDelta) opts.onDelta?.(keptDelta)
+                    contentText = contentText.slice(0, lastEnd)
+                    stoppedEarly = true
+                    break
+                  }
+                }
+
+                opts?.onDelta?.(delta)
               }
             } catch {
               // Ignore parse errors for individual chunks
             }
+          }
+        }
+
+        if (stoppedEarly) {
+          try {
+            await reader.cancel()
+          } catch {
+            // ignore
           }
         }
 
@@ -1272,7 +1792,7 @@ export class TaskService {
         const msg = err instanceof Error ? err.message : String(err)
         if (attempt === 0 && stripVisionFromUserMessage()) {
           pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
-          return callLlmText(1)
+          return callLlmText(1, opts)
         }
         throw err
       } finally {
@@ -1280,13 +1800,6 @@ export class TaskService {
         rt.cancelCurrent = undefined
       }
     }
-
-    const TOOL_REQUEST_START = '<<<[TOOL_REQUEST]>>>'
-    const TOOL_REQUEST_END = '<<<[END_TOOL_REQUEST]>>>'
-    const TOOL_RESULT_START = '<<<[TOOL_RESULT]>>>'
-    const TOOL_RESULT_END = '<<<[END_TOOL_RESULT]>>>'
-    const VCP_VALUE_START = '「始」'
-    const VCP_VALUE_END = '「末」'
 
     const parseToolRequests = (text: string): { cleaned: string; calls: Array<{ toolName: string; input: ToolInput }> } => {
       const raw = String(text ?? '')
@@ -1380,7 +1893,7 @@ export class TaskService {
     const executeTextToolCall = async (
       toolNameRaw: string,
       input: ToolInput,
-    ): Promise<{ output: string; images: Array<{ mimeType: string; data: string }> }> => {
+    ): Promise<{ output: string; images: Array<{ mimeType: string; data: string }>; imagePaths: string[] }> => {
       const needle = (toolNameRaw ?? '').trim()
       const def = toolByName.get(needle) ?? resolveToolDefByCallName(needle)
       if (!def) throw new Error(`未知工具：${toolNameRaw}`)
@@ -1402,14 +1915,15 @@ export class TaskService {
       if (def.name.startsWith('mcp.') && this.mcpManager) {
         const res = await this.mcpManager.callToolDetailed(def.name, input)
         const out = res.text
-        const exec = { output: out, images: res.images }
+        const imagePaths = await this.resolveToolImagePaths(task.id, out, res.images)
+        const exec = { output: out, images: res.images, imagePaths }
         executedCalls.set(key, exec)
         executedCallOrder.push({ toolName: def.name, input, output: out })
         return exec
       }
 
       const out = await this.executeToolByName(def.name, input, task, rt)
-      const exec = { output: out, images: [] as Array<{ mimeType: string; data: string }> }
+      const exec = { output: out, images: [] as Array<{ mimeType: string; data: string }>, imagePaths: [] as string[] }
       executedCalls.set(key, exec)
       executedCallOrder.push({ toolName: def.name, input, output: out })
       return exec
@@ -1417,7 +1931,7 @@ export class TaskService {
 
     pushLog(`[Agent] request: ${clampText(request, 120)}`, true)
 
-    const executedCalls = new Map<string, { output: string; images: Array<{ mimeType: string; data: string }> }>()
+    const executedCalls = new Map<string, { output: string; images: Array<{ mimeType: string; data: string }>; imagePaths: string[] }>()
     const executedCallOrder: Array<{ toolName: string; input: ToolInput; output: string }> = []
 
     const stableStringify = (v: unknown): string => {
@@ -1536,9 +2050,29 @@ export class TaskService {
         if (rt.canceled) throw new Error('canceled')
 
         pushLog(`[Agent] turn ${turn + 1}/${maxTurns}`)
-        const { contentText, toolCalls, assistantMsgRaw } = await callLlmNative()
+        const draftBase = draftReply
+        let turnRaw = ''
+        const applyTurnDraft = (raw: string, force?: boolean) => {
+          const extracted = extractLive2dTags(raw)
+          if (extracted.expression) live2dExpression = extracted.expression
+          if (extracted.motion) live2dMotion = extracted.motion
+          const piece = extracted.cleanedText
+          if (piece) {
+            draftReply = draftBase ? `${draftBase}\n${piece}` : piece
+            updateProgress(force)
+            return
+          }
+          if (extracted.expression || extracted.motion) updateProgress(force)
+        }
+
+        const { contentText, toolCalls, assistantMsgRaw } = await callLlmNative(0, {
+          onDelta: (delta) => {
+            turnRaw += delta
+            applyTurnDraft(turnRaw)
+          },
+        })
         messages.push(assistantMsgRaw)
-        appendDraft(contentText)
+        applyTurnDraft(contentText, true)
 
         if (!toolCalls.length) {
           pushLog('[Agent] done', true)
@@ -1586,15 +2120,24 @@ export class TaskService {
           })
 
           let toolOut = ''
+          let toolImagePaths: string[] = []
           try {
             const key = makeCallKey(def.name, toolInput)
             const cached = executedCalls.get(key)
             if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${def.name} skip duplicate`, true)
               toolOut = cached.output
+              toolImagePaths = Array.isArray(cached.imagePaths) ? cached.imagePaths : []
             } else {
-              toolOut = await this.executeToolByName(def.name, toolInput, task, rt)
-              executedCalls.set(key, { output: toolOut, images: [] })
+              if (def.name.startsWith('mcp.') && this.mcpManager) {
+                const res = await this.mcpManager.callToolDetailed(def.name, toolInput)
+                toolOut = res.text
+                toolImagePaths = await this.resolveToolImagePaths(task.id, toolOut, res.images)
+                executedCalls.set(key, { output: toolOut, images: res.images, imagePaths: toolImagePaths })
+              } else {
+                toolOut = await this.executeToolByName(def.name, toolInput, task, rt)
+                executedCalls.set(key, { output: toolOut, images: [], imagePaths: [] })
+              }
               executedCallOrder.push({ toolName: def.name, input: toolInput, output: toolOut })
             }
           } catch (err) {
@@ -1602,7 +2145,7 @@ export class TaskService {
             toolOut = `[error] ${msg}`
             const key = makeCallKey(def.name, toolInput)
             if (!executedCalls.has(key)) {
-              executedCalls.set(key, { output: toolOut, images: [] })
+              executedCalls.set(key, { output: toolOut, images: [], imagePaths: [] })
               executedCallOrder.push({ toolName: def.name, input: toolInput, output: toolOut })
             }
             upsertToolRun({
@@ -1611,6 +2154,7 @@ export class TaskService {
               status: 'error',
               error: clampText(msg, 800),
               outputPreview: clampText(toolOut, 800),
+              imagePaths: [],
               endedAt: now(),
             })
           }
@@ -1622,6 +2166,7 @@ export class TaskService {
             toolName: def.name,
             status: toolOut.startsWith('[error]') ? 'error' : 'done',
             outputPreview: clampText(toolOut, 800),
+            imagePaths: toolImagePaths,
             endedAt: now(),
           })
           messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: toolMsg })
@@ -1643,7 +2188,29 @@ export class TaskService {
         if (rt.canceled) throw new Error('canceled')
 
         pushLog(`[Agent] turn ${turn + 1}/${maxTurns}`)
-        const { contentText, assistantMsgRaw, usage } = await callLlmText()
+        const draftBase = draftReply
+        let turnRaw = ''
+        const applyTurnDraft = (raw: string, force?: boolean) => {
+          const display = stripToolRequestBlocksForDisplay(raw)
+          const extracted = extractLive2dTags(display)
+          if (extracted.expression) live2dExpression = extracted.expression
+          if (extracted.motion) live2dMotion = extracted.motion
+          const piece = extracted.cleanedText
+          if (piece) {
+            draftReply = draftBase ? `${draftBase}\n${piece}` : piece
+            updateProgress(force)
+            return
+          }
+          if (extracted.expression || extracted.motion) updateProgress(force)
+        }
+
+        const { contentText, assistantMsgRaw, usage } = await callLlmText(0, {
+          stopOnToolRequest: true,
+          onDelta: (delta) => {
+            turnRaw += delta
+            applyTurnDraft(turnRaw)
+          },
+        })
         messages.push(assistantMsgRaw)
 
         // 累积本次 API 调用的 usage
@@ -1654,7 +2221,7 @@ export class TaskService {
         }
 
         const { cleaned, calls } = parseToolRequests(contentText)
-        appendDraft(cleaned)
+        applyTurnDraft(cleaned, true)
         if (!calls.length) {
           pushLog('[Agent] done', true)
           const fin = tryFinalizeOrContinue(cleaned, turn)
@@ -1679,15 +2246,18 @@ export class TaskService {
           })
 
           let toolOut = ''
+          let toolImagePaths: string[] = []
           try {
             const key = makeCallKey(c.toolName, c.input ?? {})
             const cached = executedCalls.get(key)
             if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${c.toolName} skip duplicate`, true)
               toolOut = cached.output
+              toolImagePaths = Array.isArray(cached.imagePaths) ? cached.imagePaths : []
             } else {
               const exec = await executeTextToolCall(c.toolName, c.input)
               toolOut = exec.output
+              toolImagePaths = Array.isArray(exec.imagePaths) ? exec.imagePaths : []
               executedCalls.set(key, exec)
               executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: toolOut })
             }
@@ -1696,7 +2266,7 @@ export class TaskService {
             toolOut = `[error] ${msg}`
             const key = makeCallKey(c.toolName, c.input ?? {})
             if (!executedCalls.has(key)) {
-              executedCalls.set(key, { output: toolOut, images: [] })
+              executedCalls.set(key, { output: toolOut, images: [], imagePaths: [] })
               executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: toolOut })
             }
             upsertToolRun({
@@ -1705,6 +2275,7 @@ export class TaskService {
               status: 'error',
               error: clampText(msg, 800),
               outputPreview: clampText(toolOut, 800),
+              imagePaths: [],
               endedAt: now(),
             })
           }
@@ -1716,6 +2287,7 @@ export class TaskService {
             toolName: c.toolName,
             status: toolOut.startsWith('[error]') ? 'error' : 'done',
             outputPreview: clampText(toolOut, 800),
+            imagePaths: toolImagePaths,
             endedAt: now(),
           })
 
@@ -1758,6 +2330,19 @@ export class TaskService {
       messages.splice(0, messages.length)
       messages.push({ role: 'system', content: system })
       if (extraContext) messages.push({ role: 'system', content: extraContext })
+
+      // 回退到 text 协议时也要保留 Live2D 的系统注入，否则模型会丢失“参数语义/可用表情动作”上下文，容易乱调参数
+      const live2dHints = readLive2dTagHintsFromModelFile(String(settings.live2dModelFile ?? ''))
+      const live2dAddon = buildLive2dTagSystemAddon(live2dHints)
+      if (live2dAddon) messages.push({ role: 'system', content: live2dAddon })
+      const live2dParamAddon = buildLive2dParamSystemAddon(String(settings.live2dModelFile ?? ''))
+      if (live2dParamAddon) messages.push({ role: 'system', content: live2dParamAddon })
+      messages.push({
+        role: 'system',
+        content:
+          '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。',
+      })
+
       messages.push({ role: 'user', content: request })
 
       if (executedCallOrder.length > 0) {

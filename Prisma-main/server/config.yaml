@@ -1,0 +1,40 @@
+# DeepThink API Server Configuration
+
+# Server Settings
+port: 3090
+host: "0.0.0.0"
+corsOrigins:
+  - "*"
+
+# DeepThink Configuration
+deepThink:
+  # Model to use - 填写你第三方 API 支持的模型名称
+  # 例如: gemini-2.0-flash, gpt-4o, claude-3-opus 等
+  model: "gemini-3-flash-preview-maxthinking"
+
+  # API Provider - 使用第三方 API 时设为 "custom"
+  provider: "custom"
+
+  # API Key - 你的第三方 API 密钥
+  apiKey: "sk-123"
+
+  # Custom Base URL - 你的第三方 API 地址
+  baseUrl: "http://118.145.187.86:7861/v1"
+
+  # Thinking Levels (minimal, low, medium, high)
+  # Higher levels = more thorough reasoning but slower
+  planningLevel: "high"    # Manager/planning phase
+  expertLevel: "high"      # Expert execution phase
+  synthesisLevel: "high"   # Final synthesis phase
+
+  # Recursive Loop - allows Manager to review and refine expert outputs
+  enableRecursiveLoop: false
+  maxRounds: 3
+
+  # Custom Models (optional)
+  # customModels:
+  #   - id: "custom-1"
+  #     name: "my-local-model"
+  #     provider: "custom"
+  #     baseUrl: "http://localhost:1234/v1"
+  #     apiKey: "sk-xxx"

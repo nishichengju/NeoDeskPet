@@ -1,6 +1,5 @@
 .ndp-context-orb {
   position: absolute;
-  transform: translate(-50%, -50%);
   width: 16px;
   height: 16px;
   border-radius: 999px;
@@ -9,10 +8,23 @@
   cursor: grab;
   pointer-events: auto;
   z-index: 60;
+  -webkit-app-region: no-drag;
+  user-select: none;
+  touch-action: none;
+  contain: layout paint;
+  will-change: left, top;
 }
 
 .ndp-context-orb:active {
   cursor: grabbing;
+}
+
+.ndp-context-orb--window-dragging {
+  pointer-events: none;
+}
+
+.ndp-context-orb--window-dragging .ndp-context-orb-ring {
+  filter: none;
 }
 
 .ndp-context-orb-ring {

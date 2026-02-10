@@ -21,21 +21,29 @@ export function ContextUsageOrb(props: {
   const orbRef = useRef<HTMLDivElement>(null)
   const draggingRef = useRef(false)
   const dragPointerIdRef = useRef<number | null>(null)
+  const pointerOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   const [hovered, setHovered] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [localPos, setLocalPos] = useState<ContextOrbPosition>(position)
+  const localPosRef = useRef<ContextOrbPosition>(position)
 
   useEffect(() => {
     if (dragging) return
-    setLocalPos({ x: positionX, y: positionY })
+    const next = { x: positionX, y: positionY }
+    localPosRef.current = next
+    setLocalPos(next)
   }, [dragging, positionX, positionY])
 
   const clampPct = (v: number) => Math.max(0, Math.min(100, v))
 
-  const resetDragging = useCallback(() => {
+  const clearDraggingState = useCallback((opts?: { restoreFromProps?: boolean }) => {
     draggingRef.current = false
     setDragging(false)
-    setLocalPos({ x: positionX, y: positionY })
+    if (opts?.restoreFromProps !== false) {
+      const next = { x: positionX, y: positionY }
+      localPosRef.current = next
+      setLocalPos(next)
+    }
     const pointerId = dragPointerIdRef.current
     dragPointerIdRef.current = null
     if (pointerId != null) {
@@ -52,12 +60,12 @@ export function ContextUsageOrb(props: {
 
     const handleGlobalPointerUp = () => {
       window.setTimeout(() => {
-        if (draggingRef.current) resetDragging()
+        if (draggingRef.current) clearDraggingState()
       }, 0)
     }
-    const handleBlur = () => resetDragging()
+    const handleBlur = () => clearDraggingState()
     const handleVisibility = () => {
-      if (document.visibilityState !== 'visible') resetDragging()
+      if (document.visibilityState !== 'visible') clearDraggingState()
     }
 
     window.addEventListener('pointerup', handleGlobalPointerUp)
@@ -71,12 +79,12 @@ export function ContextUsageOrb(props: {
       window.removeEventListener('blur', handleBlur)
       document.removeEventListener('visibilitychange', handleVisibility)
     }
-  }, [dragging, resetDragging])
+  }, [clearDraggingState, dragging])
 
   useEffect(() => {
     if (!interactionDisabled) return
-    if (draggingRef.current) resetDragging()
-  }, [interactionDisabled, resetDragging])
+    if (draggingRef.current) clearDraggingState()
+  }, [clearDraggingState, interactionDisabled])
 
   const pct = useMemo(() => {
     const used = usage?.usedTokens ?? 0
@@ -105,6 +113,15 @@ export function ContextUsageOrb(props: {
     if (e.button !== 0) return
     e.preventDefault()
     e.stopPropagation()
+    const orbRect = orbRef.current?.getBoundingClientRect()
+    if (orbRect) {
+      pointerOffsetRef.current = {
+        x: e.clientX - (orbRect.left + orbRect.width / 2),
+        y: e.clientY - (orbRect.top + orbRect.height / 2),
+      }
+    } else {
+      pointerOffsetRef.current = { x: 0, y: 0 }
+    }
     draggingRef.current = true
     setDragging(true)
     try {
@@ -120,14 +137,19 @@ export function ContextUsageOrb(props: {
     if (!el) return
     const rect = el.getBoundingClientRect()
     if (rect.width <= 1 || rect.height <= 1) return
-    const x = clampPct(((clientX - rect.left) / rect.width) * 100)
-    const y = clampPct(((clientY - rect.top) / rect.height) * 100)
-    setLocalPos({ x, y })
+    const centerX = clientX - pointerOffsetRef.current.x
+    const centerY = clientY - pointerOffsetRef.current.y
+    const x = clampPct(((centerX - rect.left) / rect.width) * 100)
+    const y = clampPct(((centerY - rect.top) / rect.height) * 100)
+    const next = { x, y }
+    localPosRef.current = next
+    setLocalPos(next)
+    return next
   }
 
   const onPointerMove = (e: PointerEvent) => {
     if (interactionDisabled) return
-    if (!dragging) return
+    if (!draggingRef.current) return
     e.preventDefault()
     e.stopPropagation()
     updateFromClientPoint(e.clientX, e.clientY)
@@ -135,50 +157,41 @@ export function ContextUsageOrb(props: {
 
   const onPointerUp = (e: PointerEvent) => {
     if (interactionDisabled) {
-      resetDragging()
+      clearDraggingState()
       return
     }
-    if (!dragging) return
+    if (!draggingRef.current) return
     e.preventDefault()
     e.stopPropagation()
-    draggingRef.current = false
-    setDragging(false)
-    const next = { x: clampPct(localPos.x), y: clampPct(localPos.y) }
+    const nextFromPointer = updateFromClientPoint(e.clientX, e.clientY)
+    const stable = nextFromPointer ?? localPosRef.current
+    const next = { x: clampPct(stable.x), y: clampPct(stable.y) }
+    localPosRef.current = next
+    setLocalPos(next)
     onPositionChange?.(next)
-    try {
-      orbRef.current?.releasePointerCapture(e.pointerId)
-    } catch (_) {
-      /* ignore */
-    }
-    dragPointerIdRef.current = null
+    clearDraggingState({ restoreFromProps: false })
   }
 
   const onPointerCancel = (e: PointerEvent) => {
     if (interactionDisabled) {
-      resetDragging()
+      clearDraggingState()
       return
     }
-    if (!dragging) return
+    if (!draggingRef.current) return
     e.preventDefault()
     e.stopPropagation()
-    resetDragging()
-    try {
-      orbRef.current?.releasePointerCapture(e.pointerId)
-    } catch (_) {
-      /* ignore */
-    }
-    dragPointerIdRef.current = null
+    clearDraggingState()
   }
 
   return (
     <div
       ref={orbRef}
-      className="ndp-context-orb"
+      className={`ndp-context-orb${interactionDisabled ? ' ndp-context-orb--window-dragging' : ''}`}
       data-no-window-drag="true"
       style={
         {
-          left: `${localPos.x}%`,
-          top: `${localPos.y}%`,
+          left: `calc(${localPos.x}% - 8px)`,
+          top: `calc(${localPos.y}% - 8px)`,
           ['--ndp-context-pct' as unknown as string]: `${pct}%`,
         } as CSSProperties
       }
@@ -186,7 +199,10 @@ export function ContextUsageOrb(props: {
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
-      onLostPointerCapture={() => resetDragging()}
+      onLostPointerCapture={() => {
+        if (!draggingRef.current) return
+        clearDraggingState()
+      }}
       onMouseDown={(e) => {
         e.preventDefault()
         e.stopPropagation()
