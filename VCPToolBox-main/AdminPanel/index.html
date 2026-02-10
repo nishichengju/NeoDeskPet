@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VCP ToolBox 控制中心</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="woff.css">
+    <link rel="icon" href="favicon.ico">
+    <!-- EasyMDE for Markdown Editing -->
+    <link rel="stylesheet" href="easymde.min.css">
+    <script src="easymde.min.js"></script>
+    <!-- Markdown Renderer -->
+    <script src="marked.min.js"></script>
+   <style>
+        /* EasyMDE 主题适配 */
+        .editor-toolbar {
+            background-color: var(--background-color-light) !important;
+            border-color: var(--border-color) !important;
+        }
+        .editor-toolbar button {
+            color: var(--text-color-primary) !important;
+        }
+        .editor-toolbar button:hover,
+        .editor-toolbar button.active {
+            background-color: var(--primary-color-translucent) !important;
+            border-color: var(--border-color) !important;
+        }
+        
+        .CodeMirror {
+            background-color: var(--background-color) !important;
+            color: var(--text-color-primary) !important;
+            border-color: var(--border-color) !important;
+            height: auto !important;
+            min-height: 500px !important;
+        }
+        .CodeMirror-scroll {
+            min-height: 500px !important;
+        }
+        .CodeMirror-cursor {
+            border-left-color: var(--text-color-primary) !important;
+        }
+        body .CodeMirror-selected {
+            background-color: var(--primary-color-translucent) !important;
+        }
+        .CodeMirror-gutters {
+            background-color: var(--background-color-light) !important;
+            border-right: 1px solid var(--border-color) !important;
+        }
+
+        .log-content-area .highlight {
+            background-color: var(--primary-color);
+            color: var(--background-color);
+            border-radius: 3px;
+            padding: 0 2px;
+        }
+        
+        /* 修复全屏预览重叠问题 */
+        .editor-preview-active .CodeMirror {
+            display: none !important;
+        }
+        
+        /* 并排预览模式样式 */
+        .editor-preview-side {
+            background-color: var(--background-color) !important;
+            color: var(--text-color-primary) !important;
+            border-left: 1px solid var(--border-color) !important;
+            padding: 10px 20px !important;
+        }
+        
+        /* 全屏预览模式样式 - 只设置颜色，让EasyMDE处理布局 */
+        .editor-preview {
+            background-color: var(--background-color) !important;
+            color: var(--text-color-primary) !important;
+            padding: 20px !important;
+        }
+        
+        /* 预览模式下的Markdown样式 */
+        .editor-preview h1, .editor-preview-side h1,
+        .editor-preview h2, .editor-preview-side h2,
+        .editor-preview h3, .editor-preview-side h3 {
+            color: var(--text-color-primary) !important;
+        }
+        
+        .editor-preview a, .editor-preview-side a {
+            color: var(--primary-color) !important;
+        }
+        
+        .editor-preview code, .editor-preview-side code {
+            background-color: var(--background-color-light) !important;
+            color: var(--text-color-primary) !important;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+        
+        .editor-preview pre, .editor-preview-side pre {
+            background-color: var(--background-color-light) !important;
+            color: var(--text-color-primary) !important;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        
+        /* 预览模式下的 Markdown 渲染样式 */
+        .editor-preview h1, .editor-preview-side h1,
+        .editor-preview h2, .editor-preview-side h2,
+        .editor-preview h3, .editor-preview-side h3,
+        .editor-preview h4, .editor-preview-side h4,
+        .editor-preview h5, .editor-preview-side h5,
+        .editor-preview h6, .editor-preview-side h6 {
+            color: var(--text-color-primary) !important;
+            margin-top: 1em;
+            margin-bottom: 0.5em;
+        }
+        
+        .editor-preview a, .editor-preview-side a {
+            color: var(--primary-color) !important;
+        }
+        
+        .editor-preview code, .editor-preview-side code {
+            background-color: var(--background-color-light) !important;
+            color: var(--text-color-primary) !important;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+        
+        .editor-preview pre, .editor-preview-side pre {
+            background-color: var(--background-color-light) !important;
+            color: var(--text-color-primary) !important;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        
+        .editor-preview pre code, .editor-preview-side pre code {
+            background-color: transparent !important;
+        }
+        
+        .editor-preview blockquote, .editor-preview-side blockquote {
+            border-left: 4px solid var(--border-color) !important;
+            padding-left: 10px;
+            margin-left: 0;
+            color: var(--text-color-secondary) !important;
+        }
+        
+        .editor-preview table, .editor-preview-side table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+        }
+        
+        .editor-preview th, .editor-preview-side th,
+        .editor-preview td, .editor-preview-side td {
+            border: 1px solid var(--border-color) !important;
+            padding: 8px;
+            color: var(--text-color-primary) !important;
+        }
+        
+        .editor-preview th, .editor-preview-side th {
+            background-color: var(--background-color-light) !important;
+            font-weight: bold;
+        }
+        
+        .editor-preview hr, .editor-preview-side hr {
+            border: none;
+            border-top: 1px solid var(--border-color) !important;
+            margin: 1em 0;
+        }
+        
+        .editor-preview ul, .editor-preview-side ul,
+        .editor-preview ol, .editor-preview-side ol {
+            color: var(--text-color-primary) !important;
+            padding-left: 2em;
+        }
+        
+        .editor-preview p, .editor-preview-side p {
+            color: var(--text-color-primary) !important;
+            line-height: 1.6;
+        }
+        
+       .draggable-list {
+           list-style: none;
+           padding: 0;
+           margin-top: 1rem;
+       }
+       .draggable-list li {
+           background-color: var(--background-color-light);
+           padding: 15px 20px;
+           margin-bottom: 10px;
+           border-radius: 8px;
+           cursor: grab;
+           display: flex;
+           align-items: center;
+           border: 1px solid var(--border-color);
+           transition: background-color 0.2s, box-shadow 0.2s;
+           user-select: none;
+       }
+       .draggable-list li.dragging {
+           opacity: 0.6;
+           background-color: var(--primary-color-translucent);
+           box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+       }
+       .draggable-list li .plugin-info {
+           display: flex;
+           flex-direction: column;
+       }
+       .draggable-list li .plugin-name {
+           font-weight: bold;
+           color: var(--text-color-primary);
+       }
+       .draggable-list li .plugin-description {
+           font-size: 0.9em;
+           color: var(--text-color-secondary);
+           margin-top: 4px;
+       }
+       .preprocessor-order-controls {
+           display: flex;
+           gap: 15px;
+           align-items: center;
+           margin-bottom: 1rem;
+       }
+       #plugin-nav a {
+           display: block;
+           white-space: pre-wrap;
+           line-height: 1.3;
+           padding: 10px 12px;
+           min-height: 40px; /* 确保足够高度容纳两行 */
+           align-items: center;
+       }
+       #plugin-nav .plugin-original-name {
+           display: block;
+           font-size: 0.75em;
+           color: var(--text-color-secondary);
+           font-weight: normal;
+           font-style: italic;
+           margin-top: 1px;
+           padding-left: 20px; /* 与图标对齐 */
+       }
+       #plugin-nav li {
+           padding: 0; /* 调整li padding以适应a的padding */
+       }
+       /* VCP Forum Styles */
+       .forum-controls {
+           margin-bottom: 1rem;
+           display: flex;
+           align-items: center;
+           gap: 1rem;
+       }
+       .forum-posts-container {
+           display: flex;
+           flex-direction: column;
+           gap: 1rem;
+       }
+       .forum-post-item {
+           background-color: var(--background-color-light);
+           border: 1px solid var(--border-color);
+           border-radius: 8px;
+           padding: 1rem;
+           cursor: pointer;
+           transition: background-color 0.2s;
+       }
+       .forum-post-item:hover {
+           background-color: var(--primary-color-translucent);
+       }
+       .forum-post-header {
+           font-weight: bold;
+           font-size: 1.1em;
+           margin-bottom: 0.5rem;
+       }
+       .forum-post-meta {
+           font-size: 0.9em;
+           color: var(--text-color-secondary);
+       }
+       .forum-post-content-view {
+           margin-top: 1rem;
+           padding: 1rem;
+           background-color: var(--background-color);
+           border-radius: 8px;
+       }
+       .forum-reply-area {
+           margin-top: 1rem;
+           border-top: 1px solid var(--border-color);
+           padding-top: 1rem;
+       }
+       .forum-reply-area textarea {
+           width: 100%;
+           min-height: 100px;
+           margin-bottom: 0.5rem;
+       }
+       .forum-posts-list tr.pinned-post {
+           background-color: var(--primary-color-translucent);
+           font-weight: bold;
+       }
+       .forum-posts-list tr.pinned-post:hover {
+           background-color: var(--primary-color);
+           color: var(--background-color);
+       }
+       .forum-posts-list tr.pinned-post .post-meta {
+            color: var(--text-color-primary);
+       }
+       
+   </style>
+ </head>
+ <body>
+   <div class="solar-system-bg" aria-hidden="true">
+       <div class="stars"></div>
+       <div class="stars2"></div>
+       <div class="stars3"></div>
+       <div class="sun"></div>
+       <div class="orbit orbit-mercury"><div class="planet planet-mercury"></div></div>
+       <div class="orbit orbit-venus"><div class="planet planet-venus"></div></div>
+       <div class="orbit orbit-earth"><div class="planet planet-earth"></div></div>
+       <div class="orbit orbit-mars"><div class="planet planet-mars"></div></div>
+       <div class="orbit orbit-jupiter"><div class="planet planet-jupiter"></div></div>
+       <div class="orbit orbit-saturn"><div class="planet planet-saturn"></div></div>
+       <div class="orbit orbit-uranus"><div class="planet planet-uranus"></div></div>
+       <div class="orbit orbit-neptune"><div class="planet planet-neptune"></div></div>
+       <div class="shooting-stars">
+           <div class="shooting-star"></div>
+           <div class="shooting-star"></div>
+           <div class="shooting-star"></div>
+       </div>
+       <button id="exit-immersive-button" class="exit-immersive-button">退出沉浸模式</button>
+   </div>
+    <header class="top-bar">
+        <div class="top-bar-content">
+            <button id="mobile-menu-toggle" class="mobile-menu-toggle">
+                <span class="material-symbols-outlined">menu</span>
+            </button>
+            <div class="brand">
+                <span class="material-symbols-outlined brand-icon">terminal</span>
+                <span class="server-title">VCPToolBox</span>
+            </div>
+            <div class="header-actions">
+                <button id="restart-server-button" class="restart-button">
+                    <span class="material-symbols-outlined">restart_alt</span>
+                    重启服务器
+                </button>
+                <button id="theme-toggle-button" class="theme-button">
+                    <span class="material-symbols-outlined">contrast</span>
+                    切换主题
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>控制中心</h1>
+                <input type="search" id="sidebar-search" placeholder="搜索功能页面...">
+            </div>
+            <nav id="plugin-nav">
+                <ul>
+                    <li><a href="#" data-target="dashboard" class="active"><span class="material-symbols-outlined">dashboard</span>仪表盘</a></li>
+                    <li class="nav-category">———— 核 心 功 能 ————</li>
+                    <li><a href="#" data-target="base-config"><span class="material-symbols-outlined">settings</span>全局基础配置</a></li>
+                    <li><a href="#" data-target="daily-notes-manager"><span class="material-symbols-outlined">description</span>日记知识库管理</a></li>
+                    <li><a href="#" data-target="vcp-forum"><span class="material-symbols-outlined">forum</span>VCP论坛</a></li>
+                    <li><a href="#" data-target="image-cache-editor"><span class="material-symbols-outlined">photo_library</span>多媒体Base64编辑器</a></li>
+                    <li><a href="#" data-target="semantic-groups-editor"><span class="material-symbols-outlined">hub</span>语义组编辑器</a></li>
+                    <li><a href="#" data-target="vcptavern-editor"><span class="material-symbols-outlined">casino</span>VCPTavern预设编辑</a></li>
+                    <li><a href="#" data-target="agent-files-editor"><span class="material-symbols-outlined">smart_toy</span>Agent管理器</a></li>
+                    <li><a href="#" data-target="agent-assistant-config"><span class="material-symbols-outlined">diversity_3</span>Agent助手配置</a></li>
+                    <li><a href="#" data-target="tvs-files-editor"><span class="material-symbols-outlined">data_object</span>高级变量编辑器</a></li>
+                    <li><a href="#" data-target="tool-list-editor"><span class="material-symbols-outlined">construction</span>工具列表配置编辑器</a></li>
+                    <li><a href="#" data-target="preprocessor-order-manager"><span class="material-symbols-outlined">sort</span>预处理器顺序管理</a></li>
+                    <li><a href="#" data-target="thinking-chains-editor"><span class="material-symbols-outlined">psychology</span>思维链编辑器</a></li>
+                    <li><a href="#" data-target="schedule-manager"><span class="material-symbols-outlined">calendar_month</span>日程管理</a></li>
+                    <li><a href="#" data-target="rag-tuning"><span class="material-symbols-outlined">tune</span>浪潮RAG调参</a></li>
+                    <li><a href="#" data-target="server-log-viewer"><span class="material-symbols-outlined">terminal</span>服务器日志</a></li>
+                    <li class="nav-category" id="plugins-category">———— 插 件 管 理 ————</li>
+                    <!-- 插件列表将动态生成在这里 -->
+                </ul>
+            </nav>
+        </aside>
+
+        <main class="content" id="config-details-container">
+            <!-- Section: Dashboard -->
+            <section id="dashboard-section" class="config-section active-section">
+                <h2>仪表盘</h2>
+                <div class="vcp-animation-container">
+                    <div class="vcp-logo-container">
+                        <img src="VCPLogo2.png" alt="VCP Logo" class="vcp-logo" id="vcp-logo-main">
+                    </div>
+                    <canvas id="vcp-animation-canvas"></canvas>
+                </div>
+                <div class="dashboard-grid">
+                    <div class="status-card cpu-card">
+                        <h3>CPU 使用率</h3>
+                        <div class="status-card-content">
+                            <div class="progress-circle" id="cpu-progress" data-progress="0">
+                                <svg width="120" height="120" viewBox="0 0 120 120">
+                                    <circle class="progress-bg" cx="60" cy="60" r="54"></circle>
+                                    <circle class="progress-bar" cx="60" cy="60" r="54"></circle>
+                                </svg>
+                                <span class="progress-text" id="cpu-usage-text">0%</span>
+                            </div>
+                            <p id="cpu-info-text">加载中...</p>
+                        </div>
+                    </div>
+                    <div class="status-card memory-card">
+                        <h3>内存使用情况</h3>
+                        <div class="status-card-content">
+                             <div class="progress-circle" id="mem-progress" data-progress="0">
+                                <svg width="120" height="120" viewBox="0 0 120 120">
+                                    <circle class="progress-bg" cx="60" cy="60" r="54"></circle>
+                                    <circle class="progress-bar" cx="60" cy="60" r="54"></circle>
+                                    <circle class="progress-bar-secondary" cx="60" cy="60" r="54"></circle>
+                                </svg>
+                                <span class="progress-text" id="mem-usage-text">0%</span>
+                            </div>
+                            <p id="mem-info-text">加载中...</p>
+                        </div>
+                    </div>
+                    <div class="status-card process-card">
+                        <h3>PM2 进程状态</h3>
+                        <div class="status-card-content" id="pm2-process-list">
+                            <p>加载中...</p>
+                        </div>
+                        <div class="auth-code-display">
+                            <h4>用户认证码</h4>
+                            <p id="user-auth-code-display">加载中...</p>
+                        </div>
+                    </div>
+                    <div class="status-card node-card">
+                        <h3>Node.js 进程信息</h3>
+                        <div class="status-card-content" id="node-info-list">
+                           <p>加载中...</p>
+                        </div>
+                    </div>
+                    <div class="status-card weather-card">
+                        <h3>天气预报</h3>
+                        <div class="weather-container">
+                            <div class="weather-current">
+                                <div class="current-main">
+                                    <span id="weather-icon" class="material-symbols-outlined weather-icon-large">--</span>
+                                    <div class="current-temp-box">
+                                        <div class="temp-row">
+                                            <span id="weather-temp">--</span><span class="unit">°C</span>
+                                        </div>
+                                        <div id="weather-text">加载中...</div>
+                                    </div>
+                                </div>
+                                <div class="current-details">
+                                    <div class="detail-item">
+                                        <span class="material-symbols-outlined">humidity_percentage</span>
+                                        <span id="weather-humidity">--%</span>
+                                    </div>
+                                    <div class="detail-item">
+                                        <span class="material-symbols-outlined">air</span>
+                                        <span id="weather-wind">--</span>
+                                    </div>
+                                    <div class="detail-item">
+                                        <span class="material-symbols-outlined">compress</span>
+                                        <span id="weather-pressure">-- hPa</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="weather-forecast" id="weather-forecast">
+                                <!-- 预报内容将动态加载 -->
+                            </div>
+                        </div>
+                    </div>
+                    <div class="status-card calendar-card">
+                        <h3>日程概览</h3>
+                        <div id="dashboard-calendar-widget" class="calendar-widget">
+                            <!-- 日历挂件将动态加载到这里 -->
+                        </div>
+                    </div>
+                </div>
+                <div class="activity-chart-container">
+                    <h3>服务器活跃度</h3>
+                    <canvas id="activity-chart-canvas"></canvas>
+                </div>
+            </section>
+            
+            <section id="base-config-section" class="config-section">
+                <h2>全局基础配置 (config.env)</h2>
+                <form id="base-config-form">
+                    <button type="submit">保存全局配置</button>
+                </form>
+            </section>
+
+            <section id="daily-notes-manager-section" class="config-section">
+                <h2>日记知识库与RAG标签管理</h2>
+                <div class="daily-notes-manager">
+                    <div class="notes-sidebar">
+                        <h3>知识库列表</h3>
+                        <ul id="notes-folder-list"></ul>
+                    </div>
+                    <div class="notes-main-area">
+                        <!-- RAG-Tags配置区域（在日记列表上方） -->
+                        <div id="rag-tags-config-area" class="rag-tags-config-area" style="display: none;">
+                            <div class="rag-tags-header">
+                                <h3>知识库标签列表</h3>
+                            </div>
+                            <div class="kb-entry">
+                                <div class="kb-header">
+                                    <h3 id="rag-tags-folder-name"></h3>
+                                </div>
+                                <div class="threshold-controls">
+                                    <input type="checkbox" id="rag-threshold-enabled">
+                                    <label for="rag-threshold-enabled">启用阈值:</label>
+                                    <input type="range" id="rag-threshold-value" min="0.1" max="1.0" step="0.01" value="0.7" disabled>
+                                    <span id="rag-threshold-display" class="threshold-value">0.70</span>
+                                </div>
+                                <div class="tags-container" id="rag-tags-container">
+                                    <!-- 标签将动态添加到这里 -->
+                                </div>
+                                <div class="add-tag-controls">
+                                    <button id="add-rag-tag-button" class="add-tag-btn">添加标签</button>
+                                </div>
+                            </div>
+                            <div class="rag-tags-controls">
+                                <button id="save-rag-tags-config">保存更改到 rag_tags.json</button>
+                                <span id="rag-tags-status" class="status-message"></span>
+                            </div>
+                        </div>
+
+                        <!-- 日记列表区域 -->
+                        <div class="notes-content-area">
+                            <div class="notes-toolbar">
+                                <input type="search" id="search-daily-notes" placeholder="搜索日记..." aria-label="搜索日记">
+                                <button id="move-selected-notes" disabled>移动选中项到...</button>
+                                <select id="move-target-folder" disabled></select>
+                                <button id="delete-selected-notes-button" disabled>批量删除选中项</button>
+                                <span id="notes-action-status" class="status-message"></span>
+                            </div>
+                            <div id="notes-list-view"></div>
+                        </div>
+
+                        <!-- 日记编辑区域 -->
+                        <div id="note-editor-area" class="note-editor-area" style="display: none;">
+                            <h3>编辑日记</h3>
+                            <input type="hidden" id="editing-note-folder">
+                            <input type="hidden" id="editing-note-file">
+                            <div class="config-editor-toolbar">
+                                 <button id="save-note-content">保存日记</button>
+                                 <button id="cancel-edit-note">取消编辑</button>
+                                 <span id="note-editor-status" class="status-message"></span>
+                            </div>
+                            <textarea id="note-content-editor" spellcheck="false"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="image-cache-editor-section" class="config-section">
+                <h2>图像缓存编辑器</h2>
+                <iframe data-src="image_cache_editor.html" style="width: 100%; height: 80vh; border: none;"></iframe>
+            </section>
+
+            <section id="semantic-groups-editor-section" class="config-section">
+                <h2>语义组编辑器</h2>
+                <p class="description">管理 RAGDiaryPlugin 使用的语义组。语义组通过关键词激活，将相关的向量注入查询，以提高检索的准确性。</p>
+                <div class="semantic-groups-controls">
+                    <button id="save-semantic-groups-button">保存所有更改</button>
+                    <button id="add-semantic-group-button">添加新组</button>
+                    <span id="semantic-groups-status" class="status-message"></span>
+                </div>
+                <div id="semantic-groups-container">
+                    <!-- Semantic groups will be dynamically loaded here -->
+                </div>
+            </section>
+
+            <section id="vcptavern-editor-section" class="config-section">
+                <h2>VCPTavern预设编辑</h2>
+                <iframe data-src="vcptavern_editor.html" style="width: 100%; height: 80vh; border: none;"></iframe>
+            </section>
+
+            <section id="agent-files-editor-section" class="config-section">
+                <h2>Agent 管理</h2>
+                <p class="description">管理 Agent 的定义名称与对应的 .txt 文件。在这里可以添加、删除和修改 Agent 映射，并直接编辑关联的文本文件。</p>
+                <div class="agent-manager-container">
+                    <div class="agent-map-editor">
+                        <h3>Agent 映射表</h3>
+                        <div class="agent-map-controls">
+                            <button id="add-agent-map-entry-button">添加新 Agent</button>
+                            <button id="create-agent-file-button">新建 Agent.txt 文件</button>
+                            <button id="save-agent-map-button">保存映射表</button>
+                            <span id="agent-map-status" class="status-message"></span>
+                        </div>
+                        <div id="agent-map-list">
+                            <!-- Agent map entries will be dynamically loaded here -->
+                        </div>
+                    </div>
+                    <div class="agent-file-editor">
+                        <h3>Agent 文件内容 (.txt)</h3>
+                        <div class="agent-editor-controls">
+                             <span id="editing-agent-file-display">未选择文件</span>
+                             <button id="save-agent-file-button" disabled>保存文件内容</button>
+                             <span id="agent-file-status" class="status-message"></span>
+                        </div>
+                        <textarea id="agent-file-content-editor" spellcheck="false" placeholder="从左侧选择一个 Agent 以编辑其关联的 .txt 文件..."></textarea>
+                    </div>
+                </div>
+            </section>
+
+            <section id="agent-assistant-config-section" class="config-section">
+                <h2>Agent 助手配置（AgentAssistant）</h2>
+                <p class="description">
+                    这里用于配置 <strong>AgentAssistant</strong> 插件。你可以：
+                    <br>1）从已注册的 Agent 一键创建助手；
+                    <br>2）添加完全自定义的助手；
+                    <br>3）为每个助手设置模型、性格说明和系统提示词。
+                    <br>所有修改会自动写入 <code>Plugin/AgentAssistant/config.env</code> 中，无需手动编辑文本。
+                </p>
+                <div class="aa-config-container">
+                    <div class="aa-global-settings">
+                        <h3>全局会话设置</h3>
+                        <div class="aa-global-grid">
+                            <div class="aa-global-item">
+                                <label for="aa-max-history">
+                                    每个 Agent 记住的历史轮数
+                                </label>
+                                <input type="number" id="aa-max-history" min="1" max="50" step="1" placeholder="例如：7">
+                                <p class="aa-hint">
+                                    数值越大，Agent 能记住的上下文越多，但每次调用消耗的 Token 也会增加。
+                                </p>
+                            </div>
+                            <div class="aa-global-item">
+                                <label for="aa-context-ttl">
+                                    上下文保留时间（小时）
+                                </label>
+                                <input type="number" id="aa-context-ttl" min="1" max="168" step="1" placeholder="例如：24">
+                                <p class="aa-hint">
+                                    超过这个时间没有对话时，系统会自动清理旧会话，防止记忆无限增长。
+                                </p>
+                            </div>
+                        </div>
+                        <div class="aa-global-item-full">
+                            <label for="aa-global-system-prompt">
+                                所有助手共享的补充系统提示词（可选）
+                            </label>
+                            <textarea id="aa-global-system-prompt" rows="3" placeholder="例如：统一要求所有助手说话更温柔、避免输出敏感内容、统一使用某种语言等。"></textarea>
+                            <p class="aa-hint">
+                                这里的内容会自动追加到每个助手的系统提示词后面，可用于统一规定整体风格和安全边界。
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="aa-agents-header">
+                        <h3>已配置的 Agent 助手</h3>
+                        <div class="aa-agents-actions">
+                            <div class="aa-existing-helper">
+                                <label for="aa-existing-agent-select">从已注册 Agent 创建：</label>
+                                <select id="aa-existing-agent-select">
+                                    <option value="">选择一个已注册 Agent...</option>
+                                </select>
+                                <button id="aa-add-from-existing-button" type="button">添加</button>
+                            </div>
+                            <button id="aa-add-custom-agent-button" type="button">添加自定义 Agent</button>
+                        </div>
+                    </div>
+
+                    <div id="aa-agent-cards-container" class="aa-agent-cards-container">
+                        <!-- Agent cards will be rendered here -->
+                    </div>
+
+                    <div class="aa-footer-actions">
+                        <button id="aa-save-config-button" type="button">保存 AgentAssistant 配置</button>
+                        <span id="aa-status" class="status-message"></span>
+                    </div>
+                </div>
+            </section>
+
+            <section id="tvs-files-editor-section" class="config-section">
+                <h2>高级变量编辑器 (.txt)</h2>
+                <div class="tvs-editor-controls">
+                    <label for="tvs-file-select">选择变量文件:</label>
+                    <select id="tvs-file-select">
+                        <option value="">请选择一个文件...</option>
+                    </select>
+                    <button id="save-tvs-file-button" disabled>保存变量文件</button>
+                    <span id="tvs-file-status" class="status-message"></span>
+                </div>
+                <textarea id="tvs-file-content-editor" spellcheck="false" placeholder="选择一个变量文件以编辑其内容..."></textarea>
+            </section>
+
+            <!-- Section: Tool List Editor -->
+            <section id="tool-list-editor-section" class="config-section">
+                <iframe data-src="tool_list_editor.html" style="width: 100%; height: 100vh; border: none;"></iframe>
+            </section>
+
+            <section id="server-log-viewer-section" class="config-section">
+                <h2>服务器实时日志</h2>
+                <div class="log-viewer-container">
+                    <div class="log-header">
+                        <span id="server-log-path-display">当前日志文件: 加载中...</span>
+                        <input type="text" id="server-log-filter" placeholder="🔍 过滤日志内容...">
+                        <span id="server-log-line-count">0 行</span>
+                        <span id="server-log-status" class="status-message info">就绪</span>
+                        <button id="reverse-server-log-button" class="btn-secondary">🔃 倒序显示</button>
+                        <button id="copy-server-log-button" class="btn-secondary">📋 复制</button>
+                        <button id="clear-server-log-button" class="btn-secondary">🗑️ 清空</button>
+                    </div>
+                    <pre id="server-log-content" class="log-content-area"></pre>
+                </div>
+            </section>
+
+           <!-- Section: Preprocessor Order Manager -->
+           <section id="preprocessor-order-manager-section" class="config-section">
+               <h2>预处理器顺序管理</h2>
+               <p class="description">在这里，您可以拖动消息预处理器插件来调整它们的执行顺序。顺序越靠上，执行越优先。系统会自动处理新插件的添加和旧插件的移除。</p>
+               <div class="preprocessor-order-controls">
+                   <button id="save-preprocessor-order-button">保存顺序并热重载</button>
+                   <span id="preprocessor-order-status" class="status-message"></span>
+               </div>
+               <ul id="preprocessor-list" class="draggable-list">
+                   <!-- 插件将动态加载到这里 -->
+               </ul>
+           </section>
+
+           <!-- Section: Thinking Chains Editor -->
+           <section id="thinking-chains-editor-section" class="config-section">
+               <h2>思维链编辑器</h2>
+               <p class="description">管理 RAGDiaryPlugin 使用的元思考链。您可以创建不同的思考主题，并拖拽排序其中的思维簇模块。</p>
+               <div id="thinking-chains-editor-controls" class="form-actions" style="margin-bottom: 1rem;">
+                   <button id="save-thinking-chains-button">保存所有更改</button>
+                   <button id="add-thinking-chain-theme-button">添加新主题</button>
+                   <span id="thinking-chains-status" class="status-message"></span>
+               </div>
+               <div id="thinking-chains-container">
+                   <!-- Editor will be dynamically loaded here -->
+               </div>
+           </section>
+
+           <!-- Section: VCP Forum -->
+           <section id="vcp-forum-section" class="config-section">
+               <h2>VCP 论坛</h2>
+               <div class="forum-controls">
+                   <label for="forum-board-filter">筛选板块:</label>
+                   <select id="forum-board-filter">
+                       <option value="all">全部板块</option>
+                   </select>
+                   <input type="search" id="forum-search-input" placeholder="搜索帖子标题或作者...">
+               </div>
+               <div id="forum-posts-container" class="forum-posts-container">
+                   <!-- Forum posts will be loaded here -->
+               </div>
+           </section>
+
+           <!-- Section: Schedule Manager -->
+           <section id="schedule-manager-section" class="config-section">
+               <h2>日程管理</h2>
+               <div class="schedule-manager-container">
+                   <div class="schedule-left-panel">
+                       <div class="calendar-container card">
+                           <div class="calendar-header">
+                               <button id="prev-month" class="icon-btn"><span class="material-symbols-outlined">chevron_left</span></button>
+                               <h3 id="current-month-year">2023年 10月</h3>
+                               <button id="next-month" class="icon-btn"><span class="material-symbols-outlined">chevron_right</span></button>
+                           </div>
+                           <div id="calendar-grid" class="calendar-grid">
+                               <!-- 日历格子 -->
+                           </div>
+                       </div>
+                       <div class="add-schedule-form card">
+                           <h3>添加新日程</h3>
+                           <div class="form-group">
+                               <label for="new-schedule-time">时间</label>
+                               <input type="datetime-local" id="new-schedule-time">
+                           </div>
+                           <div class="form-group">
+                               <label for="new-schedule-content">内容</label>
+                               <textarea id="new-schedule-content" rows="3" placeholder="输入日程内容..."></textarea>
+                           </div>
+                           <button id="add-schedule-btn" class="primary-btn">添加日程</button>
+                       </div>
+                   </div>
+                   <div class="schedule-right-panel">
+                       <div class="schedule-list-container card">
+                           <div class="list-header">
+                               <h3>日程列表</h3>
+                               <div class="list-filters">
+                                   <button id="filter-all" class="filter-btn active">全部</button>
+                                   <button id="filter-upcoming" class="filter-btn">即将到来</button>
+                               </div>
+                           </div>
+                           <div id="schedule-list" class="schedule-list">
+                               <!-- 日程条目 -->
+                               <p class="empty-msg">加载中...</p>
+                           </div>
+                       </div>
+                   </div>
+               </div>
+           </section>
+
+           <!-- Section: RAG Tuning -->
+           <section id="rag-tuning-section" class="config-section">
+               <h2>RAG 算法调参 (rag_params.json)</h2>
+               <p class="description">在这里，您可以实时调整 TagMemo 算法的各项核心参数。所有更改将立即生效，无需重启服务器。</p>
+               
+               <div class="rag-tuning-container">
+                   <div class="rag-tuning-main">
+                       <form id="rag-params-form">
+                           <div id="rag-params-content">
+                               <!-- 参数将动态加载到这里 -->
+                               <p class="loading-msg">正在加载参数...</p>
+                           </div>
+                           <div class="form-actions">
+                               <button type="submit" class="primary-btn">保存参数配置</button>
+                               <button type="button" id="reset-rag-params" class="btn-secondary">重置更改</button>
+                               <span id="rag-params-status" class="status-message"></span>
+                           </div>
+                       </form>
+                   </div>
+               </div>
+           </section>
+        </main>
+    </div>
+
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="spinner"></div>
+        <p>正在加载...</p>
+    </div>
+    <div id="message-popup" class="message-popup"></div>
+
+    <script type="module" src="script.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('vcp-animation-canvas');
+            if(canvas) {
+                const ctx = canvas.getContext('2d');
+                let width = canvas.offsetWidth;
+                let height = canvas.offsetHeight;
+                canvas.width = width;
+                canvas.height = height;
+
+                class Particle {
+                    constructor() {
+                        this.x = Math.random() * width;
+                        this.y = Math.random() * height;
+                        this.vx = Math.random() * 1 - 0.5;
+                        this.vy = Math.random() * 1 - 0.5;
+                        this.radius = Math.random() * 1.5 + 1;
+                        this.opacity = Math.random() * 0.5 + 0.2;
+                    }
+
+                    draw() {
+                        const theme = document.documentElement.getAttribute('data-theme') || 'dark';
+                        const particleColor = theme === 'dark' ? '#8ab4f8' : '#1a73e8';
+                        
+                        // Helper to convert hex to rgba for opacity
+                        const hexToRgb = (hex) => {
+                            let r = 0, g = 0, b = 0;
+                            if (hex.length == 4) {
+                                r = "0x" + hex[1] + hex[1];
+                                g = "0x" + hex[2] + hex[2];
+                                b = "0x" + hex[3] + hex[3];
+                            } else if (hex.length == 7) {
+                                r = "0x" + hex[1] + hex[2];
+                                g = "0x" + hex[3] + hex[4];
+                                b = "0x" + hex[5] + hex[6];
+                            }
+                            return `rgba(${+r},${+g},${+b},${this.opacity})`;
+                        }
+
+                        ctx.beginPath();
+                        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                        ctx.fillStyle = hexToRgb(particleColor);
+                        ctx.fill();
+                    }
+
+                    update() {
+                        this.x += this.vx;
+                        this.y += this.vy;
+
+                        if (this.x < 0 || this.x > width) this.vx *= -1;
+                        if (this.y < 0 || this.y > height) this.vy *= -1;
+                    }
+                }
+                
+                let particles = [];
+                function init() {
+                    width = canvas.offsetWidth;
+                    height = canvas.offsetHeight;
+                    canvas.width = width;
+                    canvas.height = height;
+                    particles = [];
+                    for (let i = 0; i < 100; i++) {
+                        particles.push(new Particle());
+                    }
+                }
+
+                function animate() {
+                    ctx.clearRect(0, 0, width, height);
+                    particles.forEach(p => {
+                        p.update();
+                        p.draw();
+                    });
+
+                    for (let i = 0; i < particles.length; i++) {
+                        for (let j = i + 1; j < particles.length; j++) {
+                            const dx = particles[i].x - particles[j].x;
+                            const dy = particles[i].y - particles[j].y;
+                            const distance = Math.sqrt(dx * dx + dy * dy);
+
+                            if (distance < 100) {
+                                const theme = document.documentElement.getAttribute('data-theme') || 'dark';
+                                const lineColor = theme === 'dark' ? '#8ab4f8' : '#1a73e8';
+                                const hexToRgbA = (hex, alpha) => {
+                                    let r = 0, g = 0, b = 0;
+                                    if (hex.length == 4) {
+                                        r = "0x" + hex[1] + hex[1];
+                                        g = "0x" + hex[2] + hex[2];
+                                        b = "0x" + hex[3] + hex[3];
+                                    } else if (hex.length == 7) {
+                                        r = "0x" + hex[1] + hex[2];
+                                        g = "0x" + hex[3] + hex[4];
+                                        b = "0x" + hex[5] + hex[6];
+                                    }
+                                    return `rgba(${+r},${+g},${+b},${alpha})`;
+                                }
+
+                                ctx.beginPath();
+                                ctx.moveTo(particles[i].x, particles[i].y);
+                                ctx.lineTo(particles[j].x, particles[j].y);
+                                ctx.strokeStyle = hexToRgbA(lineColor, (100 - distance) / 100 * 0.5);
+                                ctx.lineWidth = 0.5;
+                                ctx.stroke();
+                            }
+                        }
+                    }
+
+                    requestAnimationFrame(animate);
+                }
+                
+                // Debounce resize
+                let resizeTimeout;
+                window.addEventListener('resize', () => {
+                    clearTimeout(resizeTimeout);
+                    resizeTimeout = setTimeout(init, 250);
+                });
+                
+                // Re-init on theme change
+                const observer = new MutationObserver((mutations) => {
+                    mutations.forEach((mutation) => {
+                        if (mutation.attributeName === "data-theme") {
+                           init();
+                        }
+                    });
+                });
+
+                observer.observe(document.documentElement, { attributes: true });
+
+                init();
+                animate();
+            }
+        });
+
+        // 移动端菜单切换逻辑
+        const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
+        const sidebar = document.querySelector('.sidebar');
+        const contentOverlay = document.createElement('div');
+        contentOverlay.className = 'sidebar-overlay';
+        document.body.appendChild(contentOverlay);
+
+        if (mobileMenuToggle && sidebar) {
+            mobileMenuToggle.addEventListener('click', () => {
+                sidebar.classList.toggle('mobile-active');
+                contentOverlay.classList.toggle('active');
+            });
+
+            contentOverlay.addEventListener('click', () => {
+                sidebar.classList.remove('mobile-active');
+                contentOverlay.classList.remove('active');
+            });
+
+            // 点击导航链接后自动关闭侧边栏
+            const navLinks = sidebar.querySelectorAll('nav a');
+            navLinks.forEach(link => {
+                link.addEventListener('click', () => {
+                    if (window.innerWidth <= 768) {
+                        sidebar.classList.remove('mobile-active');
+                        contentOverlay.classList.remove('active');
+                    }
+                });
+            });
+        }
+
+        // 主题切换逻辑保持不变
+        const themeToggleButton = document.getElementById('theme-toggle-button');
+        const currentTheme = localStorage.getItem('theme') ? localStorage.getItem('theme') : null;
+        const prefersDarkScheme = window.matchMedia("(prefers-color-scheme: dark)");
+
+        function applyTheme(theme) {
+            if (theme === 'dark') {
+                document.documentElement.setAttribute('data-theme', 'dark');
+                localStorage.setItem('theme', 'dark');
+                if(themeToggleButton) themeToggleButton.textContent = '切换亮色';
+            } else {
+                document.documentElement.setAttribute('data-theme', 'light');
+                localStorage.setItem('theme', 'light');
+                if(themeToggleButton) themeToggleButton.textContent = '切换暗色';
+            }
+            const iframes = document.querySelectorAll('iframe');
+            iframes.forEach(iframe => {
+                if (iframe.contentWindow) {
+                    iframe.contentWindow.postMessage({ type: 'themeChange', theme: theme }, '*');
+                }
+            });
+        }
+
+        if (currentTheme) {
+            applyTheme(currentTheme);
+        } else {
+            if (prefersDarkScheme.matches) {
+                applyTheme('dark');
+            } else {
+                applyTheme('light');
+            }
+        }
+
+        if (themeToggleButton) {
+            themeToggleButton.addEventListener('click', () => {
+                let newTheme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+                applyTheme(newTheme);
+            });
+        }
+
+        window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === 'requestTheme') {
+                const currentAppliedTheme = document.documentElement.getAttribute('data-theme') || (prefersDarkScheme.matches ? 'dark' : 'light');
+                const sourceFrame = Array.from(document.querySelectorAll('iframe')).find(
+                    iframe => iframe.contentWindow === event.source
+                );
+                if (sourceFrame && sourceFrame.contentWindow) {
+                     sourceFrame.contentWindow.postMessage({ type: 'themeChange', theme: currentAppliedTheme }, '*');
+                }
+            }
+        });
+    </script>
+</body>
+</html>

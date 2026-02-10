@@ -1,6 +1,6 @@
 import type { WindowType } from '../electron/types'
 
-const allowed: WindowType[] = ['pet', 'chat', 'settings', 'memory']
+const allowed: WindowType[] = ['pet', 'chat', 'settings', 'memory', 'orb', 'orb-menu']
 
 export function getWindowType(): WindowType {
   const hash = window.location.hash ?? ''

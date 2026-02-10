@@ -46,6 +46,81 @@ app = FastAPI()
 asr_model = None
 vad_model = None
 _ASR_LOCK = asyncio.Lock()
+_DEVICE: str = "cpu"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = str(os.getenv(name, "")).strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return max(lo, min(hi, int(default)))
+    try:
+        v = int(raw)
+    except Exception:
+        v = int(default)
+    return max(lo, min(hi, v))
+
+
+def _env_float(name: str, default: float, lo: float, hi: float) -> float:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return max(lo, min(hi, float(default)))
+    try:
+        v = float(raw)
+    except Exception:
+        v = float(default)
+    return max(lo, min(hi, v))
+
+
+STRICT_AUDIO_VALIDATE = _env_bool("SENSEVOICE_STRICT_AUDIO_VALIDATE", False)
+INFERENCE_MODE_ENABLED = _env_bool("SENSEVOICE_INFERENCE_MODE", True)
+SILENCE_GATE_ENABLED = _env_bool("SENSEVOICE_SILENCE_GATE_ENABLED", True)
+SILENCE_GATE_RMS = _env_float("SENSEVOICE_SILENCE_GATE_RMS", 0.0018, 0.0, 0.05)
+SILENCE_GATE_MAX_SKIP = _env_int("SENSEVOICE_SILENCE_GATE_MAX_SKIP", 4, 0, 50)
+
+
+def _diagnose_torch_env() -> None:
+    """
+    输出一段“可操作”的环境诊断，方便你快速把 CPU-only torch 换成 CUDA 版。
+
+    说明：这里只做打印，不做任何自动安装/下载，避免引入额外维护面。
+    """
+
+    ver = getattr(torch, "__version__", "unknown")
+    cuda_ver = getattr(getattr(torch, "version", None), "cuda", None)
+    try:
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_available = False
+
+    print(f"[SenseVoice] torch: {ver}, torch.version.cuda: {cuda_ver}, cuda_available: {cuda_available}")
+    if cuda_available:
+        return
+
+    # 典型情况：装了 torch==x.y.z+cpu，导致即便有 NVIDIA GPU，推理仍在 CPU 上跑。
+    if cuda_ver is None:
+        print(
+            "[SenseVoice] 检测到 torch 很可能是 CPU-only 版本（torch.version.cuda 为 None）。\n"
+            "            这会导致命令行窗口 CPU 占用明显偏高。\n"
+            "            建议：用当前启动此服务的 python 环境，按照 PyTorch 官方页面安装 CUDA 版本 torch/torchaudio，\n"
+            "            然后重启本服务，确认 cuda_available=True 且使用设备为 cuda:0。\n"
+            "            参考： https://pytorch.org/get-started/locally/"
+        )
+    else:
+        print(
+            "[SenseVoice] torch 带 CUDA 版本号但 cuda_available=False。\n"
+            "            常见原因：驱动/CUDA 运行时不匹配，或环境变量/权限问题。\n"
+            "            建议：先确认 nvidia-smi 正常，再按 PyTorch 官方页面重装匹配版本。\n"
+            "            参考： https://pytorch.org/get-started/locally/"
+        )
 
 
 @dataclass
@@ -75,16 +150,18 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _safe_float32_audio(x: np.ndarray) -> np.ndarray:
+def _safe_float32_audio(x: np.ndarray, *, strict: Optional[bool] = None) -> np.ndarray:
     if x.dtype != np.float32:
         x = x.astype(np.float32, copy=False)
-    if not np.isfinite(x).all():
+    if strict is None:
+        strict = STRICT_AUDIO_VALIDATE
+    if strict and not np.isfinite(x).all():
         x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
     return x
 
 
 def _resample(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
-    audio = _safe_float32_audio(audio)
+    audio = _safe_float32_audio(audio, strict=False)
     if src_sr == dst_sr:
         return audio
 
@@ -106,7 +183,7 @@ def _apply_agc(audio: np.ndarray, target_rms: float = 0.05, max_gain: float = 20
     简单自动增益：把 RMS 拉到 target_rms（最多放大 max_gain 倍）
     """
 
-    audio = _safe_float32_audio(audio)
+    audio = _safe_float32_audio(audio, strict=False)
     rms = float(np.sqrt(np.mean(audio * audio)) + 1e-8)
     gain = min(max_gain, target_rms / rms)
     if gain <= 1.0:
@@ -127,14 +204,27 @@ def _clamp_float(value: float, lo: float, hi: float) -> float:
 
 
 def init_model() -> None:
-    global asr_model, vad_model
+    global asr_model, vad_model, _DEVICE
 
     if not os.path.isdir(MODEL_DIR):
         raise RuntimeError(f"SenseVoiceSmall 模型目录不存在: {MODEL_DIR}")
     if not os.path.isdir(VAD_MODEL_DIR):
         raise RuntimeError(f"FSMN-VAD 模型目录不存在: {VAD_MODEL_DIR}")
 
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    _diagnose_torch_env()
+
+    env_device = str(os.getenv("SENSEVOICE_DEVICE", "")).strip()
+    if env_device:
+        device = env_device
+    else:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    # 用户强制指定 CUDA 但环境不可用时，回退到 CPU 并明确提示
+    if str(device).startswith("cuda") and not torch.cuda.is_available():
+        print(f"[SenseVoice] 警告：已指定 device={device}，但 torch.cuda.is_available()=False，已回退为 cpu。")
+        device = "cpu"
+
+    _DEVICE = str(device)
     print(f"[SenseVoice] 使用设备: {device}")
     print(f"[SenseVoice] ASR 模型目录: {MODEL_DIR}")
     print(f"[SenseVoice] VAD 模型目录: {VAD_MODEL_DIR}")
@@ -143,11 +233,32 @@ def init_model() -> None:
     asr_model = AutoModel(model=MODEL_DIR, device=device, disable_update=True, trust_remote_code=False)
     vad_model = AutoModel(model=VAD_MODEL_DIR, device=device, disable_update=True, trust_remote_code=False)
 
-    # GPU 推理时，CPU 线程过多会导致整体占用异常高；这里做个保守限流
+    # GPU 推理允许 TF32（对 30 系列有用），通常能显著提速且不影响 ASR 质量观感
+    if str(device).startswith("cuda"):
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        except Exception:
+            pass
+
+    # GPU 推理时，CPU 线程过多会导致整体占用异常高；这里做个保守限流（可通过环境变量覆盖）
     try:
         cpu = os.cpu_count() or 4
-        torch.set_num_threads(max(1, min(4, cpu // 2)))
-        torch.set_num_interop_threads(1)
+        threads_env = str(os.getenv("SENSEVOICE_TORCH_THREADS", "")).strip()
+        interop_env = str(os.getenv("SENSEVOICE_TORCH_INTEROP_THREADS", "")).strip()
+
+        if threads_env:
+            torch.set_num_threads(max(1, int(threads_env)))
+        else:
+            # CUDA 推理时默认限制 CPU 线程；CPU 推理则保持更高并行度。
+            if str(device).startswith("cuda"):
+                torch.set_num_threads(max(1, min(4, cpu // 2)))
+
+        if interop_env:
+            torch.set_num_interop_threads(max(1, int(interop_env)))
+        else:
+            if str(device).startswith("cuda"):
+                torch.set_num_interop_threads(1)
     except Exception:
         pass
 
@@ -167,18 +278,46 @@ async def health():
     return JSONResponse({"ok": True, "ts": _now_ms()})
 
 
+@app.get("/info")
+async def info():
+    cuda_ver = getattr(getattr(torch, "version", None), "cuda", None)
+    try:
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_available = False
+    return JSONResponse(
+        {
+            "ok": True,
+            "ts": _now_ms(),
+            "device": _DEVICE,
+            "torch": getattr(torch, "__version__", "unknown"),
+            "torchCuda": cuda_ver,
+            "cudaAvailable": cuda_available,
+            "torchaudio": getattr(torchaudio, "__version__", None) if torchaudio is not None else None,
+            "silenceGate": {
+                "enabled": SILENCE_GATE_ENABLED,
+                "rms": SILENCE_GATE_RMS,
+                "maxSkipChunks": SILENCE_GATE_MAX_SKIP,
+            },
+        }
+    )
+
+
 def _transcribe_sync(audio_16k: np.ndarray, opts: DecodeOptions) -> str:
     """
     同步转写：传入 16k 单声道 float32
     """
-    res = asr_model.generate(
-        input=audio_16k,
-        cache={},
-        language=opts.language,
-        use_itn=opts.use_itn,
-        batch_size_s=60,
-        disable_pbar=True,
-    )
+    # inference_mode 可显著降低开销（无论 CPU/GPU），且不影响结果
+    ctx = torch.inference_mode() if INFERENCE_MODE_ENABLED else torch.no_grad()
+    with ctx:
+        res = asr_model.generate(
+            input=audio_16k,
+            cache={},
+            language=opts.language,
+            use_itn=opts.use_itn,
+            batch_size_s=60,
+            disable_pbar=True,
+        )
     if not res:
         return ""
     text = str((res[0] or {}).get("text", "")).strip()
@@ -205,7 +344,7 @@ async def asr(request: Request):
         return JSONResponse({"ok": False, "error": "empty body"}, status_code=400)
 
     audio = np.frombuffer(body, dtype=np.float32)
-    audio = _safe_float32_audio(audio)
+    audio = _safe_float32_audio(audio, strict=True)
     audio = _apply_agc(audio)
     audio_16k = _resample(audio, src_sr=sr, dst_sr=TARGET_SAMPLE_RATE)
 
@@ -288,6 +427,11 @@ async def ws_asr(websocket: WebSocket):
     resampler_src_sr: Optional[int] = None
     resampler = None
 
+    # 复用输入拼接缓冲，减少 while 循环内的频繁分配/GC（对 CPU-only 环境更友好）
+    feed_src_buf: Optional[np.ndarray] = None
+    last_src_need: Optional[int] = None
+    silence_skip_streak = 0
+
     def get_resampler(src_sr: int):
         nonlocal resampler_src_sr, resampler
         if torchaudio is None:
@@ -299,7 +443,7 @@ async def ws_asr(websocket: WebSocket):
         return resampler
 
     def resample_to_16k(audio: np.ndarray, src_sr: int, expected_len: int) -> np.ndarray:
-        audio = _safe_float32_audio(audio)
+        audio = _safe_float32_audio(audio, strict=False)
         if int(src_sr) == TARGET_SAMPLE_RATE:
             out = audio
         elif torchaudio is not None:
@@ -457,7 +601,7 @@ async def ws_asr(websocket: WebSocket):
                 continue
 
             chunk = np.frombuffer(data, dtype=np.float32)
-            chunk = _safe_float32_audio(chunk)
+            chunk = _safe_float32_audio(chunk, strict=False)
 
             src_chunks.append(chunk)
             src_available_samples += int(chunk.size)
@@ -468,35 +612,67 @@ async def ws_asr(websocket: WebSocket):
             expected_16k = max(1, _ms_to_samples(int(cfg.vad_chunk_ms)))
 
             while src_available_samples >= src_need:
-                feed_src = np.empty((src_need,), dtype=np.float32)
-                filled = 0
-                while filled < src_need and src_chunks:
-                    head = src_chunks[0]
-                    avail = int(head.size) - int(src_head_offset)
-                    take = min(avail, src_need - filled)
-                    feed_src[filled : filled + take] = head[src_head_offset : src_head_offset + take]
-                    filled += take
-                    src_head_offset += take
-                    src_available_samples -= take
-                    if src_head_offset >= int(head.size):
-                        src_chunks.popleft()
-                        src_head_offset = 0
+                # 快路径：单个 chunk 足够时直接切片，避免额外拷贝
+                feed_src_view: Optional[np.ndarray] = None
+                if src_chunks:
+                    head0 = src_chunks[0]
+                    avail0 = int(head0.size) - int(src_head_offset)
+                    if avail0 >= src_need:
+                        s0 = int(src_head_offset)
+                        e0 = s0 + int(src_need)
+                        feed_src_view = head0[s0:e0]
+                        src_head_offset += int(src_need)
+                        src_available_samples -= int(src_need)
+                        if src_head_offset >= int(head0.size):
+                            src_chunks.popleft()
+                            src_head_offset = 0
 
-                feed_16k = resample_to_16k(feed_src, src_sr=int(cfg.sample_rate), expected_len=expected_16k)
+                if feed_src_view is None:
+                    if feed_src_buf is None or last_src_need != src_need or int(feed_src_buf.size) != int(src_need):
+                        feed_src_buf = np.empty((src_need,), dtype=np.float32)
+                        last_src_need = int(src_need)
+                    feed_src = feed_src_buf
+                    filled = 0
+                    while filled < src_need and src_chunks:
+                        head = src_chunks[0]
+                        avail = int(head.size) - int(src_head_offset)
+                        take = min(avail, src_need - filled)
+                        feed_src[filled : filled + take] = head[src_head_offset : src_head_offset + take]
+                        filled += take
+                        src_head_offset += take
+                        src_available_samples -= take
+                        if src_head_offset >= int(head.size):
+                            src_chunks.popleft()
+                            src_head_offset = 0
+                    feed_src_view = feed_src[:src_need]
+
+                # 静音门控：在“未进入语音段”且输入能量很低时，跳过本轮重采样+VAD。
+                # 这样可以显著降低持续静音状态下的 CPU 占用。
+                if SILENCE_GATE_ENABLED and speech_start_ms is None:
+                    n = max(1, int(feed_src_view.size))
+                    rms = float(np.sqrt(float(np.dot(feed_src_view, feed_src_view)) / float(n)))
+                    if rms < SILENCE_GATE_RMS and silence_skip_streak < SILENCE_GATE_MAX_SKIP:
+                        silence_skip_streak += 1
+                        continue
+                    silence_skip_streak = 0
+
+                feed_16k = resample_to_16k(feed_src_view, src_sr=int(cfg.sample_rate), expected_len=expected_16k)
                 append_audio_16k(feed_16k)
 
                 processed_samples_16k += expected_16k
                 now_ms = int(round(processed_samples_16k / float(TARGET_SAMPLE_RATE) * 1000.0))
 
                 # fsmn-vad streaming: value is list of [start_ms, end_ms] (ms).
-                res = vad_model.generate(
-                    input=feed_16k,
-                    cache=vad_cache,
-                    is_final=False,
-                    chunk_size=int(cfg.vad_chunk_ms),
-                    max_end_silence_time=int(cfg.max_end_silence_ms),
-                    disable_pbar=True,
-                )
+                ctx = torch.inference_mode() if INFERENCE_MODE_ENABLED else torch.no_grad()
+                with ctx:
+                    res = vad_model.generate(
+                        input=feed_16k,
+                        cache=vad_cache,
+                        is_final=False,
+                        chunk_size=int(cfg.vad_chunk_ms),
+                        max_end_silence_time=int(cfg.max_end_silence_ms),
+                        disable_pbar=True,
+                    )
                 values = []
                 if isinstance(res, list) and res:
                     values = (res[0] or {}).get("value") or []

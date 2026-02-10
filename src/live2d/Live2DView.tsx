@@ -1,62 +1,57 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import * as PIXI from 'pixi.js'
 import { Live2DModel } from 'pixi-live2d-display'
 import { defaultModelJsonUrl } from './live2dModels'
+import {
+  createLive2dParamAccessor,
+  createLive2dParamScriptEngine,
+  type Live2dCapabilities,
+  type Live2dParamScriptEngine,
+} from './live2dParamTools'
 import { getApi } from '../neoDeskPetApi'
 
 type Props = {
-  windowDragging?: boolean // 窗口是否正在被拖动（用于高频同步画布/布局）
+  windowDragging?: boolean
   modelJsonUrl?: string
   scale?: number
   opacity?: number
-  mouthOpen?: number // 0.0 - 1.0，用于口型模拟
-}
-
-type Live2DParamSetter = (id: string, value: number) => void
-
-function createParamSetter(model: Live2DModel): Live2DParamSetter {
-  return (id, value) => {
-    const internalModel = model.internalModel as unknown as {
-      coreModel?: {
-        setParameterValueById?: (paramId: string, v: number) => void
-        setParamFloat?: (paramId: string, v: number) => void
-      }
-    }
-
-    const core = internalModel?.coreModel
-    if (!core) return
-
-    try {
-      if (core.setParameterValueById) {
-        core.setParameterValueById(id, value)
-        return
-      }
-      if (core.setParamFloat) {
-        const cubism2Name = id
-          .replace('Param', 'PARAM_')
-          .replace(/([A-Z])/g, '_$1')
-          .toUpperCase()
-        core.setParamFloat(cubism2Name, value)
-      }
-    } catch {
-      // ignore
-    }
-  }
+  mouthOpen?: number
+  mouseTrackingEnabled?: boolean
+  idleSwayEnabled?: boolean
 }
 
 export function Live2DView(props: Props) {
-  const { modelJsonUrl, scale = 1.0, opacity = 1.0, mouthOpen = 0, windowDragging = false } = props
+  const {
+    modelJsonUrl,
+    scale = 1.0,
+    opacity = 1.0,
+    mouthOpen = 0,
+    windowDragging = false,
+    mouseTrackingEnabled = true,
+    idleSwayEnabled = true,
+  } = props
+
   const containerRef = useRef<HTMLDivElement | null>(null)
   const modelRef = useRef<Live2DModel | null>(null)
   const appRef = useRef<PIXI.Application | null>(null)
   const naturalSizeRef = useRef<{ width: number; height: number } | null>(null)
   const [modelLoaded, setModelLoaded] = useState(false)
+
   const mouthOpenRef = useRef(0)
   const windowDraggingRef = useRef(false)
+  const mouseTrackingEnabledRef = useRef(true)
+  const idleSwayEnabledRef = useRef(true)
+
+  const paramAccessorRef = useRef<ReturnType<typeof createLive2dParamAccessor> | null>(null)
+  const scriptEngineRef = useRef<Live2dParamScriptEngine | null>(null)
+  const pendingParamScriptsRef = useRef<unknown[]>([])
+
+  const mouseTargetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
+  const mouseCurrentRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
+  const mouseResettingRef = useRef(false)
+
   const lastLayoutRef = useRef<{ w: number; h: number; dpr: number }>({ w: 0, h: 0, dpr: 0 })
   const syncLayoutRef = useRef<(() => void) | null>(null)
-  const dragRafRef = useRef<number>(0)
-  const pendingScaleAfterDragRef = useRef(false)
 
   useEffect(() => {
     mouthOpenRef.current = Math.max(0, Math.min(1.25, mouthOpen))
@@ -66,16 +61,40 @@ export function Live2DView(props: Props) {
     windowDraggingRef.current = windowDragging
   }, [windowDragging])
 
+  useEffect(() => {
+    mouseTrackingEnabledRef.current = mouseTrackingEnabled !== false
+    if (!mouseTrackingEnabledRef.current) {
+      mouseTargetRef.current = { x: 0, y: 0 }
+      mouseResettingRef.current = true
+
+      const accessor = paramAccessorRef.current
+      if (accessor) {
+        const setParam = accessor.set
+        setParam('ParamAngleX', 0)
+        setParam('ParamAngleY', 0)
+        setParam('ParamAngleZ', 0)
+        setParam('ParamEyeBallX', 0)
+        setParam('ParamEyeBallY', 0)
+        setParam('ParamBodyAngleX', 0)
+        setParam('ParamBodyAngleY', 0)
+      }
+    } else {
+      mouseResettingRef.current = false
+    }
+  }, [mouseTrackingEnabled])
+
+  useEffect(() => {
+    idleSwayEnabledRef.current = idleSwayEnabled !== false
+  }, [idleSwayEnabled])
+
   const selectedModelUrl = useMemo(() => modelJsonUrl ?? defaultModelJsonUrl, [modelJsonUrl])
 
-  // Initialize PIXI and Live2D
   useEffect(() => {
     if (!containerRef.current) return
 
     setModelLoaded(false)
     ;(window as unknown as { PIXI?: unknown }).PIXI = PIXI
 
-    // 使用 clientWidth/Height（整数、稳定）避免拖动窗口/跨屏 DPI 变化时出现小数抖动
     const initW = Math.max(1, containerRef.current.clientWidth)
     const initH = Math.max(1, containerRef.current.clientHeight)
 
@@ -84,9 +103,19 @@ export function Live2DView(props: Props) {
       antialias: true,
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
+      sharedTicker: true,
       width: initW,
       height: initH,
     })
+
+    try {
+      const ticker = app.ticker
+      if (ticker && (ticker.maxFPS === 0 || ticker.maxFPS > 30)) {
+        ticker.maxFPS = 30
+      }
+    } catch {
+      // ignore
+    }
 
     appRef.current = app
     containerRef.current.appendChild(app.view as unknown as Node)
@@ -103,11 +132,8 @@ export function Live2DView(props: Props) {
 
       modelRef.current = live2d
       app.stage.addChild(live2d)
-
       live2d.anchor.set(0.5, 0.5)
 
-      // 记录稳定的“自然尺寸”，用于后续 fit-to-window 的 scale 计算
-      // 优先取 localBounds（更接近可见范围），其次 internalModel 原始尺寸，最后退回 live2d.width/height
       try {
         const internal = live2d.internalModel as unknown as {
           originalWidth?: number
@@ -138,18 +164,114 @@ export function Live2DView(props: Props) {
         }
       }
 
-      const setParam = createParamSetter(live2d)
+      const accessor = createLive2dParamAccessor(live2d)
+      paramAccessorRef.current = accessor
+      const engine = createLive2dParamScriptEngine(accessor)
+      scriptEngineRef.current = engine
+
+      if (pendingParamScriptsRef.current.length > 0) {
+        const pending = pendingParamScriptsRef.current.splice(0, 20)
+        for (const item of pending) {
+          engine.enqueue(item)
+        }
+      }
+
+      const api = getApi()
+      if (api) {
+        const reportCaps = (attempt: number) => {
+          if (destroyed) return
+          const caps: Live2dCapabilities = {
+            modelJsonUrl: selectedModelUrl,
+            updatedAt: Date.now(),
+            parameters: accessor.listParameters(),
+          }
+          api.reportLive2dCapabilities(caps)
+          if (caps.parameters.length === 0 && attempt < 12) {
+            setTimeout(() => reportCaps(attempt + 1), 250)
+          }
+        }
+        reportCaps(0)
+      }
+
+      const setParam = accessor.set
+      try {
+        mouseTargetRef.current = { x: 0, y: 0 }
+        mouseCurrentRef.current = { x: 0, y: 0 }
+        mouseResettingRef.current = false
+        setParam('ParamAngleX', 0)
+        setParam('ParamAngleY', 0)
+        setParam('ParamAngleZ', 0)
+        setParam('ParamEyeBallX', 0)
+        setParam('ParamEyeBallY', 0)
+      } catch {
+        // ignore
+      }
+
       let physicsTime = 0
 
-      app.ticker.add((delta) => {
-        if (!modelRef.current) return
-        const dt = delta / 60
-        physicsTime += dt
+      try {
+        const internal = live2d.internalModel as unknown as {
+          update?: (dtMs: number, elapsedMs: number) => void
+        }
 
-        setParam('ParamBreath', (Math.sin(physicsTime * 1.5) + 1) * 0.5)
-        setParam('ParamBodyAngleZ', Math.sin(physicsTime * 1.1) * 6)
-        setParam('ParamMouthOpenY', mouthOpenRef.current)
-      })
+        const originalUpdate = typeof internal?.update === 'function' ? internal.update.bind(internal) : null
+        if (originalUpdate) {
+          internal.update = (dtMs: number, elapsedMs: number) => {
+            const safeDtMs = typeof dtMs === 'number' && Number.isFinite(dtMs) ? dtMs : 0
+            const clampedDtMs = Math.max(0, Math.min(safeDtMs, 1000 / 20))
+            originalUpdate(clampedDtMs, elapsedMs)
+
+            const dtSec = clampedDtMs / 1000
+            physicsTime += dtSec
+
+            scriptEngineRef.current?.tick(clampedDtMs)
+
+            const allowControl = !windowDraggingRef.current
+            const trackingEnabled = mouseTrackingEnabledRef.current
+            const resetting = !trackingEnabled && mouseResettingRef.current
+
+            if (allowControl) {
+              const target = mouseTargetRef.current
+              const cur = mouseCurrentRef.current
+              const tx = trackingEnabled ? target.x : 0
+              const ty = trackingEnabled ? target.y : 0
+              const k = 1 - Math.pow(0.001, Math.max(0, dtSec))
+
+              cur.x = cur.x + (tx - cur.x) * k
+              cur.y = cur.y + (ty - cur.y) * k
+
+              setParam('ParamAngleX', cur.x * 30)
+              setParam('ParamAngleY', -cur.y * 30)
+              setParam('ParamAngleZ', cur.x * -5)
+              setParam('ParamEyeBallX', cur.x)
+              setParam('ParamEyeBallY', -cur.y)
+
+              if (resetting && Math.abs(cur.x) < 0.01 && Math.abs(cur.y) < 0.01) {
+                cur.x = 0
+                cur.y = 0
+                mouseResettingRef.current = false
+                setParam('ParamAngleX', 0)
+                setParam('ParamAngleY', 0)
+                setParam('ParamAngleZ', 0)
+                setParam('ParamEyeBallX', 0)
+                setParam('ParamEyeBallY', 0)
+              }
+            }
+
+            setParam('ParamBreath', (Math.sin(physicsTime * 1.5) + 1) * 0.5)
+            if (idleSwayEnabledRef.current && !windowDraggingRef.current) {
+              const swayAngle =
+                Math.sin(physicsTime * 1.5) * 5 + Math.sin(physicsTime * 0.7) * 3 + Math.sin(physicsTime * 2.3) * 1.5
+              setParam('ParamBodyAngleZ', swayAngle)
+              setParam('ParamBodyAngleX', Math.sin(physicsTime * 0.5) * 2)
+              setParam('ParamBodyAngleY', Math.sin(physicsTime * 0.8) * 1.5)
+            }
+            setParam('ParamMouthOpenY', mouthOpenRef.current)
+          }
+        }
+      } catch {
+        // ignore
+      }
 
       setModelLoaded(true)
     }
@@ -161,6 +283,8 @@ export function Live2DView(props: Props) {
     return () => {
       destroyed = true
       modelRef.current = null
+      paramAccessorRef.current = null
+      scriptEngineRef.current = null
       appRef.current = null
       naturalSizeRef.current = null
 
@@ -172,7 +296,25 @@ export function Live2DView(props: Props) {
     }
   }, [selectedModelUrl])
 
-  // Listen for expression/motion triggers from settings window
+  useEffect(() => {
+    const api = getApi() as unknown as
+      | {
+          onLive2dMouseTarget?: (listener: (payload: { x: number; y: number }) => void) => () => void
+        }
+      | null
+    if (!api || typeof api.onLive2dMouseTarget !== 'function') return
+
+    const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
+
+    return api.onLive2dMouseTarget((payload) => {
+      if (!mouseTrackingEnabledRef.current) return
+      if (windowDraggingRef.current) return
+      const x = typeof payload?.x === 'number' && Number.isFinite(payload.x) ? payload.x : 0
+      const y = typeof payload?.y === 'number' && Number.isFinite(payload.y) ? payload.y : 0
+      mouseTargetRef.current = { x: clamp(x, -1, 1), y: clamp(y, -1, 1) }
+    })
+  }, [])
+
   useEffect(() => {
     const api = getApi()
     if (!api) return
@@ -180,10 +322,7 @@ export function Live2DView(props: Props) {
     const unsubExpression = api.onLive2dExpression((expressionName) => {
       const model = modelRef.current
       if (!model) return
-
-      console.log('[Live2D] Triggering expression:', expressionName)
       try {
-        // pixi-live2d-display expression API
         model.expression(expressionName)
       } catch (err) {
         console.warn('[Live2D] Failed to trigger expression:', err)
@@ -193,25 +332,35 @@ export function Live2DView(props: Props) {
     const unsubMotion = api.onLive2dMotion((motionGroup, index) => {
       const model = modelRef.current
       if (!model) return
-
-      console.log('[Live2D] Triggering motion:', motionGroup, index)
       try {
-        // pixi-live2d-display motion API
         model.motion(motionGroup, index)
       } catch (err) {
         console.warn('[Live2D] Failed to trigger motion:', err)
       }
     })
 
+    const unsubParamScript = api.onLive2dParamScript((payload) => {
+      const engine = scriptEngineRef.current
+      if (!engine) {
+        pendingParamScriptsRef.current.push(payload)
+        if (pendingParamScriptsRef.current.length > 20) {
+          pendingParamScriptsRef.current.splice(0, pendingParamScriptsRef.current.length - 20)
+        }
+        return
+      }
+      const res = engine.enqueue(payload)
+      if (!res.ok) {
+        console.warn('[Live2D] Param script rejected:', res.error ?? 'unknown')
+      }
+    })
+
     return () => {
       unsubExpression()
       unsubMotion()
+      unsubParamScript()
     }
   }, [modelLoaded])
 
-  // 同步画布大小/分辨率与模型位置：
-  // - Windows/Electron 在拖动窗口、跨显示器（不同缩放比例）时，devicePixelRatio/布局可能变化
-  // - 若 PIXI renderer 不同步 resize/resolution，会导致 Live2D 画面与 DOM 覆盖层（气泡/小球）相对位置“漂移”
   useEffect(() => {
     if (!modelLoaded) return
 
@@ -219,50 +368,47 @@ export function Live2DView(props: Props) {
     const app = appRef.current
     if (!container || !app) return
 
-    // reset once per attach (avoid resetting on windowDragging toggles)
     lastLayoutRef.current = { w: 0, h: 0, dpr: 0 }
 
     const syncLayout = () => {
-      const container = containerRef.current
-      const app = appRef.current
-      if (!container || !app) return
+      const containerNode = containerRef.current
+      const appNode = appRef.current
+      if (!containerNode || !appNode) return
 
-      // 使用 clientWidth/Height（整数、稳定）避免拖动窗口时 getBoundingClientRect 出现抖动导致 scale 逐步漂移
-      const w = Math.max(1, container.clientWidth)
-      const h = Math.max(1, container.clientHeight)
+      // 拖动窗口期间冻结布局重算，避免因 DPI/resize 抖动触发模型反复缩放和闪烁。
+      if (windowDraggingRef.current) return
+
+      const w = Math.max(1, containerNode.clientWidth)
+      const h = Math.max(1, containerNode.clientHeight)
       const dpr = window.devicePixelRatio || 1
 
       const last = lastLayoutRef.current
       const sizeChanged = w !== last.w || h !== last.h
       const dprChanged = Math.abs(dpr - last.dpr) > 0.001
-      const dragging = windowDraggingRef.current
-      const forceScale = !dragging && pendingScaleAfterDragRef.current
-      if (!sizeChanged && !dprChanged && !forceScale) {
-        // 拖动窗口时强制把模型保持在中心，避免合成/缩放抖动造成“视觉漂移”
-        if (dragging) {
-          const model = modelRef.current
-          if (model) model.position.set(w / 2, h / 2 + h * 0.06)
+      if (!sizeChanged && !dprChanged) {
+        const model = modelRef.current
+        if (model) {
+          model.position.set(w / 2, h / 2 + h * 0.06)
         }
         return
       }
 
       try {
         if (dprChanged) {
-          app.renderer.resolution = dpr
-          // 交互坐标也需要跟随 DPR，避免命中/事件偏移
-          const interaction = (app.renderer.plugins as unknown as { interaction?: { resolution?: number } }).interaction
+          appNode.renderer.resolution = dpr
+          const interaction = (appNode.renderer.plugins as unknown as { interaction?: { resolution?: number } }).interaction
           if (interaction && typeof interaction.resolution === 'number') {
             interaction.resolution = dpr
           }
         }
 
         if (sizeChanged || dprChanged) {
-          app.renderer.resize(w, h)
+          appNode.renderer.resize(w, h)
         }
 
         const model = modelRef.current
         const natural = naturalSizeRef.current
-        if (!dragging && model && natural) {
+        if (model && natural) {
           const padding = 0.92
           const targetW = w * padding
           const targetH = h * padding
@@ -272,12 +418,10 @@ export function Live2DView(props: Props) {
             baseScale = 0.15
           }
 
-          // 只在发生“明显变化”时再更新，避免极端拖动/系统抖动导致 scale 频繁微调（观感像越甩越大/越甩越小）
-          const currentScale = typeof model.scale?.x === 'number' ? model.scale.x : NaN
+          const currentScale = typeof model.scale?.x === 'number' ? model.scale.x : Number.NaN
           const denom = Number.isFinite(currentScale) && currentScale > 0 ? currentScale : 1
           const relDiff = Math.abs(baseScale - denom) / denom
-          if (!Number.isFinite(currentScale) || relDiff > 0.005) {
-            // model.scale 与窗口大小绑定（外部 scale 参数仅作为触发同步的依赖，不在这里叠加）
+          if (!Number.isFinite(currentScale) || relDiff > 0.003) {
             model.scale.set(baseScale)
           }
 
@@ -287,8 +431,6 @@ export function Live2DView(props: Props) {
         }
 
         lastLayoutRef.current = { w, h, dpr }
-        if (dragging && (sizeChanged || dprChanged)) pendingScaleAfterDragRef.current = true
-        if (!dragging && forceScale) pendingScaleAfterDragRef.current = false
       } catch {
         // ignore
       }
@@ -308,43 +450,32 @@ export function Live2DView(props: Props) {
       ro = null
     }
 
-    // 兜底：DPI/缩放变化在某些环境下不会触发 resize/ResizeObserver
-    const dprTimer = window.setInterval(() => syncLayout(), 250)
+    const buildDprPollMs = () => (document.hidden ? 1500 : 700)
+    let dprTimer = window.setInterval(() => {
+      if (windowDraggingRef.current) return
+      syncLayout()
+    }, buildDprPollMs())
+
+    const onVisibilityChange = () => {
+      window.clearInterval(dprTimer)
+      dprTimer = window.setInterval(() => syncLayout(), buildDprPollMs())
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
     return () => {
       window.removeEventListener('resize', handleWindowResize)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       if (ro) ro.disconnect()
-      clearInterval(dprTimer)
+      window.clearInterval(dprTimer)
       syncLayoutRef.current = null
     }
   }, [modelLoaded, scale])
 
-  // 拖动窗口时高频同步，避免“甩动时逐步漂移”的观感；结束拖动时再同步一次
   useEffect(() => {
     if (!modelLoaded) return
-
-    const stop = () => {
-      if (dragRafRef.current) window.cancelAnimationFrame(dragRafRef.current)
-      dragRafRef.current = 0
-    }
-
-    if (!windowDragging) {
-      stop()
-      syncLayoutRef.current?.()
-      return
-    }
-
-    stop()
-    const tick = () => {
-      syncLayoutRef.current?.()
-      dragRafRef.current = window.requestAnimationFrame(tick)
-    }
-    dragRafRef.current = window.requestAnimationFrame(tick)
-
-    return stop
+    syncLayoutRef.current?.()
   }, [windowDragging, modelLoaded])
 
-  // Update opacity when prop changes or model loads
   useEffect(() => {
     if (modelRef.current && modelLoaded) {
       modelRef.current.alpha = opacity

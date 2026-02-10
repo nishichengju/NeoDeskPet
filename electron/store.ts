@@ -1,6 +1,7 @@
 import Store from 'electron-store'
 import type {
   AISettings,
+  AIProfile,
   AppSettings,
   AsrSettings,
   BubbleSettings,
@@ -24,25 +25,25 @@ const defaultAISettings: AISettings = {
   temperature: 0.7,
   maxTokens: 64000,
   maxContextTokens: 128000,
+  thinkingEffort: 'disabled',
   systemPrompt: '',
   enableVision: false,
   enableChatStreaming: false,
 }
 
-const legacyDefaultSystemPrompt = '你是一个可爱的桌面宠物助手，请用友好、活泼的语气回复用户。'
+const legacyDefaultSystemPrompt = 'You are a helpful desktop pet assistant.'
 const legacyDefaultClickPhrases = [
-  '主人好呀~',
-  '有什么事吗？',
-  '嗯？怎么了~',
-  '今天也要加油哦！',
-  '想我了吗？',
-  '主人在干嘛呢？',
-  '需要帮忙吗？',
-  '摸摸~',
-  '嘿嘿~',
-  '主人最棒了！',
+  'Hello~',
+  'Need help?',
+  'I am here with you.',
+  'Let us keep going.',
+  'You can do this.',
+  'What do you want to do next?',
+  'Take a short break if needed.',
+  'Hehe',
+  'Meow',
+  'Ping me anytime.',
 ]
-
 const defaultBubbleSettings: BubbleSettings = {
   style: 'cute',
   positionX: 75, // 75% from left (right side)
@@ -58,6 +59,7 @@ const defaultBubbleSettings: BubbleSettings = {
 }
 
 const defaultTaskPanelSettings: TaskPanelSettings = {
+  enabled: true,
   positionX: 50, // 居中
   positionY: 78, // 靠近底部
 }
@@ -88,6 +90,11 @@ const defaultToolSettings: ToolSettings = {
 const defaultMcpSettings: McpSettings = {
   enabled: false,
   servers: [],
+}
+
+function normalizeThinkingEffort(value: unknown): AISettings['thinkingEffort'] {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
+  return 'disabled'
 }
 
 function normalizeMcpServerId(value: unknown, fallback: string): string {
@@ -125,9 +132,9 @@ function normalizeMcpServerConfig(value: unknown, index: number): McpServerConfi
 }
 
 const defaultChatProfile: ChatProfile = {
-  userName: '用户',
+  userName: 'User',
   userAvatar: '',
-  assistantName: '桌宠',
+  assistantName: 'Assistant',
   assistantAvatar: '',
 }
 
@@ -243,6 +250,7 @@ const defaultAsrSettings: AsrSettings = {
 const defaultSettings: AppSettings = {
   alwaysOnTop: true,
   clickThrough: false,
+  displayMode: 'live2d',
   activePersonaId: 'default',
   memory: defaultMemorySettings,
   memoryConsole: defaultMemoryConsoleSettings,
@@ -250,11 +258,15 @@ const defaultSettings: AppSettings = {
   chatWindowBounds: { width: 420, height: 560 },
   settingsWindowBounds: { width: 420, height: 520 },
   memoryWindowBounds: { width: 560, height: 720 },
+  // Orb window bounds for expanded state
+  orbWindowBounds: { width: 560, height: 720 },
   // Live2D settings
   petScale: 1.0,
   petOpacity: 1.0,
   live2dModelId: 'haru',
   live2dModelFile: '/live2d/Haru/Haru.model3.json',
+  live2dMouseTrackingEnabled: true,
+  live2dIdleSwayEnabled: true,
   // Speech bubble settings
   bubble: defaultBubbleSettings,
   // Pet task panel settings (M2)
@@ -267,6 +279,8 @@ const defaultSettings: AppSettings = {
   mcp: defaultMcpSettings,
   // AI settings
   ai: defaultAISettings,
+  aiProfiles: [],
+  activeAiProfileId: '',
   // Chat profile
   chatProfile: defaultChatProfile,
   // Chat UI
@@ -277,8 +291,47 @@ const defaultSettings: AppSettings = {
   asr: defaultAsrSettings,
 }
 
+function normalizeAiProfiles(value: unknown): AIProfile[] {
+  const list = Array.isArray(value) ? value : []
+  const out: AIProfile[] = []
+  const seenIds = new Set<string>()
+  const now = Date.now()
+
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const obj = item as Record<string, unknown>
+    const idRaw = String(obj.id ?? '').trim()
+    const baseId = idRaw || `api_${Math.random().toString(36).slice(2, 10)}`
+    let id = baseId
+    let n = 2
+    while (seenIds.has(id)) {
+      id = `${baseId}_${n}`
+      n += 1
+    }
+    seenIds.add(id)
+
+    const nameRaw = String(obj.name ?? '').trim()
+    const name = nameRaw || id
+    const apiKey = String(obj.apiKey ?? '').trim()
+    const baseUrl = String(obj.baseUrl ?? '').trim()
+    const model = String(obj.model ?? '').trim()
+    const createdAt = typeof obj.createdAt === 'number' && Number.isFinite(obj.createdAt) ? Math.trunc(obj.createdAt) : now
+    const updatedAt = typeof obj.updatedAt === 'number' && Number.isFinite(obj.updatedAt) ? Math.trunc(obj.updatedAt) : createdAt
+
+    out.push({ id, name, apiKey, baseUrl, model, createdAt, updatedAt })
+    if (out.length >= 20) break
+  }
+
+  return out
+}
 function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings {
   const merged: AppSettings = { ...defaultSettings, ...(value ?? {}) } as AppSettings
+
+  // Live2D mouse tracking defaults to enabled
+  merged.live2dMouseTrackingEnabled = (value?.live2dMouseTrackingEnabled ?? defaultSettings.live2dMouseTrackingEnabled) !== false
+
+  // Live2D idle sway defaults to enabled
+  merged.live2dIdleSwayEnabled = (value?.live2dIdleSwayEnabled ?? defaultSettings.live2dIdleSwayEnabled) !== false
 
   merged.bubble = { ...defaultBubbleSettings, ...((value?.bubble ?? {}) as Partial<BubbleSettings>) }
   merged.taskPanel = { ...defaultTaskPanelSettings, ...((value?.taskPanel ?? {}) as Partial<TaskPanelSettings>) }
@@ -302,7 +355,7 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
     .map((s, idx) => normalizeMcpServerConfig(s, idx))
     .filter(Boolean) as McpServerConfig[]
 
-  // 去重：同名 id 自动加后缀
+  // 确保 server id 唯一，避免重复 id 导致覆盖
   const seen = new Set<string>()
   for (const s of normalizedServers) {
     let nextId = s.id
@@ -323,6 +376,11 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   }
 
   merged.ai = { ...defaultAISettings, ...((value?.ai ?? {}) as Partial<AISettings>) }
+  merged.ai.thinkingEffort = normalizeThinkingEffort((merged.ai as { thinkingEffort?: unknown }).thinkingEffort)
+  merged.aiProfiles = normalizeAiProfiles(value?.aiProfiles)
+  const activeProfileIdRaw = String(value?.activeAiProfileId ?? '').trim()
+  const hasActive = activeProfileIdRaw && merged.aiProfiles.some((p) => p.id === activeProfileIdRaw)
+  merged.activeAiProfileId = hasActive ? activeProfileIdRaw : merged.aiProfiles[0]?.id ?? ''
   if (merged.ai.systemPrompt === legacyDefaultSystemPrompt) merged.ai.systemPrompt = ''
   if (
     Array.isArray(merged.bubble.clickPhrases) &&
@@ -340,7 +398,24 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   }
   merged.tts = { ...defaultTtsSettings, ...((value?.tts ?? {}) as Partial<TtsSettings>) }
   merged.asr = { ...defaultAsrSettings, ...((value?.asr ?? {}) as Partial<AsrSettings>) }
-  // 历史默认值 320ms 在部分场景会明显影响识别效果，这里自动回退到推荐 200ms
+
+  // 宠物窗口尺寸始终由 petScale 决定，避免历史脏数据导致拖拽后“模型越来越大”
+  const rawPetScale = typeof merged.petScale === 'number' && Number.isFinite(merged.petScale) ? merged.petScale : defaultSettings.petScale
+  const safePetScale = Math.max(0.5, Math.min(5, rawPetScale))
+  merged.petScale = safePetScale
+  const expectedPetWidth = Math.round(350 * safePetScale)
+  const expectedPetHeight = Math.round(450 * safePetScale)
+  const rawPetBounds =
+    value?.petWindowBounds && typeof value.petWindowBounds === 'object' ? (value.petWindowBounds as Record<string, unknown>) : {}
+  const petX = typeof rawPetBounds.x === 'number' && Number.isFinite(rawPetBounds.x) ? Math.trunc(rawPetBounds.x) : defaultSettings.petWindowBounds.x
+  const petY = typeof rawPetBounds.y === 'number' && Number.isFinite(rawPetBounds.y) ? Math.trunc(rawPetBounds.y) : defaultSettings.petWindowBounds.y
+  merged.petWindowBounds = {
+    x: petX,
+    y: petY,
+    width: expectedPetWidth,
+    height: expectedPetHeight,
+  }
+  // 兼容历史配置：旧值 320ms 自动回写到 200ms
   if ((value?.asr as Partial<AsrSettings> | undefined)?.vadChunkMs === 320) {
     merged.asr.vadChunkMs = 200
   }
@@ -353,7 +428,7 @@ function safeJsonDeserialize(raw: string): AppSettings {
   try {
     return JSON.parse(cleaned) as AppSettings
   } catch (err) {
-    // 防止配置文件损坏导致应用无法启动：回退为空对象，让 defaults 接管。
+    // JSON 解析失败时回退 defaults，避免启动阶段崩溃
     console.error('[Store] invalid JSON in neodeskpet-settings, fallback to defaults:', err)
     return {} as AppSettings
   }
@@ -378,6 +453,7 @@ const store = new Store<AppSettings>({
           temperature: (oldAi.temperature as number) || 0.7,
           maxTokens: 64000,
           maxContextTokens: 128000,
+          thinkingEffort: 'disabled',
           systemPrompt: (oldAi.systemPrompt as string) || defaultAISettings.systemPrompt,
           enableVision: false,
           enableChatStreaming: false,
@@ -636,6 +712,14 @@ const store = new Store<AppSettings>({
       if (typeof mem.kgAiModel !== 'string') store.set('memory.kgAiModel', defaultMemorySettings.kgAiModel)
       if (typeof mem.kgAiTemperature !== 'number') store.set('memory.kgAiTemperature', defaultMemorySettings.kgAiTemperature)
       if (typeof mem.kgAiMaxTokens !== 'number') store.set('memory.kgAiMaxTokens', defaultMemorySettings.kgAiMaxTokens)
+    },
+    '0.20.0': (store) => {
+      const ai = store.get('ai') as Partial<AISettings> | undefined
+      if (!ai) {
+        store.set('ai', defaultAISettings)
+        return
+      }
+      store.set('ai.thinkingEffort', normalizeThinkingEffort(ai.thinkingEffort))
     },
   },
 })

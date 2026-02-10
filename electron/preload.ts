@@ -45,12 +45,15 @@ import type {
   MemoryDeleteManyArgs,
   Persona,
   PersonaSummary,
+  DisplayMode,
+  OrbUiState,
 } from './types'
 import type { TtsOptions } from './ttsOptions'
 
 export type SettingsChangeListener = (settings: AppSettings) => void
 export type Live2DExpressionListener = (expressionName: string) => void
 export type Live2DMotionListener = (motionGroup: string, index: number) => void
+export type Live2DMouseTargetListener = (payload: { x: number; y: number; t?: number }) => void
 export type BubbleMessageListener = (message: string) => void
 
 export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[]; fullText?: string }
@@ -86,10 +89,19 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   setPetOpacity: (value: number): Promise<AppSettings> => ipcRenderer.invoke('settings:setPetOpacity', value),
   setLive2dModel: (modelId: string, modelFile: string): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setLive2dModel', modelId, modelFile),
+  setLive2dMouseTrackingEnabled: (enabled: boolean): Promise<AppSettings> =>
+    ipcRenderer.invoke('settings:setLive2dMouseTrackingEnabled', enabled),
+  setLive2dIdleSwayEnabled: (enabled: boolean): Promise<AppSettings> => ipcRenderer.invoke('settings:setLive2dIdleSwayEnabled', enabled),
 
   // AI settings
   setAISettings: (aiSettings: Partial<AISettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setAISettings', aiSettings),
+  saveAIProfile: (payload: { id?: string; name: string; apiKey: string; baseUrl: string; model: string }): Promise<AppSettings> =>
+    ipcRenderer.invoke('settings:saveAIProfile', payload),
+  deleteAIProfile: (id: string): Promise<AppSettings> => ipcRenderer.invoke('settings:deleteAIProfile', id),
+  applyAIProfile: (id: string): Promise<AppSettings> => ipcRenderer.invoke('settings:applyAIProfile', id),
+  listAIModels: (payload?: { apiKey?: string; baseUrl?: string }): Promise<{ ok: boolean; models: string[]; error?: string }> =>
+    ipcRenderer.invoke('ai:listModels', payload),
 
   // Bubble settings
   setBubbleSettings: (bubbleSettings: Partial<BubbleSettings>): Promise<AppSettings> =>
@@ -163,6 +175,7 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     return () => ipcRenderer.off('asr:hotkeyToggle', handler)
   },
   reportAsrTranscript: (text: string): void => ipcRenderer.send('asr:reportTranscript', text),
+  notifyAsrTranscriptReady: (): void => ipcRenderer.send('asr:transcriptReady'),
   takeAsrTranscript: (): Promise<string> => ipcRenderer.invoke('asr:takeTranscript'),
   onAsrTranscript: (listener: (text: string) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, text: string) => listener(text)
@@ -287,16 +300,50 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     return () => ipcRenderer.off('live2d:motion', handler)
   },
 
+  // Live2D param scripts (for pet window; used by tools/agent)
+  onLive2dParamScript: (listener: (payload: unknown) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload)
+    ipcRenderer.on('live2d:paramScript', handler)
+    return () => ipcRenderer.off('live2d:paramScript', handler)
+  },
+
+  // Live2D mouse tracking target (main -> pet window)
+  onLive2dMouseTarget: (listener: Live2DMouseTargetListener): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { x: number; y: number; t?: number }) => listener(payload)
+    ipcRenderer.on('live2d:mouseTarget', handler)
+    return () => ipcRenderer.off('live2d:mouseTarget', handler)
+  },
+  // Live2D capabilities report (pet window -> main)
+  reportLive2dCapabilities: (payload: unknown): void => {
+    ipcRenderer.send('live2d:capabilities', payload)
+  },
+
   openChat: (): Promise<void> => ipcRenderer.invoke('window:openChat'),
   openSettings: (): Promise<void> => ipcRenderer.invoke('window:openSettings'),
   openMemory: (): Promise<void> => ipcRenderer.invoke('window:openMemory'),
+  setDisplayMode: (mode: DisplayMode): Promise<void> => ipcRenderer.invoke('window:setDisplayMode', mode),
   hideAll: (): Promise<void> => ipcRenderer.invoke('window:hideAll'),
   closeCurrent: (): Promise<void> => ipcRenderer.invoke('window:closeCurrent'),
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
 
+  getOrbUiState: (): Promise<{ state: OrbUiState }> => ipcRenderer.invoke('orb:getUiState'),
+  setOrbUiState: (state: OrbUiState, opts?: { focus?: boolean }): Promise<{ state: OrbUiState }> =>
+    ipcRenderer.invoke('orb:setUiState', state, opts),
+  toggleOrbUiState: (): Promise<{ state: OrbUiState }> => ipcRenderer.invoke('orb:toggleUiState'),
+  setOrbOverlayBounds: (payload: { width: number; height: number; focus?: boolean }): Promise<{ ok: true }> =>
+    ipcRenderer.invoke('orb:setOverlayBounds', payload),
+  clearOrbOverlayBounds: (payload?: { focus?: boolean }): Promise<{ ok: true }> => ipcRenderer.invoke('orb:clearOverlayBounds', payload),
+  onOrbStateChanged: (listener: (payload: { state: OrbUiState }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { state: OrbUiState }) => listener(payload)
+    ipcRenderer.on('orb:stateChanged', handler)
+    return () => ipcRenderer.off('orb:stateChanged', handler)
+  },
+  showOrbContextMenu: (point: { x: number; y: number }): Promise<{ ok: true }> => ipcRenderer.invoke('orb:showContextMenu', point),
+
   // Window drag support
-  startDrag: (): void => ipcRenderer.send('window:startDrag'),
-  stopDrag: (): void => ipcRenderer.send('window:stopDrag'),
+  startDrag: (point?: { x: number; y: number }): void => ipcRenderer.send('window:startDrag', point),
+  dragMove: (point: { x: number; y: number }): void => ipcRenderer.send('window:dragMove', point),
+  stopDrag: (point?: { x: number; y: number }): void => ipcRenderer.send('window:stopDrag', point),
 
   // Context menu
   showContextMenu: (): void => ipcRenderer.send('pet:showContextMenu'),

@@ -1,0 +1,32 @@
+{
+  "entities": [
+    {
+      "id": "example_person",
+      "name": "Example Person",
+      "type": "person",
+      "aliases": ["Example", "EP"],
+      "notes": "Replace with your own entities",
+      "emotional_weight": 0.5
+    },
+    {
+      "id": "example_ai",
+      "name": "Your AI Name",
+      "type": "ai",
+      "notes": "That's you!",
+      "relationships": []
+    }
+  ],
+  "relationship_types": [
+    "parent", "spouse", "colleague", "friend",
+    "creator", "collaborator", "author",
+    "gifted_by", "owned_by", "lives_at"
+  ],
+  "entity_types": [
+    "person", "ai", "organization", "location",
+    "object", "concept", "creative_work"
+  ],
+  "meta": {
+    "purpose": "Seed entities for Phase 3 knowledge graph",
+    "instructions": "Replace example entities with your own"
+  }
+}

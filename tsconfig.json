@@ -21,5 +21,10 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src", "electron"],
+  "exclude": [
+    "electron/rerankerService.ts",
+    "electron/semanticGroupManager.ts",
+    "src/components/SemanticGroupPanel.tsx"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

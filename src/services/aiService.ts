@@ -29,6 +29,136 @@ export const ABORTED_ERROR = '__ABORTED__'
 const EXPRESSION_TAG_PATTERN = /\[表情[：:]\s*([^\]]+)\]/g
 const MOTION_TAG_PATTERN = /\[动作[：:]\s*([^\]]+)\]/g
 
+function normalizeThinkingEffort(value: unknown): AISettings['thinkingEffort'] {
+  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
+  return 'disabled'
+}
+
+function mapEffortToBudgetTokens(effort: AISettings['thinkingEffort'], maxTokens: number): number {
+  const cap = Math.max(1024, Math.trunc(maxTokens) - 1)
+  if (effort === 'high') return Math.max(1024, Math.min(8192, cap))
+  if (effort === 'medium') return Math.max(1024, Math.min(4096, cap))
+  return Math.max(1024, Math.min(2048, cap))
+}
+
+function buildReasoningOptions(model: string, thinkingEffortRaw: unknown): Record<string, unknown> {
+  const effort = normalizeThinkingEffort(thinkingEffortRaw)
+  const modelId = String(model ?? '').trim().toLowerCase()
+
+  const isClaudeModel = modelId.includes('claude')
+  if (isClaudeModel) {
+    // OpenAI-compatible Claude/Vertex 兼容性：优先使用 legacy thinking + budget_tokens。
+    if (effort === 'disabled') return { thinking: { type: 'disabled' } }
+    return { thinking: { type: 'enabled', budget_tokens: mapEffortToBudgetTokens(effort, Number.MAX_SAFE_INTEGER) } }
+  }
+
+  const isOpenAiReasoningModel = /^(o1|o3|o4)(?:[-_.].*)?$/i.test(modelId) || modelId.startsWith('gpt-5')
+  if (effort !== 'disabled' && isOpenAiReasoningModel) {
+    // OpenAI Chat Completions 常见参数：reasoning_effort
+    return { reasoning_effort: effort }
+  }
+
+  return {}
+}
+
+function extractApiErrorMessage(errorData: unknown, status: number, statusText: string): string {
+  const fallback = `HTTP ${status}: ${statusText}`
+  const raw =
+    errorData &&
+    typeof errorData === 'object' &&
+    (errorData as { error?: { message?: unknown } }).error &&
+    typeof (errorData as { error?: { message?: unknown } }).error?.message === 'string'
+      ? ((errorData as { error?: { message?: string } }).error?.message ?? fallback)
+      : fallback
+
+  const text = String(raw ?? '').trim()
+  if (!text.startsWith('{') || !text.includes('"error"')) return text || fallback
+  try {
+    const nested = JSON.parse(text) as { error?: { message?: unknown } }
+    const nestedMsg = nested?.error?.message
+    if (typeof nestedMsg === 'string' && nestedMsg.trim()) return nestedMsg.trim()
+  } catch {
+    // 保持原始文案
+  }
+  return text || fallback
+}
+
+function isThinkingBudgetError(errorMessage: string): boolean {
+  const s = String(errorMessage ?? '')
+  return /max_tokens/i.test(s) && /thinking\.budget_tokens/i.test(s)
+}
+
+function parseBudgetTokensFromError(errorMessage: string): number | null {
+  const s = String(errorMessage ?? '')
+  const m = s.match(/thinking\.budget_tokens[^0-9]*(\d+)/i) ?? s.match(/budget_tokens[^0-9]*(\d+)/i)
+  if (!m?.[1]) return null
+  const n = Number(m[1])
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : null
+}
+
+function buildRetryPayloadForThinkingBudget(payload: Record<string, unknown>, errorMessage: string): Record<string, unknown> | null {
+  const modelId = String(payload.model ?? '').trim().toLowerCase()
+  if (!modelId.includes('claude')) return null
+
+  const currentMaxTokens = typeof payload.max_tokens === 'number' && Number.isFinite(payload.max_tokens) ? Math.trunc(payload.max_tokens) : null
+  if (currentMaxTokens == null) return null
+
+  const budgetFromPayload = (() => {
+    const thinking = payload.thinking
+    if (!thinking || typeof thinking !== 'object' || Array.isArray(thinking)) return null
+    const v = (thinking as { budget_tokens?: unknown }).budget_tokens
+    return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : null
+  })()
+
+  const budgetFromError = parseBudgetTokensFromError(errorMessage)
+  const minRequired = Math.max(
+    currentMaxTokens + 1,
+    budgetFromPayload != null ? budgetFromPayload + 1 : 0,
+    budgetFromError != null ? budgetFromError + 1 : 0,
+    16384,
+  )
+  if (minRequired <= currentMaxTokens) return null
+  return { ...payload, max_tokens: minRequired }
+}
+
+function buildChatCompletionPayload(args: {
+  model: string
+  messages: Array<{ role: ChatMessage['role']; content: ChatMessage['content'] }>
+  temperature: number
+  maxTokens: number
+  thinkingEffort: AISettings['thinkingEffort']
+  stream?: boolean
+}): Record<string, unknown> {
+  const modelId = String(args.model ?? '').trim().toLowerCase()
+  const isClaudeModel = modelId.includes('claude')
+  const effort = normalizeThinkingEffort(args.thinkingEffort)
+  const thinkingBudget = isClaudeModel && effort !== 'disabled' ? mapEffortToBudgetTokens(effort, args.maxTokens) : null
+  const requestMaxTokens =
+    isClaudeModel && thinkingBudget != null
+      ? Math.max(Math.trunc(args.maxTokens), Math.trunc(thinkingBudget) + 1)
+      : Math.trunc(args.maxTokens)
+
+  const basePayload: Record<string, unknown> = {
+    model: args.model,
+    messages: args.messages.map((m) => ({ role: m.role, content: m.content })),
+    temperature: args.temperature,
+    max_tokens: requestMaxTokens,
+  }
+
+  const reasoning = isClaudeModel
+    ? effort === 'disabled'
+      ? { thinking: { type: 'disabled' } }
+      : { thinking: { type: 'enabled', budget_tokens: thinkingBudget } }
+    : buildReasoningOptions(args.model, effort)
+  if (Object.keys(reasoning).length > 0) {
+    Object.assign(basePayload, reasoning)
+  }
+  if (args.stream) {
+    basePayload.stream = true
+  }
+  return basePayload
+}
+
 /**
  * Extract expression and motion tags from AI response text
  */
@@ -128,7 +258,7 @@ export class AIService {
    * Send a chat message and get a response
    */
   async chat(messages: ChatMessage[], options?: { signal?: AbortSignal; systemAddon?: string }): Promise<ChatResponse> {
-    const { apiKey, baseUrl, model, temperature, maxTokens, systemPrompt } = this.settings
+    const { apiKey, baseUrl, model, temperature, maxTokens, thinkingEffort, systemPrompt } = this.settings
 
     if (!apiKey) {
       return { content: '', error: '请先配置 API Key' }
@@ -142,27 +272,47 @@ export class AIService {
 
     // Add system prompt if not already present
     const messagesWithSystem = this.ensureSystemPrompt(messages, fullSystemPrompt)
+    const requestBody = buildChatCompletionPayload({
+      model,
+      messages: messagesWithSystem,
+      temperature,
+      maxTokens,
+      thinkingEffort,
+    })
 
     try {
-      const response = await fetch(`${baseUrl}/chat/completions`, {
+      let response = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          model,
-          messages: messagesWithSystem.map((m) => ({ role: m.role, content: m.content })),
-          temperature,
-          max_tokens: maxTokens,
-        }),
+        body: JSON.stringify(requestBody),
         signal: options?.signal,
       })
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
-        const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`
-        return { content: '', error: `API 错误: ${errorMessage}` }
+        const errorMessage = extractApiErrorMessage(errorData, response.status, response.statusText)
+        const retryBody = isThinkingBudgetError(errorMessage)
+          ? buildRetryPayloadForThinkingBudget(requestBody, errorMessage)
+          : null
+        if (retryBody) {
+          response = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify(retryBody),
+            signal: options?.signal,
+          })
+        }
+        if (!response.ok) {
+          const retryErrorData = await response.json().catch(() => ({}))
+          const retryErrorMessage = extractApiErrorMessage(retryErrorData, response.status, response.statusText)
+          return { content: '', error: `API 错误: ${retryErrorMessage}` }
+        }
       }
 
       const data = await response.json()
@@ -200,7 +350,7 @@ export class AIService {
     messages: ChatMessage[],
     options?: { signal?: AbortSignal; onDelta?: (delta: string) => void; systemAddon?: string },
   ): Promise<ChatResponse> {
-    const { apiKey, baseUrl, model, temperature, maxTokens, systemPrompt } = this.settings
+    const { apiKey, baseUrl, model, temperature, maxTokens, thinkingEffort, systemPrompt } = this.settings
 
     if (!apiKey) {
       return { content: '', error: '请先配置 API Key' }
@@ -211,28 +361,48 @@ export class AIService {
       fullSystemPrompt += `\n\n${options.systemAddon.trim()}`
     }
     const messagesWithSystem = this.ensureSystemPrompt(messages, fullSystemPrompt)
+    const requestBody = buildChatCompletionPayload({
+      model,
+      messages: messagesWithSystem,
+      temperature,
+      maxTokens,
+      thinkingEffort,
+      stream: true,
+    })
 
     try {
-      const response = await fetch(`${baseUrl}/chat/completions`, {
+      let response = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          model,
-          messages: messagesWithSystem.map((m) => ({ role: m.role, content: m.content })),
-          temperature,
-          max_tokens: maxTokens,
-          stream: true,
-        }),
+        body: JSON.stringify(requestBody),
         signal: options?.signal,
       })
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
-        const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`
-        return { content: '', error: `API 错误: ${errorMessage}` }
+        const errorMessage = extractApiErrorMessage(errorData, response.status, response.statusText)
+        const retryBody = isThinkingBudgetError(errorMessage)
+          ? buildRetryPayloadForThinkingBudget(requestBody, errorMessage)
+          : null
+        if (retryBody) {
+          response = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify(retryBody),
+            signal: options?.signal,
+          })
+        }
+        if (!response.ok) {
+          const retryErrorData = await response.json().catch(() => ({}))
+          const retryErrorMessage = extractApiErrorMessage(retryErrorData, response.status, response.statusText)
+          return { content: '', error: `API 错误: ${retryErrorMessage}` }
+        }
       }
 
       if (!response.body) {

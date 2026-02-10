@@ -442,7 +442,7 @@
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   overflow: auto;
 }
 
@@ -451,8 +451,8 @@
 }
 
 .ndp-msg {
-  padding: 10px 12px;
-  border-radius: var(--ndp-bubble-radius, 14px);
+  padding: 8px 10px;
+  border-radius: var(--ndp-bubble-radius, 12px);
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: var(--ndp-assistant-bubble-bg, rgba(0, 0, 0, 0.25));
   max-width: 78%;
@@ -463,6 +463,7 @@
 .ndp-msg-user {
   align-self: flex-end;
   background: var(--ndp-user-bubble-bg, rgba(80, 140, 255, 0.22));
+  padding: 6px 10px;
 }
 
 .ndp-msg-pet {
@@ -647,6 +648,23 @@
   margin-top: 10px;
 }
 
+/* Markdown：收紧默认段落/列表间距，避免气泡“看起来很大” */
+.ndp-md :where(p, ul, ol, pre, blockquote, table) {
+  margin: 0.35em 0;
+}
+
+.ndp-md :where(h1, h2, h3, h4, h5, h6) {
+  margin: 0.45em 0 0.25em;
+}
+
+.ndp-md :where(p, ul, ol, pre, blockquote, table):first-child {
+  margin-top: 0;
+}
+
+.ndp-md :where(p, ul, ol, pre, blockquote, table):last-child {
+  margin-bottom: 0;
+}
+
 .ndp-msg-attachments .ndp-msg-image,
 .ndp-msg-attachments .ndp-msg-video,
 .ndp-msg-attachments .ndp-mmvector-image {
@@ -657,6 +675,10 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.ndp-msg-image-hit {
+  cursor: zoom-in;
 }
 
 .ndp-attachment-open {
@@ -844,6 +866,10 @@
   object-fit: cover;
 }
 
+.ndp-mmvector-image-hit {
+  cursor: zoom-in;
+}
+
 .ndp-mmvector-meta {
   margin-top: 6px;
   font-size: 12px;
@@ -861,6 +887,124 @@
   padding: 4px 8px;
   border-radius: 8px;
   font-size: 12px;
+}
+
+.ndp-image-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: rgba(6, 8, 12, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.ndp-image-viewer-shell {
+  width: min(1200px, 96vw);
+  height: min(88vh, 900px);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: linear-gradient(180deg, rgba(22, 26, 34, 0.96), rgba(12, 14, 20, 0.96));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ndp-image-viewer-toolbar {
+  height: 48px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ndp-image-viewer-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ndp-image-viewer-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.66);
+}
+
+.ndp-image-viewer-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ndp-image-viewer-btn {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.24);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ndp-image-viewer-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ndp-image-viewer-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.ndp-image-viewer-img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  margin: auto;
+  object-fit: contain;
+  transform-origin: center center;
+  transition: transform 0.08s linear;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.ndp-image-viewer-nav {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+}
+
+.ndp-image-viewer-nav:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.ndp-image-viewer-tip {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.62);
 }
 
 /* Tools Center (M3.5) */

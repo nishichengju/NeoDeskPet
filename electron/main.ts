@@ -8,9 +8,11 @@ import path from 'node:path'
 import { getSettings, setSettings } from './store'
 import { createTray } from './tray'
 import { WindowManager } from './windowManager'
+import { setWindowManagerInstance } from './runtimeRefs'
 import { scanLive2dModels } from './modelScanner'
 import { listTtsOptions } from './ttsOptions'
 import { TaskService } from './taskService'
+import { setLive2dCapabilitiesFromRenderer } from './live2dToolState'
 import {
   addChatMessage,
   clearChatSession,
@@ -29,9 +31,12 @@ import {
 } from './chatStore'
 import type {
   AISettings,
+  AIProfile,
   AsrSettings,
   BubbleSettings,
+  DisplayMode,
   OrchestratorSettings,
+  OrbUiState,
   TaskPanelSettings,
   ToolSettings,
   McpSettings,
@@ -73,6 +78,16 @@ import type {
 import { MemoryService } from './memoryService'
 import { McpManager } from './mcpManager'
 import { appendDebugLog, clearDebugLog, getDebugLogPath, initDebugLog, isDebugLogEnabled } from './debugLog'
+
+// Keep renderer active when windows are occluded to avoid audio/link throttling.
+// These switches must be applied before app is ready.
+try {
+  app.commandLine.appendSwitch('disable-renderer-backgrounding')
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+} catch (_) {
+  /* ignore */
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -128,6 +143,49 @@ function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } | n
   return { mimeType, base64: payload }
 }
 
+function normalizeOpenAiBaseUrl(raw: string): string {
+  const value = String(raw ?? '').trim()
+  if (!value) return ''
+  return value.replace(/\/+$/, '')
+}
+
+function extractModelIdsFromResponse(payload: unknown): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const add = (value: unknown) => {
+    const id = String(value ?? '').trim()
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    out.push(id)
+  }
+
+  const root = payload as Record<string, unknown> | null
+  const data = Array.isArray(root?.data) ? root?.data : []
+  for (const item of data) {
+    if (typeof item === 'string') {
+      add(item)
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    add((item as Record<string, unknown>).id)
+    add((item as Record<string, unknown>).model)
+    add((item as Record<string, unknown>).name)
+  }
+
+  const models = Array.isArray(root?.models) ? root?.models : []
+  for (const item of models) {
+    if (typeof item === 'string') {
+      add(item)
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    add((item as Record<string, unknown>).id)
+    add((item as Record<string, unknown>).model)
+    add((item as Record<string, unknown>).name)
+  }
+
+  return out.slice(0, 200)
+}
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
@@ -137,6 +195,161 @@ const windowManager = new WindowManager({
   rendererDistDir: RENDERER_DIST,
   mainDistDir: MAIN_DIST,
 })
+setWindowManagerInstance(windowManager)
+
+const LIVE2D_MOUSE_POLL_MS = 33
+let live2dMouseTrackingTimer: NodeJS.Timeout | null = null
+
+let orbUiState: OrbUiState = 'ball'
+
+type DragPoint = { x: number; y: number }
+
+type WindowDragSession = {
+  senderId: number
+  win: BrowserWindow
+  isPetWindow: boolean
+  isOrbWindow: boolean
+  lockedWidth: number
+  lockedHeight: number
+  startCursor: DragPoint
+  offsetX: number
+  offsetY: number
+  activated: boolean
+  lastX: number
+  lastY: number
+}
+
+const windowDragSessions = new Map<number, WindowDragSession>()
+
+function parseDragPoint(payload: unknown): DragPoint | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const p = payload as Record<string, unknown>
+  const x = typeof p.x === 'number' ? p.x : Number.NaN
+  const y = typeof p.y === 'number' ? p.y : Number.NaN
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+  return { x, y }
+}
+
+function snapOrbToSide(win: BrowserWindow): void {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  const wa = display.workArea
+  const b = win.getBounds()
+  const centerX = b.x + b.width / 2
+  const dockLeft = centerX < wa.x + wa.width / 2
+  const margin = 8
+  const x = dockLeft ? wa.x + margin : wa.x + wa.width - b.width - margin
+  const y = Math.max(wa.y + margin, Math.min(b.y, wa.y + wa.height - b.height - margin))
+  win.setBounds({ x, y, width: b.width, height: b.height })
+  windowManager.updateOrbBallBounds()
+}
+
+function cleanupWindowDragSession(session: WindowDragSession, opts?: { snapOrb?: boolean }): void {
+  windowDragSessions.delete(session.senderId)
+
+  if (session.isPetWindow) {
+    windowManager.setPetDragging(false)
+  }
+
+  if (opts?.snapOrb && session.isOrbWindow && session.activated && !session.win.isDestroyed()) {
+    try {
+      snapOrbToSide(session.win)
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function applyWindowDragMove(session: WindowDragSession, cursor: DragPoint): void {
+  if (session.win.isDestroyed()) {
+    cleanupWindowDragSession(session)
+    return
+  }
+
+  // 拖动期间强制锁定窗口尺寸，避免异常 resize 造成“模型越拖越大”。
+  const boundsNow = session.win.getBounds()
+  if (boundsNow.width !== session.lockedWidth || boundsNow.height !== session.lockedHeight) {
+    session.win.setBounds(
+      {
+        x: boundsNow.x,
+        y: boundsNow.y,
+        width: session.lockedWidth,
+        height: session.lockedHeight,
+      },
+      false,
+    )
+  }
+
+  if (!session.activated) {
+    const dx = cursor.x - session.startCursor.x
+    const dy = cursor.y - session.startCursor.y
+    if (dx * dx + dy * dy < 10 * 10) return
+    session.activated = true
+  }
+
+  const nextX = Math.round(cursor.x - session.offsetX)
+  const nextY = Math.round(cursor.y - session.offsetY)
+  if (nextX === session.lastX && nextY === session.lastY) return
+  // 拖动阶段仅更新位置，避免 setBounds 带来的重排与闪烁。
+  session.win.setPosition(nextX, nextY, false)
+  session.lastX = nextX
+  session.lastY = nextY
+}
+
+function broadcastOrbStateChanged(state: OrbUiState): void {
+  for (const win of windowManager.getAllWindows()) {
+    if (win.isDestroyed()) continue
+    win.webContents.send('orb:stateChanged', { state })
+  }
+}
+
+function startLive2dMouseTrackingPump(): void {
+  if (live2dMouseTrackingTimer) return
+
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
+  let lastCursor: { x: number; y: number } | null = null
+  let lastMovedAt = 0
+
+  live2dMouseTrackingTimer = setInterval(() => {
+    try {
+      const settings = getSettings()
+      if (settings.live2dMouseTrackingEnabled === false) return
+
+      const petWin = windowManager.getPetWindow()
+      if (!petWin || petWin.isDestroyed()) return
+
+      const cursor = screen.getCursorScreenPoint()
+      const bounds =
+        typeof (petWin as unknown as { getContentBounds?: () => { x: number; y: number; width: number; height: number } }).getContentBounds ===
+        'function'
+          ? (petWin as unknown as { getContentBounds: () => { x: number; y: number; width: number; height: number } }).getContentBounds()
+          : petWin.getBounds()
+
+      const w = Math.max(1, Math.trunc(bounds.width))
+      const h = Math.max(1, Math.trunc(bounds.height))
+      const cx = bounds.x + w / 2
+      const cy = bounds.y + h / 2
+
+      // Only track cursor when it is inside Live2D window bounds.
+      const inside = cursor.x >= bounds.x && cursor.x <= bounds.x + w && cursor.y >= bounds.y && cursor.y <= bounds.y + h
+
+      // Follow cursor only when there is recent mouse movement.
+      const now = Date.now()
+      if (lastCursor && (lastCursor.x !== cursor.x || lastCursor.y !== cursor.y)) lastMovedAt = now
+      lastCursor = cursor
+      const movedRecently = now - lastMovedAt < 240
+
+      const active = inside && movedRecently
+      const nx = active ? clamp((cursor.x - cx) / (w / 2), -1, 1) : 0
+      const ny = active ? clamp((cursor.y - cy) / (h / 2), -1, 1) : 0
+
+      petWin.webContents.send('live2d:mouseTarget', { x: nx, y: ny, t: Date.now() })
+    } catch {
+      // ignore
+    }
+  }, LIVE2D_MOUSE_POLL_MS)
+
+  ;(live2dMouseTrackingTimer as unknown as { unref?: () => void }).unref?.()
+}
 
 let chatAttachmentServer: http.Server | null = null
 let chatAttachmentServerPort: number | null = null
@@ -253,6 +466,7 @@ async function ensureChatAttachmentServer(): Promise<number> {
 
 let registeredAsrHotkey: string | null = null
 let pendingAsrTranscript: string[] = []
+let asrTranscriptReadyWebContentsId: number | null = null
 let lastContextUsage: ContextUsageSnapshot | null = null
 
 function syncAsrHotkey() {
@@ -324,7 +538,7 @@ function broadcastMcpChanged(payload?: McpStateSnapshot) {
 }
 
 function registerIpc() {
-  // Debug log（用于定位“流式工具调用最后一刻回退/工具卡堆叠”等恶性问题）
+  // Debug log：导出调试日志路径并支持清空
   ipcMain.handle('debug:getPath', () => getDebugLogPath())
   ipcMain.handle('debug:clear', () => {
     clearDebugLog()
@@ -387,12 +601,136 @@ function registerIpc() {
     return getSettings()
   })
 
+  ipcMain.handle('settings:setLive2dMouseTrackingEnabled', (_event, enabled: boolean) => {
+    setSettings({ live2dMouseTrackingEnabled: enabled !== false })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
+  ipcMain.handle('settings:setLive2dIdleSwayEnabled', (_event, enabled: boolean) => {
+    setSettings({ live2dIdleSwayEnabled: enabled !== false })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
   // AI settings handlers
   ipcMain.handle('settings:setAISettings', (_event, aiSettings: Partial<AISettings>) => {
     const current = getSettings()
     setSettings({ ai: { ...current.ai, ...aiSettings } })
     broadcastSettingsChanged()
     return getSettings()
+  })
+
+  ipcMain.handle(
+    'settings:saveAIProfile',
+    (
+      _event,
+      payload: { id?: string; name: string; apiKey: string; baseUrl: string; model: string } | null | undefined,
+    ) => {
+      const current = getSettings()
+      const now = Date.now()
+      const idRaw = String(payload?.id ?? '').trim()
+      const id = idRaw || `api_${randomUUID().slice(0, 8)}`
+      const name = String(payload?.name ?? '').trim() || id
+      const nextProfile: AIProfile = {
+        id,
+        name,
+        apiKey: String(payload?.apiKey ?? '').trim(),
+        baseUrl: String(payload?.baseUrl ?? '').trim(),
+        model: String(payload?.model ?? '').trim(),
+        createdAt: now,
+        updatedAt: now,
+      }
+
+      const list = Array.isArray(current.aiProfiles) ? current.aiProfiles : []
+      const idx = list.findIndex((p) => p.id === id)
+      if (idx >= 0) {
+        nextProfile.createdAt = list[idx]?.createdAt ?? now
+      }
+      const nextProfiles =
+        idx >= 0
+          ? [...list.slice(0, idx), nextProfile, ...list.slice(idx + 1)]
+          : [nextProfile, ...list].slice(0, 20)
+
+      setSettings({
+        ai: { ...current.ai, apiKey: nextProfile.apiKey, baseUrl: nextProfile.baseUrl, model: nextProfile.model },
+        aiProfiles: nextProfiles,
+        activeAiProfileId: id,
+      })
+      broadcastSettingsChanged()
+      return getSettings()
+    },
+  )
+
+  ipcMain.handle('settings:deleteAIProfile', (_event, idRaw: string) => {
+    const current = getSettings()
+    const id = String(idRaw ?? '').trim()
+    if (!id) return current
+    const list = Array.isArray(current.aiProfiles) ? current.aiProfiles : []
+    const nextProfiles = list.filter((p) => p.id !== id)
+    const deletingActive = current.activeAiProfileId === id
+    const nextActive = deletingActive ? nextProfiles[0]?.id ?? '' : current.activeAiProfileId ?? ''
+    const nextActiveProfile = nextProfiles.find((p) => p.id === nextActive)
+
+    setSettings({
+      aiProfiles: nextProfiles,
+      activeAiProfileId: nextActive,
+      ...(deletingActive && nextActiveProfile
+        ? {
+            ai: {
+              ...current.ai,
+              apiKey: nextActiveProfile.apiKey,
+              baseUrl: nextActiveProfile.baseUrl,
+              model: nextActiveProfile.model,
+            },
+          }
+        : {}),
+    })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
+  ipcMain.handle('settings:applyAIProfile', (_event, idRaw: string) => {
+    const current = getSettings()
+    const id = String(idRaw ?? '').trim()
+    if (!id) return current
+    const profile = (Array.isArray(current.aiProfiles) ? current.aiProfiles : []).find((p) => p.id === id)
+    if (!profile) return current
+    setSettings({
+      ai: { ...current.ai, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model },
+      activeAiProfileId: id,
+    })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
+  ipcMain.handle('ai:listModels', async (_event, payload: { apiKey?: string; baseUrl?: string } | null | undefined) => {
+    const current = getSettings().ai
+    const baseUrl = normalizeOpenAiBaseUrl(String(payload?.baseUrl ?? '').trim() || current.baseUrl)
+    const apiKey = String(payload?.apiKey ?? '').trim() || String(current.apiKey ?? '').trim()
+    if (!baseUrl) return { ok: false, models: [] as string[], error: 'baseUrl 不能为空' }
+
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 15000)
+    try {
+      const headers: Record<string, string> = { Accept: 'application/json' }
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+      const res = await fetch(`${baseUrl}/models`, { method: 'GET', headers, signal: ac.signal })
+      if (!res.ok) {
+        return { ok: false, models: [] as string[], error: `HTTP ${res.status} ${res.statusText}` }
+      }
+      const json = (await res.json().catch(() => null)) as unknown
+      const models = extractModelIdsFromResponse(json)
+      if (models.length === 0) {
+        return { ok: false, models: [] as string[], error: '未获取到模型列表' }
+      }
+      return { ok: true, models }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, models: [] as string[], error: msg }
+    } finally {
+      clearTimeout(timer)
+    }
   })
 
   ipcMain.handle('settings:setBubbleSettings', (_event, bubbleSettings: Partial<BubbleSettings>) => {
@@ -874,14 +1212,14 @@ function registerIpc() {
   const validateTtsUrl = (rawUrl: string): URL => {
     const url = new URL(rawUrl)
     const ttsBase = (getSettings().tts?.baseUrl ?? '').trim().replace(/\/+$/, '')
-    if (!ttsBase) throw new Error('TTS baseUrl 未配置')
+    if (!ttsBase) throw new Error('TTS baseUrl not configured')
     const base = new URL(ttsBase)
     if (url.origin !== base.origin) {
-      throw new Error(`TTS 请求仅允许访问 tts.baseUrl 同源：${base.origin}`)
+      throw new Error(`TTS request must be same-origin with tts.baseUrl: ${base.origin}`)
     }
     const allowPaths = new Set(['/tts', '/set_gpt_weights', '/set_sovits_weights'])
     if (!allowPaths.has(url.pathname)) {
-      throw new Error(`TTS 请求路径不允许：${url.pathname}`)
+      throw new Error(`TTS 请求路径不允许: ${url.pathname}`)
     }
     return url
   }
@@ -937,7 +1275,7 @@ function registerIpc() {
     },
   )
 
-  // TTS HTTP streaming proxy: 主进程拉取 /tts 的流式音频，把 bytes chunk 转发给 renderer
+  // TTS HTTP 流式代理：将响应分块通过 IPC 转发给 renderer。
   const ttsHttpStreams = new Map<string, AbortController>()
   const makeStreamId = (): string => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
@@ -990,7 +1328,7 @@ function registerIpc() {
           }
 
           if (!res.body) {
-            safeSend('tts:httpStreamError', { streamId, error: 'TTS 流式响应为空（response.body 不存在）' })
+            safeSend('tts:httpStreamError', { streamId, error: 'TTS response body is empty' })
             safeSend('tts:httpStreamDone', { streamId })
             return
           }
@@ -1000,7 +1338,7 @@ function registerIpc() {
             const { done, value } = await reader.read()
             if (done) break
             if (!value) continue
-            // Electron IPC 支持直接传 Uint8Array/Buffer
+            // Electron IPC 可直接传 Uint8Array/Buffer，renderer 侧按二进制拼接。
             safeSend('tts:httpStreamChunk', { streamId, chunk: value })
           }
 
@@ -1047,6 +1385,14 @@ function registerIpc() {
     }
   })
 
+  // Live2D capabilities - report from pet window (for tools/agent)
+  ipcMain.on('live2d:capabilities', (_event, payload: unknown) => {
+    const res = setLive2dCapabilitiesFromRenderer(payload)
+    if (!res.ok) {
+      console.warn('[Live2D] capabilities report rejected:', res.error)
+    }
+  })
+
   // Bubble message - forward from chat window to pet window
   ipcMain.on('bubble:sendMessage', (_event, message: string) => {
     const petWin = windowManager.getPetWindow()
@@ -1055,7 +1401,7 @@ function registerIpc() {
     }
   })
 
-  // ASR transcript: forward from pet window to chat window (manual mode填入输入框)
+  // ASR 文本转发：从桌宠窗口发往聊天窗口（手动模式也会使用）。
   ipcMain.on('asr:reportTranscript', (_event, text: string) => {
     const cleaned = String(text ?? '').trim()
     if (!cleaned) return
@@ -1069,7 +1415,18 @@ function registerIpc() {
       chatWin = windowManager.ensureChatWindow({ show: false, focus: false })
     }
 
-    const canSendNow = Boolean(chatWin && !chatWin.isDestroyed() && !chatWin.webContents.isLoading())
+    const chatWc = chatWin && !chatWin.isDestroyed() ? chatWin.webContents : null
+    if (chatWc?.isLoading()) {
+      asrTranscriptReadyWebContentsId = null
+    }
+
+    const canSendNow = Boolean(
+      chatWin &&
+        !chatWin.isDestroyed() &&
+        chatWc &&
+        !chatWc.isLoading() &&
+        asrTranscriptReadyWebContentsId === chatWc.id,
+    )
     if (canSendNow) {
       chatWin?.webContents.send('asr:transcript', cleaned)
       return
@@ -1082,6 +1439,13 @@ function registerIpc() {
     const text = pendingAsrTranscript.join(' ').trim()
     pendingAsrTranscript = []
     return text
+  })
+
+  ipcMain.on('asr:transcriptReady', (event) => {
+    const chatWin = windowManager.getChatWindow()
+    if (!chatWin || chatWin.isDestroyed()) return
+    if (event.sender.id !== chatWin.webContents.id) return
+    asrTranscriptReadyWebContentsId = event.sender.id
   })
 
   // TTS segmented sync: forward utterance segments to pet window
@@ -1137,6 +1501,19 @@ function registerIpc() {
   ipcMain.handle('window:openMemory', () => {
     windowManager.ensureMemoryWindow()
   })
+
+  // 显示模式切换入口：支持 live2d / orb / hidden。
+  ipcMain.handle('window:setDisplayMode', (_event, modeRaw: unknown) => {
+    const mode = typeof modeRaw === 'string' ? (modeRaw.trim() as DisplayMode) : ''
+    if (mode !== 'live2d' && mode !== 'orb' && mode !== 'hidden') return
+    windowManager.setDisplayMode(mode)
+    if (mode === 'orb') {
+      // 切换到 orb 时同步 Orb UI 状态，避免窗口状态不一致。
+      broadcastOrbStateChanged(orbUiState)
+      windowManager.setOrbUiState(orbUiState, { focus: true })
+    }
+    broadcastSettingsChanged()
+  })
   ipcMain.handle('window:hideAll', () => {
     windowManager.hideAll()
   })
@@ -1153,131 +1530,125 @@ function registerIpc() {
     app.quit()
   })
 
-  // Window drag support - trigger native window move
-  ipcMain.on('window:startDrag', (event) => {
+  // =====================
+  // Orb（球/条/面板）IPC
+  // =====================
+
+  ipcMain.handle('orb:getUiState', () => {
+    return { state: orbUiState }
+  })
+
+  ipcMain.handle('orb:setUiState', (_event, stateRaw: unknown, optsRaw: unknown) => {
+    const state = typeof stateRaw === 'string' ? (stateRaw.trim() as OrbUiState) : ''
+    if (state !== 'ball' && state !== 'bar' && state !== 'panel') return { state: orbUiState }
+
+    const opts = optsRaw && typeof optsRaw === 'object' && !Array.isArray(optsRaw) ? (optsRaw as { focus?: unknown }) : null
+    const focus = opts ? Boolean(opts.focus) : false
+
+    orbUiState = state
+    broadcastOrbStateChanged(state)
+    windowManager.setOrbUiState(state, { focus })
+    return { state }
+  })
+
+  ipcMain.handle('orb:toggleUiState', () => {
+    const next: OrbUiState = orbUiState === 'ball' ? 'bar' : orbUiState === 'bar' ? 'panel' : 'ball'
+    orbUiState = next
+    broadcastOrbStateChanged(next)
+    windowManager.setOrbUiState(next, { focus: true })
+    return { state: next }
+  })
+
+  ipcMain.handle('orb:setOverlayBounds', (_event, payload: unknown) => {
+    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null
+    const width = typeof p?.width === 'number' ? p.width : Number.NaN
+    const height = typeof p?.height === 'number' ? p.height : Number.NaN
+    const focus = Boolean(p?.focus)
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return { ok: true }
+    windowManager.setOrbOverlayBounds({ width, height, focus })
+    return { ok: true }
+  })
+
+  ipcMain.handle('orb:clearOverlayBounds', (_event, payload: unknown) => {
+    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null
+    const focus = Boolean(p?.focus)
+    windowManager.clearOrbOverlayBounds({ focus })
+    return { ok: true }
+  })
+
+  ipcMain.handle('orb:showContextMenu', (_event, point: unknown) => {
+    const p = point && typeof point === 'object' && !Array.isArray(point) ? (point as Record<string, unknown>) : null
+    const x = typeof p?.x === 'number' ? p.x : Number.NaN
+    const y = typeof p?.y === 'number' ? p.y : Number.NaN
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: true }
+    windowManager.showOrbContextMenu({ x, y })
+    return { ok: true }
+  })
+
+  // Window drag support (event-driven): renderer sends start/move/stop with screen coords.
+  ipcMain.on('window:startDrag', (event, payload: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender)
-    if (win && !win.isDestroyed()) {
-      const petWin = windowManager.getPetWindow()
-      const isPetWindow = Boolean(petWin && petWin.id === win.id)
-      if (isPetWindow) {
-        windowManager.setPetDragging(true)
-      }
+    if (!win || win.isDestroyed()) return
 
-      // Get current mouse position relative to window
-      const startMousePos = screen.getCursorScreenPoint()
-      const winBounds = win.getBounds()
-      const lockSize = isPetWindow
-      const fixedWidth = winBounds.width
-      const fixedHeight = winBounds.height
+    const senderId = event.sender.id
+    const oldSession = windowDragSessions.get(senderId)
+    if (oldSession) cleanupWindowDragSession(oldSession)
 
-      // 记录初始 offset：拖拽时保持“按住点”不偏移，避免出现模型/面板相对位置漂移
-      const dragOffsetX = startMousePos.x - winBounds.x
-      const dragOffsetY = startMousePos.y - winBounds.y
+    const parsedCursor = parseDragPoint(payload)
+    const winBounds = win.getBounds()
+    const petWin = windowManager.getPetWindow()
+    const orbWin = windowManager.getOrbWindow()
+    const isPetWindow = Boolean(petWin && petWin.id === win.id)
+    const isOrbWindow = Boolean(orbWin && orbWin.id === win.id)
+    const cursor = parsedCursor ?? screen.getCursorScreenPoint()
+    const lockedWidth = winBounds.width
+    const lockedHeight = winBounds.height
 
-      // 避免点击/微抖触发拖拽（否则会出现“按住一下就偏移”的错觉）
-      const activateThresholdSq = 10 * 10
-      let draggingActivated = false
-      let lastPos = winBounds
-      let enforcingSize = false
-
-      // Windows 在跨屏/缩放比切换时可能会对窗口触发 DPI resize，导致 renderer 里百分比定位的 overlay 逐步“往右下漂移”。
-      // 这里在拖拽期间锁定窗口尺寸，只允许改变 x/y；从源头消灭尺寸抖动带来的视觉漂移/模型缩放跳变。
-      const enforceFixedSize = () => {
-        if (!lockSize) return
-        if (enforcingSize) return
-        if (win.isDestroyed()) return
-
-        enforcingSize = true
-        try {
-          const b = win.getBounds()
-          if (b.width === fixedWidth && b.height === fixedHeight) return
-          win.setBounds({ x: b.x, y: b.y, width: fixedWidth, height: fixedHeight }, false)
-          lastPos = { ...lastPos, x: b.x, y: b.y, width: fixedWidth, height: fixedHeight }
-        } finally {
-          enforcingSize = false
-        }
-      }
-
-      const onResizeDuringDrag = () => enforceFixedSize()
-      if (lockSize) win.on('resize', onResizeDuringDrag)
-
-      // Track mouse movement
-      const onMouseMove = () => {
-        if (win.isDestroyed()) return
-        const newMousePos = screen.getCursorScreenPoint()
-
-        if (!draggingActivated) {
-          const dx = newMousePos.x - startMousePos.x
-          const dy = newMousePos.y - startMousePos.y
-          if (dx * dx + dy * dy < activateThresholdSq) return
-          draggingActivated = true
-        }
-
-        const nextX = newMousePos.x - dragOffsetX
-        const nextY = newMousePos.y - dragOffsetY
-        if (nextX === lastPos.x && nextY === lastPos.y) return
-        if (lockSize) {
-          if (!enforcingSize) {
-            enforcingSize = true
-            try {
-              win.setBounds({ x: nextX, y: nextY, width: fixedWidth, height: fixedHeight }, false)
-            } finally {
-              enforcingSize = false
-            }
-          }
-        } else {
-          win.setPosition(nextX, nextY)
-        }
-        lastPos = { ...lastPos, x: nextX, y: nextY }
-      }
-
-      // Use a polling approach for smooth dragging
-      let fallbackTimer: ReturnType<typeof setTimeout> | null = null
-      const interval = setInterval(onMouseMove, 16) // ~60fps
-
-      // Stop dragging on mouse up
-      const stopDrag = () => {
-        clearInterval(interval)
-        if (fallbackTimer) clearTimeout(fallbackTimer)
-        fallbackTimer = null
-        if (lockSize) {
-          enforceFixedSize()
-          // 拖拽结束后有时会延迟触发一次 DPI resize，这里保留短暂兜底，避免松手后尺寸突然变化
-          setTimeout(() => {
-            if (win.isDestroyed()) return
-            enforceFixedSize()
-            win.removeListener('resize', onResizeDuringDrag)
-          }, 500)
-        }
-        const petWin = windowManager.getPetWindow()
-        if (petWin && petWin.id === win.id) {
-          windowManager.setPetDragging(false)
-        }
-      }
-
-      // Listen for mouse up via IPC
-      ipcMain.once('window:stopDrag', stopDrag)
-
-      // Also stop after a timeout as fallback
-      fallbackTimer = setTimeout(() => {
-        clearInterval(interval)
-        if (lockSize) {
-          win.removeListener('resize', onResizeDuringDrag)
-          enforceFixedSize()
-        }
-        ipcMain.removeListener('window:stopDrag', stopDrag)
-        const petWin = windowManager.getPetWindow()
-        if (petWin && petWin.id === win.id) {
-          windowManager.setPetDragging(false)
-        }
-      }, 30000)
+    if (isPetWindow) {
+      windowManager.setPetDragging(true)
     }
+
+    windowDragSessions.set(senderId, {
+      senderId,
+      win,
+      isPetWindow,
+      isOrbWindow,
+      lockedWidth,
+      lockedHeight,
+      startCursor: { x: cursor.x, y: cursor.y },
+      offsetX: cursor.x - winBounds.x,
+      offsetY: cursor.y - winBounds.y,
+      activated: false,
+      lastX: winBounds.x,
+      lastY: winBounds.y,
+    })
   })
 
-  ipcMain.on('window:stopDrag', () => {
-    windowManager.setPetDragging(false)
+  ipcMain.on('window:dragMove', (event, payload: unknown) => {
+    const session = windowDragSessions.get(event.sender.id)
+    if (!session) return
+    const cursor = parseDragPoint(payload) ?? screen.getCursorScreenPoint()
+    applyWindowDragMove(session, cursor)
   })
 
+  ipcMain.on('window:stopDrag', (event, payload: unknown) => {
+    const session = windowDragSessions.get(event.sender.id)
+    if (!session) {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const petWin = windowManager.getPetWindow()
+      if (win && petWin && win.id === petWin.id) {
+        windowManager.setPetDragging(false)
+      }
+      return
+    }
+
+    const cursor = parseDragPoint(payload)
+    if (cursor) {
+      applyWindowDragMove(session, cursor)
+    }
+
+    cleanupWindowDragSession(session, { snapOrb: true })
+  })
   // Pet window context menu
   ipcMain.on('pet:showContextMenu', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -1286,16 +1657,30 @@ function registerIpc() {
     const settings = getSettings()
     const template: Electron.MenuItemConstructorOptions[] = [
       {
-        label: '打开聊天',
+        label: '\u6253\u5f00\u804a\u5929',
         click: () => windowManager.ensureChatWindow(),
       },
       {
-        label: '设置',
+        label: '\u8bbe\u7f6e',
         click: () => windowManager.ensureSettingsWindow(),
+      },
+      {
+        label: '\u5207\u6362\u5230\u60ac\u6d6e\u7403',
+        click: () => {
+          windowManager.setDisplayMode('orb')
+          broadcastSettingsChanged()
+        },
+      },
+      {
+        label: '\u4ec5\u6258\u76d8\u9690\u85cf',
+        click: () => {
+          windowManager.setDisplayMode('hidden')
+          broadcastSettingsChanged()
+        },
       },
       { type: 'separator' },
       {
-        label: '置顶显示',
+        label: '\u7f6e\u9876\u663e\u793a',
         type: 'checkbox',
         checked: settings.alwaysOnTop,
         click: () => {
@@ -1304,7 +1689,7 @@ function registerIpc() {
         },
       },
       {
-        label: 'TTS 语音播报',
+        label: 'TTS \u8bed\u97f3\u64ad\u62a5',
         type: 'checkbox',
         checked: settings.tts?.enabled ?? false,
         click: () => {
@@ -1314,7 +1699,7 @@ function registerIpc() {
         },
       },
       {
-        label: '语音识别（ASR）',
+        label: '\u8bed\u97f3\u8bc6\u522b\uff08ASR\uff09',
         type: 'checkbox',
         checked: settings.asr?.enabled ?? false,
         click: () => {
@@ -1325,11 +1710,11 @@ function registerIpc() {
       },
       { type: 'separator' },
       {
-        label: '隐藏宠物',
+        label: '\u9690\u85cf\u5ba0\u7269',
         click: () => windowManager.hideAll(),
       },
       {
-        label: '退出',
+        label: '\u9000\u51fa',
         click: () => app.quit(),
       },
     ]
@@ -1365,8 +1750,20 @@ app.on('window-all-closed', () => {
   }
 })
 
+app.on('before-quit', () => {
+  try {
+    windowManager.setAppQuitting(true)
+  } catch (_) {
+    /* ignore */
+  }
+})
+
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  if (live2dMouseTrackingTimer) {
+    clearInterval(live2dMouseTrackingTimer)
+    live2dMouseTrackingTimer = null
+  }
   void mcpManager?.sync({ enabled: false, servers: [] })
 })
 
@@ -1423,7 +1820,7 @@ app.whenReady().then(() => {
   const maintenanceTimer = setInterval(runMemoryMaintenance, 6 * 60 * 60_000)
   ;(maintenanceTimer as unknown as { unref?: () => void }).unref?.()
 
-  // M5: Tag/向量索引维护（小批量后台执行，避免阻塞聊天）
+  // M5：Tag / Vector / KG 索引维护任务。
   let tagMaintRunning = false
   const runTagMaintenance = () => {
     try {
@@ -1503,7 +1900,13 @@ app.whenReady().then(() => {
 
   registerIpc()
 
-  windowManager.ensurePetWindow()
+  // 启动后按 displayMode 恢复窗口形态，并在 orb 模式恢复 Orb UI 状态。
+  windowManager.applyDisplayMode()
+  if (getSettings().displayMode === 'orb') {
+    broadcastOrbStateChanged(orbUiState)
+    windowManager.setOrbUiState(orbUiState, { focus: false })
+  }
+  startLive2dMouseTrackingPump()
   createTray(windowManager)
 
   globalShortcut.register('CommandOrControl+Alt+C', () => {
@@ -1519,3 +1922,4 @@ app.whenReady().then(() => {
   syncAsrHotkey()
   broadcastSettingsChanged()
 })
+
