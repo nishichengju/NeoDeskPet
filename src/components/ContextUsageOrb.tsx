@@ -14,7 +14,7 @@ export function ContextUsageOrb(props: {
   interactionDisabled?: boolean
 }) {
   const { enabled, usage, position, onPositionChange } = props
-  const title = props.title ?? 'Context window:'
+  const title = props.title ?? '上下文窗口'
   const interactionDisabled = props.interactionDisabled ?? false
   const positionX = position.x
   const positionY = position.y
@@ -103,10 +103,21 @@ export function ContextUsageOrb(props: {
   const usedText = useMemo(() => {
     const used = usage?.usedTokens ?? 0
     const max = usage?.maxContextTokens ?? 0
-    return `${formatK(used)} / ${formatK(max)} tokens used`
+    return `${formatK(used)} / ${formatK(max)}`
   }, [usage?.maxContextTokens, usage?.usedTokens])
 
+  const remainingText = useMemo(() => {
+    const used = Math.max(0, usage?.usedTokens ?? 0)
+    const max = Math.max(0, usage?.maxContextTokens ?? 0)
+    const reserve = Math.max(0, usage?.outputReserveTokens ?? 0)
+    const remaining = Math.max(0, max - used)
+    return reserve > 0 ? `${formatK(remaining)}（其中输出预留 ${formatK(reserve)}）` : formatK(remaining)
+  }, [usage?.maxContextTokens, usage?.outputReserveTokens, usage?.usedTokens])
+
   if (!enabled) return null
+
+  const tooltipX: 'left' | 'right' = localPos.x >= 72 ? 'left' : 'right'
+  const tooltipY: 'top' | 'bottom' = localPos.y <= 22 ? 'bottom' : 'top'
 
   const onPointerDown = (e: PointerEvent) => {
     if (interactionDisabled) return
@@ -188,6 +199,8 @@ export function ContextUsageOrb(props: {
       ref={orbRef}
       className={`ndp-context-orb${interactionDisabled ? ' ndp-context-orb--window-dragging' : ''}`}
       data-no-window-drag="true"
+      data-tooltip-x={tooltipX}
+      data-tooltip-y={tooltipY}
       style={
         {
           left: `calc(${localPos.x}% - 8px)`,
@@ -220,9 +233,10 @@ export function ContextUsageOrb(props: {
         <div className="ndp-context-orb-tooltip">
           <div className="ndp-context-orb-tooltip-title">{title}</div>
           <div className="ndp-context-orb-tooltip-line">
-            <span className="ndp-context-orb-tooltip-strong">{pct}%</span> full
+            <span className="ndp-context-orb-tooltip-strong">{pct}%</span> 已使用
           </div>
-          <div className="ndp-context-orb-tooltip-line">{usedText}</div>
+          <div className="ndp-context-orb-tooltip-line">用量：{usedText}</div>
+          <div className="ndp-context-orb-tooltip-line">剩余：{remainingText}</div>
         </div>
       ) : null}
     </div>

@@ -1732,6 +1732,27 @@ function registerIpc() {
     windowManager.setPetOverlayHover(Boolean(hovering))
   })
 
+  ipcMain.on(
+    'pet:setOverlayRects',
+    (
+      event,
+      rects:
+        | {
+            taskPanel?:
+              | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
+              | null
+          }
+        | null
+        | undefined,
+    ) => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const petWin = windowManager.getPetWindow()
+      if (!win || !petWin) return
+      if (win.id !== petWin.id) return
+      windowManager.setPetOverlayRects(rects)
+    },
+  )
+
   // Dynamic mouse events ignore for transparent click-through
   ipcMain.on('window:setIgnoreMouseEvents', (event, ignore: boolean, forward: boolean) => {
     const win = BrowserWindow.fromWebContents(event.sender)

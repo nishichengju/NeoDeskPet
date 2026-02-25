@@ -42,6 +42,11 @@ export type OrchestratorSettings = {
   toolCallingEnabled: boolean // Enable tool calling (LLM can start tool tasks)
   toolCallingMode: 'auto' | 'native' | 'text' // auto=prefer native tools; native=force native; text=force text protocol
 
+  skillEnabled: boolean // Enable skill system (available_skills prompt + /skill commands)
+  skillAllowModelInvocation: boolean // Inject available_skills for model self-selection
+  skillManagedDir: string // Optional managed skill directory override; empty=default path
+  skillVerboseLogging: boolean // Emit skill match/load/conflict logs into agent task log
+
   toolUseCustomAi: boolean // Use a dedicated LLM config for tool/agent execution
   toolAiApiKey: string
   toolAiBaseUrl: string
@@ -123,6 +128,10 @@ export type WindowBounds = {
 }
 
 export type AIThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
+export type AIReasoningProvider = 'auto' | 'openai' | 'claude' | 'gemini'
+export type OpenAIReasoningEffort = 'disabled' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+export type ClaudeThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
+export type GeminiThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
 
 export type AISettings = {
   apiKey: string
@@ -131,7 +140,11 @@ export type AISettings = {
   temperature: number // 0.0 - 2.0
   maxTokens: number // Max output tokens
   maxContextTokens: number // Max context tokens
-  thinkingEffort: AIThinkingEffort // 推理/思考强度：disabled/low/medium/high
+  thinkingEffort: AIThinkingEffort // 兼容旧配置的统一思考强度（建议使用下方 provider 专属配置）
+  thinkingProvider: AIReasoningProvider // auto=按模型推断；也可手动指定 openai/claude/gemini
+  openaiReasoningEffort: OpenAIReasoningEffort // OpenAI 兼容 reasoning_effort（含 GPT-5 的 minimal/xhigh）
+  claudeThinkingEffort: ClaudeThinkingEffort // Claude（兼容网关）映射为 thinking.budget_tokens
+  geminiThinkingEffort: GeminiThinkingEffort // Gemini（OpenAI 兼容）映射为 reasoning_effort
   systemPrompt: string
   enableVision: boolean // Enable image/vision capability (model-dependent)
   enableChatStreaming: boolean // Enable streaming chat output (SSE)

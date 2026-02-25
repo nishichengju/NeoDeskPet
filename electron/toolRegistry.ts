@@ -143,6 +143,111 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     version: '1.0',
   },
   {
+    name: 'skill.list',
+    callName: 'ndp_skill_list',
+    description: '列出当前已加载的 Skills、命令映射与冲突诊断信息（受设置里的 Skill 开关/目录影响）。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        includeCommands: { type: 'boolean', description: '是否返回 slash 命令映射（默认 true）' },
+        maxItems: { type: 'integer', description: '最多返回多少条 skill（默认 100）', minimum: 1, maximum: 500 },
+      },
+    },
+    examples: [{ title: '列出当前技能', input: { includeCommands: true, maxItems: 50 } }],
+    risk: 'low',
+    cost: 'low',
+    tags: ['skill', 'list', 'inspect'],
+    version: '1.0',
+  },
+  {
+    name: 'skill.refresh',
+    callName: 'ndp_skill_refresh',
+    description: '刷新 Skill 注册表缓存（安装/修改技能后无需重启即可生效）。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {},
+    },
+    examples: [{ title: '刷新技能缓存', input: {} }],
+    risk: 'low',
+    cost: 'low',
+    tags: ['skill', 'refresh'],
+    version: '1.0',
+  },
+  {
+    name: 'skill.install',
+    callName: 'ndp_skill_install',
+    description: '从 Git 仓库安装 Skill 到托管目录（支持 clone；已存在时可 pull 更新），安装后自动刷新 Skill 缓存。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        repoUrl: { type: 'string', description: 'Git 仓库 URL（推荐 https://github.com/...）' },
+        dirName: { type: 'string', description: '可选：目标目录名（不传则由仓库名推断）' },
+        branch: { type: 'string', description: '可选：指定分支 clone/pull' },
+        updateIfExists: { type: 'boolean', description: '目录已存在时是否 git pull 更新（默认 true）' },
+      },
+      required: ['repoUrl'],
+    },
+    examples: [
+      { title: '安装 GitHub Skill', input: { repoUrl: 'https://github.com/owner/repo' } },
+      { title: '指定目录并更新已有仓库', input: { repoUrl: 'https://github.com/owner/repo', dirName: 'my-skill', updateIfExists: true } },
+    ],
+    risk: 'medium',
+    cost: 'medium',
+    tags: ['skill', 'install', 'git'],
+    version: '1.0',
+  },
+  {
+    name: 'file.read',
+    callName: 'ndp_file_read',
+    description: '读取本地文本文件（只读，受限目录白名单：工作区与 userData）。适合读取日志、配置、生成结果等文本。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string', description: '文件路径（相对工作区或绝对路径）' },
+        maxChars: { type: 'integer', description: '返回最大字符数（默认 12000）', minimum: 100, maximum: 60000 },
+        offset: { type: 'integer', description: '从第几个字符开始读取（默认 0）', minimum: 0, maximum: 5000000 },
+        encoding: { type: 'string', description: '文本编码（默认 utf8，支持 utf8/utf16le）' },
+      },
+      required: ['path'],
+    },
+    examples: [
+      { title: '读取工作区文件', input: { path: 'electron/store.ts', maxChars: 4000 } },
+      { title: '读取日志后半段', input: { path: 'task-output/run.log', offset: 8000, maxChars: 6000 } },
+    ],
+    risk: 'low',
+    cost: 'low',
+    tags: ['file', 'read', 'io'],
+    version: '1.0',
+  },
+  {
+    name: 'skill.read',
+    callName: 'ndp_skill_read',
+    description:
+      '读取 Skill（技能）文件内容（UTF-8，限定在工作区 skills/ 或托管 skill 目录）。优先使用 name 读取，避免路径错误。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '技能名（推荐），例如 code-review 或 web-research' },
+        path: { type: 'string', description: '可选：技能文件路径（仅允许位于 skills 目录内）' },
+        stripFrontmatter: { type: 'boolean', description: '是否移除 YAML frontmatter（默认 true）' },
+        maxChars: { type: 'integer', description: '返回内容最大字符数（默认 16000）', minimum: 200, maximum: 60000 },
+      },
+    },
+    examples: [
+      { title: '按技能名读取（推荐）', input: { name: 'code-review' } },
+      { title: '读取并保留 frontmatter', input: { name: 'web-research', stripFrontmatter: false, maxChars: 24000 } },
+    ],
+    risk: 'low',
+    cost: 'low',
+    tags: ['skill', 'file', 'read'],
+    version: '1.0',
+  },
+  {
     name: 'file.write',
     callName: 'ndp_file_write',
     description: '写入文本到本地文件（默认写到 userData/task-output/）。',
@@ -164,6 +269,52 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     risk: 'medium',
     cost: 'low',
     tags: ['file', 'io'],
+    version: '1.0',
+  },
+  {
+    name: 'cli.exec_stream',
+    callName: 'ndp_cli_exec_stream',
+    description:
+      '流式执行命令并在进程未退出前返回部分输出（支持 start/poll/stop）。适合会先输出提示/二维码路径、再长时间等待的脚本。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', description: 'start | poll | stop（默认 start）' },
+        sessionId: { type: 'string', description: 'poll/stop 使用的会话 ID' },
+        cmd: { type: 'string', description: 'start: 可执行文件（如 powershell）' },
+        args: { type: 'array', items: { type: 'string' }, description: 'start: 命令参数数组' },
+        line: { type: 'string', description: 'start: 一条命令行字符串（与 cmd/args 二选一）' },
+        cwd: { type: 'string', description: 'start: 工作目录（默认当前目录）' },
+        env: { type: 'object', description: 'start: 附加环境变量（仅支持 string 值）' },
+        encoding: { type: 'string', description: "输出解码（默认 utf8；支持 utf8/gbk/utf16le）" },
+        timeoutMs: { type: 'integer', description: 'start: 进程总超时（默认 600000）', minimum: 1000, maximum: 3600000 },
+        yieldTimeoutMs: { type: 'integer', description: 'start/poll: 本次等待输出的最长时长（默认 3000）', minimum: 0, maximum: 120000 },
+        waitForText: { type: 'string', description: 'start/poll: 等待某段文本出现后立即返回（如 QR_CODE_READY:）' },
+        waitForRegex: { type: 'string', description: 'start/poll: 等待正则匹配（JS regex source）' },
+        returnOnFirstOutput: { type: 'boolean', description: 'start/poll: 有任何新输出就返回（默认 true）' },
+      },
+    },
+    examples: [
+      {
+        title: '启动并等待二维码路径输出',
+        input: {
+          action: 'start',
+          cmd: 'powershell',
+          args: ['-NoProfile', '-Command', "$env:PYTHONIOENCODING='utf-8'; python -u scripts/download_and_chunk.py BV1xxx"],
+          cwd: 'C:\\\\Users\\\\Administrator\\\\.neodeskpet\\\\skills\\\\bilibili-subtitle-download-skill',
+          encoding: 'utf8',
+          waitForText: 'QR_CODE_READY:',
+          yieldTimeoutMs: 20000,
+          timeoutMs: 600000,
+        },
+      },
+      { title: '轮询会话输出', input: { action: 'poll', sessionId: 'cli_stream_xxx', yieldTimeoutMs: 2000 } },
+      { title: '停止会话', input: { action: 'stop', sessionId: 'cli_stream_xxx' } },
+    ],
+    risk: 'high',
+    cost: 'medium',
+    tags: ['cli', 'process', 'stream'],
     version: '1.0',
   },
   {
@@ -411,7 +562,8 @@ export function getBuiltinToolDefinitions(): ToolDefinition[] {
 
 export function getDefaultAgentToolDefinitions(): ToolDefinition[] {
   // Agent 自己就是 LLM，因此默认不把 llm.* 暴露为可调用工具，避免“套娃调用”导致延迟与成本飙升
-  return BUILTIN_TOOL_DEFINITIONS.filter((t) => !t.name.startsWith('llm.'))
+  // cli.exec 仅保留给内部兼容路径；对 Agent 默认只暴露流式版本 cli.exec_stream，避免交互脚本长时间阻塞且拿不到中途输出
+  return BUILTIN_TOOL_DEFINITIONS.filter((t) => !t.name.startsWith('llm.') && t.name !== 'cli.exec')
 }
 
 export function getToolGroupId(toolName: string): string {

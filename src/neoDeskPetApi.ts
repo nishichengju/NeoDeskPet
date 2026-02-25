@@ -247,6 +247,15 @@ export type NeoDeskPetApi = {
   stopDrag(point?: { x: number; y: number }): void
   showContextMenu(): void
   setPetOverlayHover(hovering: boolean): void
+  setPetOverlayRects(
+    rects:
+      | {
+          taskPanel?:
+            | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
+            | null
+        }
+      | null,
+  ): void
   setIgnoreMouseEvents(ignore: boolean, forward: boolean): void
   onSettingsChanged(listener: SettingsChangeListener): () => void
   // Bubble message

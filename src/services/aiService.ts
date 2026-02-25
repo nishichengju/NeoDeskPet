@@ -1,4 +1,5 @@
 import type { AISettings } from '../../electron/types'
+import { buildOpenAICompatReasoningOptions } from '../../electron/reasoningConfig'
 
 export type ChatContentPart =
   | { type: 'text'; text: string }
@@ -28,38 +29,6 @@ export const ABORTED_ERROR = '__ABORTED__'
 // Pattern to match expression/motion tags like [表情:星星眼] or [动作:Idle]
 const EXPRESSION_TAG_PATTERN = /\[表情[：:]\s*([^\]]+)\]/g
 const MOTION_TAG_PATTERN = /\[动作[：:]\s*([^\]]+)\]/g
-
-function normalizeThinkingEffort(value: unknown): AISettings['thinkingEffort'] {
-  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
-  return 'disabled'
-}
-
-function mapEffortToBudgetTokens(effort: AISettings['thinkingEffort'], maxTokens: number): number {
-  const cap = Math.max(1024, Math.trunc(maxTokens) - 1)
-  if (effort === 'high') return Math.max(1024, Math.min(8192, cap))
-  if (effort === 'medium') return Math.max(1024, Math.min(4096, cap))
-  return Math.max(1024, Math.min(2048, cap))
-}
-
-function buildReasoningOptions(model: string, thinkingEffortRaw: unknown): Record<string, unknown> {
-  const effort = normalizeThinkingEffort(thinkingEffortRaw)
-  const modelId = String(model ?? '').trim().toLowerCase()
-
-  const isClaudeModel = modelId.includes('claude')
-  if (isClaudeModel) {
-    // OpenAI-compatible Claude/Vertex 兼容性：优先使用 legacy thinking + budget_tokens。
-    if (effort === 'disabled') return { thinking: { type: 'disabled' } }
-    return { thinking: { type: 'enabled', budget_tokens: mapEffortToBudgetTokens(effort, Number.MAX_SAFE_INTEGER) } }
-  }
-
-  const isOpenAiReasoningModel = /^(o1|o3|o4)(?:[-_.].*)?$/i.test(modelId) || modelId.startsWith('gpt-5')
-  if (effort !== 'disabled' && isOpenAiReasoningModel) {
-    // OpenAI Chat Completions 常见参数：reasoning_effort
-    return { reasoning_effort: effort }
-  }
-
-  return {}
-}
 
 function extractApiErrorMessage(errorData: unknown, status: number, statusText: string): string {
   const fallback = `HTTP ${status}: ${statusText}`
@@ -127,31 +96,34 @@ function buildChatCompletionPayload(args: {
   temperature: number
   maxTokens: number
   thinkingEffort: AISettings['thinkingEffort']
+  thinkingProvider: AISettings['thinkingProvider']
+  openaiReasoningEffort: AISettings['openaiReasoningEffort']
+  claudeThinkingEffort: AISettings['claudeThinkingEffort']
+  geminiThinkingEffort: AISettings['geminiThinkingEffort']
   stream?: boolean
 }): Record<string, unknown> {
-  const modelId = String(args.model ?? '').trim().toLowerCase()
-  const isClaudeModel = modelId.includes('claude')
-  const effort = normalizeThinkingEffort(args.thinkingEffort)
-  const thinkingBudget = isClaudeModel && effort !== 'disabled' ? mapEffortToBudgetTokens(effort, args.maxTokens) : null
-  const requestMaxTokens =
-    isClaudeModel && thinkingBudget != null
-      ? Math.max(Math.trunc(args.maxTokens), Math.trunc(thinkingBudget) + 1)
-      : Math.trunc(args.maxTokens)
+  const reasoning = buildOpenAICompatReasoningOptions({
+    model: args.model,
+    maxTokens: args.maxTokens,
+    settings: {
+      thinkingEffort: args.thinkingEffort,
+      thinkingProvider: args.thinkingProvider,
+      openaiReasoningEffort: args.openaiReasoningEffort,
+      claudeThinkingEffort: args.claudeThinkingEffort,
+      geminiThinkingEffort: args.geminiThinkingEffort,
+    },
+    claudeDisabledMinMaxTokens: 2048,
+  })
 
   const basePayload: Record<string, unknown> = {
     model: args.model,
     messages: args.messages.map((m) => ({ role: m.role, content: m.content })),
     temperature: args.temperature,
-    max_tokens: requestMaxTokens,
+    max_tokens: reasoning.maxTokens,
   }
 
-  const reasoning = isClaudeModel
-    ? effort === 'disabled'
-      ? { thinking: { type: 'disabled' } }
-      : { thinking: { type: 'enabled', budget_tokens: thinkingBudget } }
-    : buildReasoningOptions(args.model, effort)
-  if (Object.keys(reasoning).length > 0) {
-    Object.assign(basePayload, reasoning)
+  if (Object.keys(reasoning.extra).length > 0) {
+    Object.assign(basePayload, reasoning.extra)
   }
   if (args.stream) {
     basePayload.stream = true
@@ -258,7 +230,19 @@ export class AIService {
    * Send a chat message and get a response
    */
   async chat(messages: ChatMessage[], options?: { signal?: AbortSignal; systemAddon?: string }): Promise<ChatResponse> {
-    const { apiKey, baseUrl, model, temperature, maxTokens, thinkingEffort, systemPrompt } = this.settings
+    const {
+      apiKey,
+      baseUrl,
+      model,
+      temperature,
+      maxTokens,
+      thinkingEffort,
+      thinkingProvider,
+      openaiReasoningEffort,
+      claudeThinkingEffort,
+      geminiThinkingEffort,
+      systemPrompt,
+    } = this.settings
 
     if (!apiKey) {
       return { content: '', error: '请先配置 API Key' }
@@ -278,6 +262,10 @@ export class AIService {
       temperature,
       maxTokens,
       thinkingEffort,
+      thinkingProvider,
+      openaiReasoningEffort,
+      claudeThinkingEffort,
+      geminiThinkingEffort,
     })
 
     try {
@@ -350,7 +338,19 @@ export class AIService {
     messages: ChatMessage[],
     options?: { signal?: AbortSignal; onDelta?: (delta: string) => void; systemAddon?: string },
   ): Promise<ChatResponse> {
-    const { apiKey, baseUrl, model, temperature, maxTokens, thinkingEffort, systemPrompt } = this.settings
+    const {
+      apiKey,
+      baseUrl,
+      model,
+      temperature,
+      maxTokens,
+      thinkingEffort,
+      thinkingProvider,
+      openaiReasoningEffort,
+      claudeThinkingEffort,
+      geminiThinkingEffort,
+      systemPrompt,
+    } = this.settings
 
     if (!apiKey) {
       return { content: '', error: '请先配置 API Key' }
@@ -367,6 +367,10 @@ export class AIService {
       temperature,
       maxTokens,
       thinkingEffort,
+      thinkingProvider,
+      openaiReasoningEffort,
+      claudeThinkingEffort,
+      geminiThinkingEffort,
       stream: true,
     })
 

@@ -17,6 +17,7 @@ const PET_CLICK_THROUGH_POLL_MS = 8
 const PET_MODEL_OFFSET_Y = 0.06
 const PET_MODEL_RADIUS_X = 0.42
 const PET_MODEL_RADIUS_Y = 0.48
+const PET_CONTEXT_ORB_HIT_RADIUS_PX = 14
 
 // 悬浮球窗口的三种 UI 状态尺寸（与 renderer/src/orb/OrbApp.tsx 对齐）
 const ORB_BALL_SIZE = 40
@@ -97,6 +98,9 @@ export class WindowManager {
   private petClickThroughTimer: NodeJS.Timeout | null = null
   private petDragging = false
   private petOverlayHover = false
+  private petTaskPanelHitRect:
+    | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
+    | null = null
   private petIgnoreMouseEvents: boolean | null = null
 
   private orbOverlayBaseBounds: Electron.Rectangle | null = null
@@ -808,6 +812,48 @@ export class WindowManager {
     this.updatePetIgnoreMouseEvents()
   }
 
+  setPetOverlayRects(
+    rects:
+      | {
+          taskPanel?:
+            | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
+            | null
+        }
+      | null
+      | undefined,
+  ): void {
+    const r = rects?.taskPanel
+    if (
+      r &&
+      Number.isFinite(r.x) &&
+      Number.isFinite(r.y) &&
+      Number.isFinite(r.width) &&
+      Number.isFinite(r.height) &&
+      r.width > 0 &&
+      r.height > 0
+    ) {
+      const viewportWidth =
+        typeof r.viewportWidth === 'number' && Number.isFinite(r.viewportWidth) && r.viewportWidth > 0
+          ? Math.round(r.viewportWidth)
+          : undefined
+      const viewportHeight =
+        typeof r.viewportHeight === 'number' && Number.isFinite(r.viewportHeight) && r.viewportHeight > 0
+          ? Math.round(r.viewportHeight)
+          : undefined
+      this.petTaskPanelHitRect = {
+        x: Math.round(r.x),
+        y: Math.round(r.y),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        viewportWidth,
+        viewportHeight,
+      }
+    } else {
+      this.petTaskPanelHitRect = null
+    }
+    this.updatePetIgnoreMouseEvents()
+  }
+
   private applyPetClickThrough(enabled: boolean): void {
     const pet = this.getPetWindow()
     if (!pet) return
@@ -863,7 +909,7 @@ export class WindowManager {
     }
 
     const mousePos = screen.getCursorScreenPoint()
-    const bounds = pet.getBounds()
+    const bounds = pet.getContentBounds()
 
     const insideWindow =
       mousePos.x >= bounds.x &&
@@ -872,6 +918,8 @@ export class WindowManager {
       mousePos.y <= bounds.y + bounds.height
 
     let isInsideModel = false
+    let isInsideContextOrb = false
+    let isInsideTaskPanel = false
     if (insideWindow) {
       const x = mousePos.x - bounds.x
       const y = mousePos.y - bounds.y
@@ -884,9 +932,34 @@ export class WindowManager {
       const normalizedX = (x - centerX) / radiusX
       const normalizedY = (y - centerY) / radiusY
       isInsideModel = normalizedX * normalizedX + normalizedY * normalizedY <= 1
+
+      const bubble = settings.bubble
+      if (bubble?.contextOrbEnabled) {
+        const orbCenterX = (Math.max(0, Math.min(100, bubble.contextOrbX ?? 12)) / 100) * bounds.width
+        const orbCenterY = (Math.max(0, Math.min(100, bubble.contextOrbY ?? 16)) / 100) * bounds.height
+        const dx = x - orbCenterX
+        const dy = y - orbCenterY
+        isInsideContextOrb = dx * dx + dy * dy <= PET_CONTEXT_ORB_HIT_RADIUS_PX * PET_CONTEXT_ORB_HIT_RADIUS_PX
+      }
+
+      const panel = this.petTaskPanelHitRect
+      if (panel) {
+        const scaleX =
+          typeof panel.viewportWidth === 'number' && panel.viewportWidth > 0 ? bounds.width / panel.viewportWidth : 1
+        const scaleY =
+          typeof panel.viewportHeight === 'number' && panel.viewportHeight > 0 ? bounds.height / panel.viewportHeight : 1
+
+        const px = panel.x * scaleX
+        const py = panel.y * scaleY
+        const pw = panel.width * scaleX
+        const ph = panel.height * scaleY
+
+        const hitPad = 16
+        isInsideTaskPanel = x >= px - hitPad && x <= px + pw + hitPad && y >= py - hitPad && y <= py + ph + hitPad
+      }
     }
 
-    const nextIgnore = !insideWindow || !isInsideModel
+    const nextIgnore = !insideWindow || (!isInsideModel && !isInsideContextOrb && !isInsideTaskPanel)
     if (nextIgnore === this.petIgnoreMouseEvents) return
     this.petIgnoreMouseEvents = nextIgnore
     pet.setIgnoreMouseEvents(nextIgnore, { forward: true })

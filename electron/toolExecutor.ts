@@ -6,6 +6,8 @@ import { isToolEnabled } from './toolRegistry'
 import { getLive2dCapabilities } from './live2dToolState'
 import { getWindowManagerInstance } from './runtimeRefs'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
+import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
+import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { TaskRecord } from './types'
 
 export type ToolInput = string | Record<string, unknown> | Array<unknown> | null
@@ -16,9 +18,8 @@ export type ToolExecutionContext = {
   waitIfPaused: () => Promise<void>
   isCanceled: () => boolean
   setCancelCurrent: (fn: (() => void) | undefined) => void
+  refreshSkillRegistry?: () => Promise<void>
 }
-
-type ThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
 
 function clampText(text: unknown, max: number): string {
   const s = typeof text === 'string' ? text : String(text ?? '')
@@ -68,37 +69,309 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delay))
 }
 
-function normalizeThinkingEffort(value: unknown): ThinkingEffort {
-  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
-  return 'disabled'
+function stripSkillFrontmatter(raw: string): string {
+  const text = String(raw ?? '').replace(/^\uFEFF/, '')
+  const m = text.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/)
+  return m ? text.slice(m[0].length) : text
 }
 
-function mapThinkingBudgetTokens(effort: ThinkingEffort, maxTokens: number): number {
-  const cap = Math.max(1024, Math.trunc(maxTokens) - 1)
-  if (effort === 'high') return Math.max(1024, Math.min(8192, cap))
-  if (effort === 'medium') return Math.max(1024, Math.min(4096, cap))
-  return Math.max(1024, Math.min(2048, cap))
+function isSubPathOf(parentDir: string, childPath: string): boolean {
+  const rel = path.relative(parentDir, childPath)
+  if (!rel) return true
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return false
+  return true
 }
 
-function buildReasoningOptions(
-  model: string,
-  thinkingEffortRaw: unknown,
-  maxTokensRaw: number,
-): { maxTokens: number; extra: Record<string, unknown> } {
-  const modelId = String(model ?? '').trim().toLowerCase()
-  const requestedMaxTokens = Math.max(64, Math.min(262144, Math.trunc(maxTokensRaw)))
-  const isClaudeModel = modelId.includes('claude')
-  if (!isClaudeModel) return { maxTokens: requestedMaxTokens, extra: {} }
-
-  const thinkingEffort = normalizeThinkingEffort(thinkingEffortRaw)
-  if (thinkingEffort === 'disabled') {
-    return { maxTokens: Math.max(2048, requestedMaxTokens), extra: { thinking: { type: 'disabled' } } }
-  }
-  const budgetTokens = mapThinkingBudgetTokens(thinkingEffort, requestedMaxTokens)
+function resolveSkillRuntimeOptionsFromSettings(settings: ReturnType<typeof getSettings>): SkillManagerRuntimeOptions {
+  const managedDirOverride =
+    typeof settings.orchestrator?.skillManagedDir === 'string' && settings.orchestrator.skillManagedDir.trim()
+      ? settings.orchestrator.skillManagedDir.trim()
+      : undefined
   return {
-    maxTokens: Math.max(requestedMaxTokens, budgetTokens + 1),
-    extra: { thinking: { type: 'enabled', budget_tokens: budgetTokens } },
+    enabled: settings.orchestrator?.skillEnabled !== false,
+    allowModelInvocation: settings.orchestrator?.skillAllowModelInvocation !== false,
+    managedDir: managedDirOverride,
   }
+}
+
+function resolveManagedSkillDir(settings: ReturnType<typeof getSettings>): string {
+  const runtime = resolveSkillRuntimeOptionsFromSettings(settings)
+  if (runtime.managedDir) return path.resolve(runtime.managedDir)
+  const home = process.env.HOME || process.env.USERPROFILE || '.'
+  return path.resolve(path.join(home, '.neodeskpet', 'skills'))
+}
+
+function shouldAutoRefreshSkillRegistryForFileWrite(fullPath: string): boolean {
+  const normalizedFull = path.resolve(fullPath)
+  const base = path.basename(normalizedFull)
+  const isSkillManifest = process.platform === 'win32' ? base.toLowerCase() === 'skill.md' : base === 'SKILL.md'
+  if (!isSkillManifest) return false
+
+  const settings = getSettings()
+  const managedRoot = resolveManagedSkillDir(settings)
+  const workspaceSkillsRoot = path.resolve(process.cwd(), 'skills')
+  return isSubPathOf(managedRoot, normalizedFull) || isSubPathOf(workspaceSkillsRoot, normalizedFull)
+}
+
+function sanitizeRepoDirName(raw: string): string {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return s || 'skill'
+}
+
+function inferRepoDirName(repoUrl: string): string {
+  const cleaned = String(repoUrl ?? '').trim().replace(/\/+$/, '')
+  const tail = cleaned.split('/').pop() || 'skill'
+  return sanitizeRepoDirName(tail.replace(/\.git$/i, ''))
+}
+
+async function killProcessTree(proc: ReturnType<typeof spawn>): Promise<void> {
+  const pid = typeof proc?.pid === 'number' ? proc.pid : 0
+  if (!pid || pid <= 0) return
+
+  if (process.platform === 'win32') {
+    await new Promise<void>((resolve) => {
+      try {
+        const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        killer.once('error', () => {
+          try {
+            proc.kill()
+          } catch {
+            // ignore
+          }
+          resolve()
+        })
+        killer.once('close', () => resolve())
+      } catch {
+        try {
+          proc.kill()
+        } catch {
+          // ignore
+        }
+        resolve()
+      }
+    })
+    return
+  }
+
+  try {
+    proc.kill('SIGTERM')
+  } catch {
+    // ignore
+  }
+}
+
+type CliExecStreamSession = {
+  id: string
+  taskId: string
+  child: ReturnType<typeof spawn>
+  cmd: string
+  args: string[]
+  cwd: string
+  encoding: 'utf8' | 'gbk' | 'utf16le'
+  createdAt: number
+  updatedAt: number
+  stdout: string
+  stderr: string
+  stdoutCursor: number
+  stderrCursor: number
+  exited: boolean
+  exitCode: number | null
+  exitSignal: NodeJS.Signals | null
+  timedOut: boolean
+  killed: boolean
+  lastError?: string
+  timeoutTimer?: NodeJS.Timeout
+  waiters: Set<() => void>
+}
+
+const cliExecStreamSessions = new Map<string, CliExecStreamSession>()
+const CLI_EXEC_STREAM_MAX_OUTPUT_CHARS = 200_000
+const CLI_EXEC_STREAM_MAX_SESSIONS = 32
+
+function normalizeCliExecEncoding(value: unknown): 'utf8' | 'gbk' | 'utf16le' {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (raw === 'gbk' || raw === 'cp936' || raw === 'gb2312') return 'gbk'
+  if (raw === 'utf16le' || raw === 'utf16' || raw === 'utf-16le') return 'utf16le'
+  return 'utf8'
+}
+
+function decodeCliExecChunk(buf: Buffer, encoding: 'utf8' | 'gbk' | 'utf16le'): string {
+  if (!buf || buf.length === 0) return ''
+  if (encoding === 'utf16le') return buf.toString('utf16le')
+  if (encoding === 'utf8') return buf.toString('utf8')
+  try {
+    return new TextDecoder('gbk').decode(buf)
+  } catch {
+    return buf.toString('utf8')
+  }
+}
+
+function appendCliExecStreamText(session: CliExecStreamSession, stream: 'stdout' | 'stderr', chunk: string): void {
+  if (!chunk) return
+  if (stream === 'stdout') {
+    session.stdout += chunk
+    if (session.stdout.length > CLI_EXEC_STREAM_MAX_OUTPUT_CHARS) {
+      const drop = session.stdout.length - CLI_EXEC_STREAM_MAX_OUTPUT_CHARS
+      session.stdout = session.stdout.slice(drop)
+      session.stdoutCursor = Math.max(0, session.stdoutCursor - drop)
+    }
+  } else {
+    session.stderr += chunk
+    if (session.stderr.length > CLI_EXEC_STREAM_MAX_OUTPUT_CHARS) {
+      const drop = session.stderr.length - CLI_EXEC_STREAM_MAX_OUTPUT_CHARS
+      session.stderr = session.stderr.slice(drop)
+      session.stderrCursor = Math.max(0, session.stderrCursor - drop)
+    }
+  }
+  session.updatedAt = Date.now()
+  for (const notify of [...session.waiters]) notify()
+}
+
+function notifyCliExecStreamSession(session: CliExecStreamSession): void {
+  session.updatedAt = Date.now()
+  for (const notify of [...session.waiters]) notify()
+}
+
+function readCliExecStreamDelta(
+  session: CliExecStreamSession,
+): { stdout: string; stderr: string; hasDelta: boolean; stdoutLen: number; stderrLen: number } {
+  const stdout = session.stdout.slice(session.stdoutCursor)
+  const stderr = session.stderr.slice(session.stderrCursor)
+  session.stdoutCursor = session.stdout.length
+  session.stderrCursor = session.stderr.length
+  return { stdout, stderr, hasDelta: Boolean(stdout || stderr), stdoutLen: session.stdout.length, stderrLen: session.stderr.length }
+}
+
+function peekCliExecStreamUnread(session: CliExecStreamSession): { stdout: string; stderr: string; hasDelta: boolean } {
+  const stdout = session.stdout.slice(session.stdoutCursor)
+  const stderr = session.stderr.slice(session.stderrCursor)
+  return { stdout, stderr, hasDelta: Boolean(stdout || stderr) }
+}
+
+async function waitForCliExecStreamUpdate(session: CliExecStreamSession, timeoutMs: number): Promise<void> {
+  const wait = Math.max(0, Math.trunc(timeoutMs))
+  if (wait <= 0) return
+  await new Promise<void>((resolve) => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      session.waiters.delete(onUpdate)
+      resolve()
+    }
+    const onUpdate = () => finish()
+    const timer = setTimeout(finish, wait)
+    session.waiters.add(onUpdate)
+  })
+}
+
+function clipCliStreamTail(text: string, maxChars = 4000): string {
+  const raw = String(text ?? '')
+  if (raw.length <= maxChars) return raw
+  return `…${raw.slice(raw.length - maxChars)}`
+}
+
+function getCliExecStreamStatus(session: CliExecStreamSession): 'running' | 'done' | 'error' | 'stopped' | 'timed_out' {
+  if (!session.exited) return 'running'
+  if (session.timedOut) return 'timed_out'
+  if (session.killed) return 'stopped'
+  if ((session.exitCode ?? 0) === 0) return 'done'
+  return 'error'
+}
+
+function buildCliExecStreamPatternMatcher(obj: Record<string, unknown> | null): ((text: string) => RegExpMatchArray | null) | null {
+  const waitForText = typeof obj?.waitForText === 'string' ? obj.waitForText : ''
+  if (waitForText) {
+    return (text: string) => {
+      const idx = text.indexOf(waitForText)
+      if (idx < 0) return null
+      return [waitForText]
+    }
+  }
+  const waitForRegex = typeof obj?.waitForRegex === 'string' ? obj.waitForRegex : ''
+  if (waitForRegex) {
+    try {
+      const re = new RegExp(waitForRegex, 'm')
+      return (text: string) => text.match(re)
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+function ensureCliExecStreamCapacity(): void {
+  if (cliExecStreamSessions.size < CLI_EXEC_STREAM_MAX_SESSIONS) return
+  const sessions = [...cliExecStreamSessions.values()].sort((a, b) => a.updatedAt - b.updatedAt)
+  for (const s of sessions) {
+    if (cliExecStreamSessions.size < CLI_EXEC_STREAM_MAX_SESSIONS) break
+    if (!s.exited) continue
+    cliExecStreamSessions.delete(s.id)
+  }
+}
+
+function buildCliExecStreamResult(
+  session: CliExecStreamSession,
+  action: 'start' | 'poll' | 'stop',
+  params?: {
+    yieldedBy?: string
+    matched?: string
+    note?: string
+    delta?: { stdout: string; stderr: string; hasDelta: boolean }
+  },
+): string {
+  const delta = params?.delta ?? readCliExecStreamDelta(session)
+  const status = getCliExecStreamStatus(session)
+  return JSON.stringify(
+    {
+      ok: true,
+      action,
+      sessionId: session.id,
+      status,
+      pid: session.child.pid ?? null,
+      exited: session.exited,
+      exitCode: session.exitCode,
+      exitSignal: session.exitSignal,
+      timedOut: session.timedOut,
+      killed: session.killed,
+      yieldedBy: params?.yieldedBy,
+      matched: params?.matched,
+      note: params?.note,
+      cmd: session.cmd,
+      args: session.args,
+      cwd: session.cwd,
+      stdout: delta.stdout,
+      stderr: delta.stderr,
+      hasDelta: delta.hasDelta,
+      stdoutTail: clipCliStreamTail(session.stdout, 2000),
+      stderrTail: clipCliStreamTail(session.stderr, 2000),
+      startedAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    },
+    null,
+    2,
+  )
+}
+
+export async function cancelCliExecStreamSessionsForTask(taskId: string): Promise<number> {
+  const target = String(taskId ?? '').trim()
+  if (!target) return 0
+  let count = 0
+  for (const session of [...cliExecStreamSessions.values()]) {
+    if (session.taskId !== target) continue
+    if (!session.exited) {
+      session.killed = true
+      await killProcessTree(session.child).catch(() => undefined)
+    }
+    count += 1
+  }
+  return count
 }
 
 export async function executeBuiltinTool(
@@ -522,6 +795,267 @@ export async function executeBuiltinTool(
     }
   }
 
+  if (toolName === 'skill.list') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const includeCommands = obj?.includeCommands !== false
+    const maxItems = typeof obj?.maxItems === 'number' ? Math.max(1, Math.min(500, Math.trunc(obj.maxItems))) : 100
+
+    const skillRuntimeOptions = resolveSkillRuntimeOptionsFromSettings(settings)
+    const skillManager = new SkillManager({ workspaceDir: process.cwd(), managedDir: skillRuntimeOptions.managedDir })
+    const diagnostics = await skillManager.getDiagnostics(skillRuntimeOptions)
+    const skills = diagnostics.enabled ? (await skillManager.list(skillRuntimeOptions)).slice(0, maxItems) : []
+    const commands = includeCommands && diagnostics.enabled ? await skillManager.listCommands(skillRuntimeOptions) : []
+
+    return JSON.stringify(
+      {
+        ok: true,
+        diagnostics,
+        skills: skills.map((s) => ({
+          name: s.name,
+          description: s.description,
+          source: s.source,
+          path: s.filePath,
+          disableModelInvocation: s.disableModelInvocation,
+        })),
+        commands: includeCommands ? commands.slice(0, maxItems * 2) : undefined,
+      },
+      null,
+      2,
+    )
+  }
+
+  if (toolName === 'skill.refresh') {
+    if (typeof ctx.refreshSkillRegistry === 'function') {
+      await ctx.refreshSkillRegistry()
+      return JSON.stringify({ ok: true, refreshed: true, source: 'task-service-cache' }, null, 2)
+    }
+    return JSON.stringify({ ok: true, refreshed: false, source: 'no-cache-hook', note: '当前上下文未提供 Skill 缓存刷新回调' }, null, 2)
+  }
+
+  if (toolName === 'skill.install') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const repoUrl = typeof obj?.repoUrl === 'string' ? obj.repoUrl.trim() : typeof input === 'string' ? input.trim() : ''
+    const dirNameRaw = typeof obj?.dirName === 'string' ? obj.dirName.trim() : ''
+    const branch = typeof obj?.branch === 'string' ? obj.branch.trim() : ''
+    const updateIfExists = obj?.updateIfExists !== false
+    if (!repoUrl) throw new Error('skill.install 需要 repoUrl')
+    if (!/^(https?:\/\/|git@)/i.test(repoUrl)) throw new Error(`暂只支持 Git URL（https:// 或 git@），当前：${repoUrl}`)
+
+    const managedDir = resolveManagedSkillDir(settings)
+    const dirName = sanitizeRepoDirName(dirNameRaw || inferRepoDirName(repoUrl))
+    const targetDir = path.join(managedDir, dirName)
+
+    await fs.mkdir(managedDir, { recursive: true })
+    const existing = await fs.stat(targetDir).catch(() => null)
+    const gitDir = path.join(targetDir, '.git')
+    const hasGit = existing?.isDirectory() ? !!(await fs.stat(gitDir).catch(() => null)) : false
+
+    const runGit = async (args: string[], cwd?: string): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
+      const cp = spawn('git', args, { cwd, windowsHide: true })
+      cp.stdout?.on('data', (d) => stdoutChunks.push(Buffer.from(d)))
+      cp.stderr?.on('data', (d) => stderrChunks.push(Buffer.from(d)))
+      const code = await new Promise<number | null>((resolve, reject) => {
+        cp.once('error', reject)
+        cp.once('close', (c) => resolve(c))
+      })
+      return {
+        code,
+        stdout: Buffer.concat(stdoutChunks).toString('utf8').trim(),
+        stderr: Buffer.concat(stderrChunks).toString('utf8').trim(),
+      }
+    }
+
+    let action: 'clone' | 'pull'
+    let gitResult: { code: number | null; stdout: string; stderr: string }
+    if (!existing) {
+      const args = ['clone', '--depth', '1']
+      if (branch) args.push('--branch', branch)
+      args.push(repoUrl, targetDir)
+      action = 'clone'
+      gitResult = await runGit(args)
+    } else {
+      if (!existing.isDirectory()) throw new Error(`目标已存在且不是目录：${targetDir}`)
+      if (!updateIfExists) throw new Error(`目标目录已存在：${targetDir}（可设置 updateIfExists=true）`)
+      if (!hasGit) throw new Error(`目标目录已存在但不是 Git 仓库：${targetDir}`)
+      const args = ['-C', targetDir, 'pull', '--ff-only']
+      if (branch) args.push('origin', branch)
+      action = 'pull'
+      gitResult = await runGit(args)
+    }
+
+    if (gitResult.code !== 0) {
+      throw new Error(`git ${action} 失败（code=${gitResult.code ?? 'null'}）：${gitResult.stderr || gitResult.stdout || '(无输出)'}`)
+    }
+
+    if (typeof ctx.refreshSkillRegistry === 'function') {
+      await ctx.refreshSkillRegistry().catch(() => undefined)
+    }
+
+    return JSON.stringify(
+      {
+        ok: true,
+        action,
+        repoUrl,
+        targetDir,
+        branch: branch || undefined,
+        refreshed: typeof ctx.refreshSkillRegistry === 'function',
+        stdout: clampText(gitResult.stdout, 4000),
+        stderr: clampText(gitResult.stderr, 2000),
+      },
+      null,
+      2,
+    )
+  }
+
+  if (toolName === 'skill.read') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const skillName = typeof obj?.name === 'string' ? obj.name.trim() : ''
+    const rawPath = typeof obj?.path === 'string' ? obj.path.trim() : ''
+    const stripFrontmatter = obj?.stripFrontmatter !== false
+    const maxChars = typeof obj?.maxChars === 'number' ? Math.max(200, Math.min(60000, Math.trunc(obj.maxChars))) : 16000
+
+    const skillRuntimeOptions = { ...resolveSkillRuntimeOptionsFromSettings(settings), enabled: true }
+    const skillManager = new SkillManager({ workspaceDir: process.cwd(), managedDir: skillRuntimeOptions.managedDir })
+
+    if (!skillName && !rawPath) {
+      throw new Error('skill.read 需要 name 或 path（推荐 name）')
+    }
+
+    if (skillName) {
+      const loaded = await skillManager.readSkillContent(skillName, skillRuntimeOptions)
+      if (!loaded) throw new Error(`skill not found or unreadable: ${skillName}`)
+
+      let content = loaded.content
+      if (!stripFrontmatter) {
+        const raw = await fs.readFile(loaded.skill.filePath, 'utf8')
+        content = raw.replace(/^\uFEFF/, '')
+      }
+      content = clampText(content, maxChars)
+
+      return JSON.stringify(
+        {
+          ok: true,
+          mode: 'name',
+          name: loaded.skill.name,
+          path: loaded.skill.filePath,
+          source: loaded.skill.source,
+          strippedFrontmatter: stripFrontmatter,
+          truncated: content.length >= maxChars,
+          content,
+        },
+        null,
+        2,
+      )
+    }
+
+    const requestedPath = path.resolve(rawPath)
+    const allowedRoots = [path.join(process.cwd(), 'skills')]
+    allowedRoots.push(resolveManagedSkillDir(settings))
+
+    let realFile = ''
+    try {
+      realFile = await fs.realpath(requestedPath)
+    } catch {
+      throw new Error(`skill file not found: ${requestedPath}`)
+    }
+    const stat = await fs.stat(realFile).catch(() => null)
+    if (!stat?.isFile()) throw new Error(`skill.read path is not a file: ${realFile}`)
+
+    const allowedRealRoots = (
+      await Promise.all(
+        allowedRoots.map(async (root) => {
+          try {
+            return await fs.realpath(root)
+          } catch {
+            return path.resolve(root)
+          }
+        }),
+      )
+    ).map((r) => path.resolve(r))
+
+    const inAllowed = allowedRealRoots.some((root) => isSubPathOf(root, realFile))
+    if (!inAllowed) {
+      throw new Error(`skill.read path not allowed (must be under workspace skills or managed skills): ${realFile}`)
+    }
+
+    const raw = await fs.readFile(realFile, 'utf8')
+    const content = clampText(stripFrontmatter ? stripSkillFrontmatter(raw).trim() : raw.replace(/^\uFEFF/, ''), maxChars)
+    return JSON.stringify(
+      {
+        ok: true,
+        mode: 'path',
+        path: realFile,
+        strippedFrontmatter: stripFrontmatter,
+        truncated: content.length >= maxChars,
+        content,
+      },
+      null,
+      2,
+    )
+  }
+
+  if (toolName === 'file.read') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const rawPath = typeof obj?.path === 'string' ? obj.path.trim() : typeof input === 'string' ? input.trim() : ''
+    if (!rawPath) throw new Error('file.read 需要 path')
+
+    const maxChars = typeof obj?.maxChars === 'number' ? Math.max(100, Math.min(60000, Math.trunc(obj.maxChars))) : 12000
+    const offset = typeof obj?.offset === 'number' ? Math.max(0, Math.min(5_000_000, Math.trunc(obj.offset))) : 0
+    const encodingRaw = typeof obj?.encoding === 'string' ? obj.encoding.trim().toLowerCase() : 'utf8'
+    const encoding: BufferEncoding = encodingRaw === 'utf16le' || encodingRaw === 'utf16' ? 'utf16le' : 'utf8'
+
+    const resolvedPath = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(process.cwd(), rawPath)
+
+    let realFile = ''
+    try {
+      realFile = await fs.realpath(resolvedPath)
+    } catch {
+      throw new Error(`file not found: ${resolvedPath}`)
+    }
+    const stat = await fs.stat(realFile).catch(() => null)
+    if (!stat?.isFile()) throw new Error(`file.read path is not a file: ${realFile}`)
+
+    const whitelistRoots = [process.cwd(), ctx.userDataDir]
+    const whitelistRealRoots = (
+      await Promise.all(
+        whitelistRoots.map(async (root) => {
+          try {
+            return await fs.realpath(root)
+          } catch {
+            return path.resolve(root)
+          }
+        }),
+      )
+    ).map((r) => path.resolve(r))
+
+    if (!whitelistRealRoots.some((root) => isSubPathOf(root, realFile))) {
+      throw new Error(`file.read path not allowed (only workspace/userData): ${realFile}`)
+    }
+
+    const raw = await fs.readFile(realFile, { encoding })
+    const normalized = encoding === 'utf8' ? raw.replace(/^\uFEFF/, '') : raw
+    const sliced = normalized.slice(offset, offset + maxChars)
+    const truncated = offset + maxChars < normalized.length
+
+    return JSON.stringify(
+      {
+        ok: true,
+        path: realFile,
+        encoding,
+        offset,
+        maxChars,
+        totalChars: normalized.length,
+        returnedChars: sliced.length,
+        truncated,
+        content: sliced,
+      },
+      null,
+      2,
+    )
+  }
+
   if (toolName === 'file.write') {
     const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
     const relPath = typeof obj?.path === 'string' ? obj.path.trim() : ''
@@ -539,7 +1073,304 @@ export async function executeBuiltinTool(
     await fs.mkdir(path.dirname(fullPath), { recursive: true })
     if (append) await fs.appendFile(fullPath, content ?? '', { encoding: encoding as BufferEncoding })
     else await fs.writeFile(fullPath, content ?? '', { encoding: encoding as BufferEncoding })
-    return `已写入：${fullPath}`
+
+    let refreshedSkillRegistry = false
+    if (ctx.refreshSkillRegistry && shouldAutoRefreshSkillRegistryForFileWrite(fullPath)) {
+      try {
+        await ctx.refreshSkillRegistry()
+        refreshedSkillRegistry = true
+      } catch {
+        // 刷新失败不影响写文件主流程，交给后续 skill.refresh 手动处理
+      }
+    }
+
+    return refreshedSkillRegistry ? `已写入：${fullPath}\n已自动刷新 Skill 缓存` : `已写入：${fullPath}`
+  }
+
+  if (toolName === 'cli.exec_stream') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const actionRaw = typeof obj?.action === 'string' ? obj.action.trim().toLowerCase() : ''
+    const action: 'start' | 'poll' | 'stop' =
+      actionRaw === 'poll' || actionRaw === 'read' ? 'poll' : actionRaw === 'stop' || actionRaw === 'kill' ? 'stop' : 'start'
+
+    const sessionId = typeof obj?.sessionId === 'string' ? obj.sessionId.trim() : ''
+
+    if (action === 'poll' || action === 'stop') {
+      if (!sessionId) throw new Error(`cli.exec_stream(${action}) 需要 sessionId`)
+      const session = cliExecStreamSessions.get(sessionId)
+      if (!session) throw new Error(`cli.exec_stream session not found: ${sessionId}`)
+
+      if (action === 'stop') {
+        if (!session.exited) {
+          session.killed = true
+          await killProcessTree(session.child)
+        }
+        // 给退出事件一点时间回填状态；若尚未退出也先返回 stopped 状态
+        if (!session.exited) {
+          await waitForCliExecStreamUpdate(session, 800)
+        }
+        if (session.exited && session.timeoutTimer) {
+          clearTimeout(session.timeoutTimer)
+          session.timeoutTimer = undefined
+        }
+        return buildCliExecStreamResult(session, 'stop', { yieldedBy: 'stop-request' })
+      }
+
+      const yieldTimeoutMs =
+        typeof obj?.yieldTimeoutMs === 'number' ? Math.max(0, Math.min(120000, Math.trunc(obj.yieldTimeoutMs))) : 0
+      const returnOnFirstOutput = obj?.returnOnFirstOutput !== false
+      const matcher = buildCliExecStreamPatternMatcher(obj)
+      const deadline = Date.now() + yieldTimeoutMs
+      let yieldedBy = 'immediate'
+      let matched: string | undefined
+      let killRequested = false
+      const requestKill = () => {
+        if (killRequested) return
+        killRequested = true
+        session.killed = true
+        void killProcessTree(session.child)
+      }
+      ctx.setCancelCurrent(() => requestKill())
+
+      const evaluate = (): boolean => {
+        const unread = peekCliExecStreamUnread(session)
+        if (!unread.hasDelta && !session.exited) return false
+        const merged = [unread.stdout, unread.stderr].filter(Boolean).join('\n')
+        if (matcher && merged) {
+          const m = matcher(merged)
+          if (m) {
+            yieldedBy = 'pattern'
+            matched = m[0]
+            return true
+          }
+        }
+        if (returnOnFirstOutput && unread.hasDelta) {
+          yieldedBy = 'output'
+          return true
+        }
+        if (session.exited) {
+          yieldedBy = 'exit'
+          return true
+        }
+        return false
+      }
+
+      while (true) {
+        if (ctx.isCanceled()) {
+          requestKill()
+          yieldedBy = 'canceled'
+          break
+        }
+        if (evaluate()) break
+        const remain = deadline - Date.now()
+        if (remain <= 0) {
+          yieldedBy = 'wait-timeout'
+          break
+        }
+        await waitForCliExecStreamUpdate(session, Math.min(1000, remain))
+      }
+
+      ctx.setCancelCurrent(undefined)
+      return buildCliExecStreamResult(session, 'poll', { yieldedBy, matched })
+    }
+
+    // start
+    const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(1000, Math.min(3_600_000, Math.trunc(obj.timeoutMs))) : 600_000
+    const yieldTimeoutMs =
+      typeof obj?.yieldTimeoutMs === 'number' ? Math.max(0, Math.min(120_000, Math.trunc(obj.yieldTimeoutMs))) : 3_000
+    const cwd = typeof obj?.cwd === 'string' && obj.cwd.trim() ? obj.cwd.trim() : process.cwd()
+    const envObj = typeof obj?.env === 'object' && obj.env ? (obj.env as Record<string, unknown>) : null
+    const encoding = normalizeCliExecEncoding(obj?.encoding)
+    const returnOnFirstOutput = obj?.returnOnFirstOutput !== false
+    const env = envObj
+      ? (({
+          ...process.env,
+          ...Object.fromEntries(Object.entries(envObj).filter(([, v]) => typeof v === 'string')) as Record<string, string>,
+        } as unknown) as NodeJS.ProcessEnv)
+      : process.env
+
+    let cmd = ''
+    let args: string[] = []
+    if (obj && typeof obj.cmd === 'string' && obj.cmd.trim()) {
+      cmd = obj.cmd.trim()
+      args = ensureStringArray(obj.args, 120)
+    } else if (obj && typeof obj.line === 'string' && obj.line.trim()) {
+      const line = obj.line.trim()
+      if (process.platform === 'win32') {
+        const psMatch = line.match(/^(powershell|pwsh)(?:\.exe)?\b/i)
+        const cmdMatch = psMatch ? line.match(/-(?:Command|c)\s+(.+)$/i) : null
+        if (psMatch && cmdMatch) {
+          const shell = psMatch[1].toLowerCase() === 'pwsh' ? 'pwsh' : 'powershell'
+          let commandArg = String(cmdMatch[1] ?? '').trim()
+          if (
+            (commandArg.startsWith('"') && commandArg.endsWith('"') && commandArg.length >= 2) ||
+            (commandArg.startsWith("'") && commandArg.endsWith("'") && commandArg.length >= 2)
+          ) {
+            commandArg = commandArg.slice(1, -1)
+          }
+          cmd = shell
+          args = []
+          if (/\s-(?:NoProfile|NoP)\b/i.test(line)) args.push('-NoProfile')
+          args.push('-Command', commandArg)
+        } else {
+          cmd = 'cmd.exe'
+          args = ['/d', '/s', '/c', line]
+        }
+      } else {
+        cmd = 'sh'
+        args = ['-lc', line]
+      }
+    } else if (typeof input === 'string') {
+      const line = input.trim()
+      if (!line) throw new Error('cli.exec_stream 需要命令行字符串')
+      if (process.platform === 'win32') {
+        const psMatch = line.match(/^(powershell|pwsh)(?:\.exe)?\b/i)
+        const cmdMatch = psMatch ? line.match(/-(?:Command|c)\s+(.+)$/i) : null
+        if (psMatch && cmdMatch) {
+          const shell = psMatch[1].toLowerCase() === 'pwsh' ? 'pwsh' : 'powershell'
+          let commandArg = String(cmdMatch[1] ?? '').trim()
+          if (
+            (commandArg.startsWith('"') && commandArg.endsWith('"') && commandArg.length >= 2) ||
+            (commandArg.startsWith("'") && commandArg.endsWith("'") && commandArg.length >= 2)
+          ) {
+            commandArg = commandArg.slice(1, -1)
+          }
+          cmd = shell
+          args = []
+          if (/\s-(?:NoProfile|NoP)\b/i.test(line)) args.push('-NoProfile')
+          args.push('-Command', commandArg)
+        } else {
+          cmd = 'cmd.exe'
+          args = ['/d', '/s', '/c', line]
+        }
+      } else {
+        cmd = 'sh'
+        args = ['-lc', line]
+      }
+    } else {
+      throw new Error('cli.exec_stream 输入格式不正确')
+    }
+
+    ensureCliExecStreamCapacity()
+
+    const child = spawn(cmd, args, { cwd, env, windowsHide: true })
+    const session: CliExecStreamSession = {
+      id: `cli_stream_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      taskId: String(ctx.task.id ?? ''),
+      child,
+      cmd,
+      args,
+      cwd,
+      encoding,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      stdout: '',
+      stderr: '',
+      stdoutCursor: 0,
+      stderrCursor: 0,
+      exited: false,
+      exitCode: null,
+      exitSignal: null,
+      timedOut: false,
+      killed: false,
+      waiters: new Set(),
+    }
+    cliExecStreamSessions.set(session.id, session)
+
+    const matcher = buildCliExecStreamPatternMatcher(obj)
+
+    const onStdout = (c: Buffer | string) => {
+      appendCliExecStreamText(session, 'stdout', decodeCliExecChunk(Buffer.isBuffer(c) ? c : Buffer.from(String(c)), encoding))
+    }
+    const onStderr = (c: Buffer | string) => {
+      appendCliExecStreamText(session, 'stderr', decodeCliExecChunk(Buffer.isBuffer(c) ? c : Buffer.from(String(c)), encoding))
+    }
+
+    child.stdout?.on('data', onStdout)
+    child.stderr?.on('data', onStderr)
+    child.once('error', (err) => {
+      session.lastError = err instanceof Error ? err.message : String(err)
+      session.exited = true
+      session.exitCode = -1
+      session.exitSignal = null
+      if (session.timeoutTimer) {
+        clearTimeout(session.timeoutTimer)
+        session.timeoutTimer = undefined
+      }
+      notifyCliExecStreamSession(session)
+    })
+    child.once('exit', (code, signal) => {
+      session.exited = true
+      session.exitCode = code
+      session.exitSignal = signal
+      if (session.timeoutTimer) {
+        clearTimeout(session.timeoutTimer)
+        session.timeoutTimer = undefined
+      }
+      notifyCliExecStreamSession(session)
+    })
+
+    session.timeoutTimer = setTimeout(() => {
+      if (session.exited) return
+      session.timedOut = true
+      session.killed = true
+      void killProcessTree(session.child)
+      notifyCliExecStreamSession(session)
+    }, timeoutMs)
+
+    let killRequested = false
+    const requestKill = () => {
+      if (killRequested) return
+      killRequested = true
+      session.killed = true
+      void killProcessTree(child)
+    }
+    ctx.setCancelCurrent(() => requestKill())
+
+    const deadline = Date.now() + yieldTimeoutMs
+    let yieldedBy = 'start'
+    let matched: string | undefined
+
+    const evaluate = (): boolean => {
+      const unread = peekCliExecStreamUnread(session)
+      if (!unread.hasDelta && !session.exited) return false
+      const merged = [unread.stdout, unread.stderr].filter(Boolean).join('\n')
+      if (matcher && merged) {
+        const m = matcher(merged)
+        if (m) {
+          yieldedBy = 'pattern'
+          matched = m[0]
+          return true
+        }
+      }
+      if (returnOnFirstOutput && unread.hasDelta) {
+        yieldedBy = 'output'
+        return true
+      }
+      if (session.exited) {
+        yieldedBy = 'exit'
+        return true
+      }
+      return false
+    }
+
+    while (true) {
+      if (ctx.isCanceled()) {
+        requestKill()
+        yieldedBy = 'canceled'
+        break
+      }
+      if (evaluate()) break
+      const remain = deadline - Date.now()
+      if (remain <= 0) {
+        yieldedBy = 'wait-timeout'
+        break
+      }
+      await waitForCliExecStreamUpdate(session, Math.min(1000, remain))
+    }
+
+    ctx.setCancelCurrent(undefined)
+    return buildCliExecStreamResult(session, 'start', { yieldedBy, matched })
   }
 
   if (toolName === 'cli.exec') {
@@ -623,12 +1454,14 @@ export async function executeBuiltinTool(
     }
 
     const child = spawn(cmd, args, { cwd, env, windowsHide: true })
+    let killRequested = false
+    const requestKill = () => {
+      if (killRequested) return
+      killRequested = true
+      void killProcessTree(child)
+    }
     ctx.setCancelCurrent(() => {
-      try {
-        child.kill()
-      } catch {
-        // ignore
-      }
+      requestKill()
     })
 
     const stdoutChunks: Buffer[] = []
@@ -651,11 +1484,7 @@ export async function executeBuiltinTool(
 
     const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       const timer = setTimeout(() => {
-        try {
-          child.kill()
-        } catch {
-          // ignore
-        }
+        requestKill()
         reject(new Error(`cli.exec timeout (${timeoutMs}ms)`))
       }, timeoutMs)
 
@@ -1038,8 +1867,18 @@ export async function executeBuiltinTool(
         ? Math.max(0, Math.min(2, obj.temperature))
         : Math.max(0, Math.min(2, appSettings.ai.temperature))
     const maxTokensRaw = typeof obj?.maxTokens === 'number' && Number.isFinite(obj.maxTokens) ? Math.trunc(obj.maxTokens) : 1200
-    const thinkingEffortRaw = obj?.thinkingEffort ?? appSettings.ai.thinkingEffort
-    const reasoningOptions = buildReasoningOptions(model, thinkingEffortRaw, maxTokensRaw)
+    const reasoningOptions = buildOpenAICompatReasoningOptions({
+      model,
+      maxTokens: maxTokensRaw,
+      settings: {
+        thinkingEffort: obj?.thinkingEffort ?? appSettings.ai.thinkingEffort,
+        thinkingProvider: obj?.thinkingProvider ?? appSettings.ai.thinkingProvider,
+        openaiReasoningEffort: obj?.openaiReasoningEffort ?? appSettings.ai.openaiReasoningEffort,
+        claudeThinkingEffort: obj?.claudeThinkingEffort ?? appSettings.ai.claudeThinkingEffort,
+        geminiThinkingEffort: obj?.geminiThinkingEffort ?? appSettings.ai.geminiThinkingEffort,
+      },
+      claudeDisabledMinMaxTokens: 2048,
+    })
     const maxTokens = reasoningOptions.maxTokens
     const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(2000, Math.min(180000, Math.trunc(obj.timeoutMs))) : 60000
 

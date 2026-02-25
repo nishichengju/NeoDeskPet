@@ -348,6 +348,16 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   // Context menu
   showContextMenu: (): void => ipcRenderer.send('pet:showContextMenu'),
   setPetOverlayHover: (hovering: boolean): void => ipcRenderer.send('pet:setOverlayHover', hovering),
+  setPetOverlayRects: (
+    rects:
+      | {
+          taskPanel?:
+            | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
+            | null
+        }
+      | null,
+  ): void =>
+    ipcRenderer.send('pet:setOverlayRects', rects),
 
   // Mouse forward for transparent click-through
   setIgnoreMouseEvents: (ignore: boolean, forward: boolean): void =>

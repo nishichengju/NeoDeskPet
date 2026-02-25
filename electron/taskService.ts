@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { getSettings } from './store'
-import { executeBuiltinTool, type ToolInput } from './toolExecutor'
+import { cancelCliExecStreamSessionsForTask, executeBuiltinTool, type ToolInput } from './toolExecutor'
 import {
   filterToolDefinitionsBySettings,
   getDefaultAgentToolDefinitions,
@@ -14,6 +14,8 @@ import {
 } from './toolRegistry'
 import { getLive2dCapabilities } from './live2dToolState'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
+import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
+import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, TaskStatus } from './types'
 
@@ -29,8 +31,6 @@ type TaskRuntime = {
   cancelCurrent?: () => void
 }
 
-type ThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
-
 const MAX_TASKS = 200
 const MAX_STEP_INPUT_CHARS = 8000
 const MAX_STEP_OUTPUT_CHARS = 5000
@@ -38,41 +38,6 @@ const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
 
 type Live2dTagExtracted = { cleanedText: string; expression?: string; motion?: string }
 type Live2dModelTagHints = { expressions: string[]; motions: string[] }
-
-function normalizeThinkingEffort(value: unknown): ThinkingEffort {
-  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
-  return 'disabled'
-}
-
-function mapThinkingBudgetTokens(effort: ThinkingEffort, maxTokens: number): number {
-  const cap = Math.max(1024, Math.trunc(maxTokens) - 1)
-  if (effort === 'high') return Math.max(1024, Math.min(8192, cap))
-  if (effort === 'medium') return Math.max(1024, Math.min(4096, cap))
-  return Math.max(1024, Math.min(2048, cap))
-}
-
-function buildReasoningOptions(
-  model: string,
-  thinkingEffortRaw: unknown,
-  maxTokensRaw: number,
-): { maxTokens: number; extra: Record<string, unknown> } {
-  const modelId = String(model ?? '').trim().toLowerCase()
-  const requestedMaxTokens = Math.max(64, Math.min(262144, Math.trunc(maxTokensRaw)))
-  const isClaudeModel = modelId.includes('claude')
-  if (!isClaudeModel) return { maxTokens: requestedMaxTokens, extra: {} }
-
-  const thinkingEffort = normalizeThinkingEffort(thinkingEffortRaw)
-  if (thinkingEffort === 'disabled') {
-    // Vertex/OpenAI 兼容网关有时会为 Claude 注入默认 thinking 预算；这里抬高下限避免 max_tokens 触发 400。
-    return { maxTokens: Math.max(2048, requestedMaxTokens), extra: { thinking: { type: 'disabled' } } }
-  }
-
-  const budgetTokens = mapThinkingBudgetTokens(thinkingEffort, requestedMaxTokens)
-  return {
-    maxTokens: Math.max(requestedMaxTokens, budgetTokens + 1),
-    extra: { thinking: { type: 'enabled', budget_tokens: budgetTokens } },
-  }
-}
 
 function extractLive2dTags(text: string): Live2dTagExtracted {
   const raw = String(text ?? '')
@@ -470,6 +435,23 @@ function isLikelyImageRef(raw: string): boolean {
   const s = String(raw ?? '').trim()
   if (!s) return false
   if (/^data:image\//i.test(s)) return true
+  if (/^blob:/i.test(s)) return true
+  if (/^file:\/\//i.test(s)) return IMAGE_REF_RE.test(s)
+
+  // 聊天窗口 ToolUse 图片预览只展示“本地/内联图片”：
+  // - 避免把搜索结果 JSON 里的一堆远程缩略图 URL 误识别成“工具输出图片”
+  // - 避免热链/防盗链导致的大量破图占位
+  // 允许 localhost 的内部附件服务 URL（用于预览本地附件）。
+  if (/^https?:\/\//i.test(s)) {
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)(?::\d+)?\//i.test(s)) return IMAGE_REF_RE.test(s)
+    return false
+  }
+
+  // 过滤掉“无协议远程 URL”（例如 //host/path 或 host.tld/path），它们不是本地文件路径。
+  if (/^\/\//.test(s)) return false
+  if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\//.test(s)) return false
+
+  // 绝对路径（Windows / UNC / POSIX）或相对路径（如 task-output/foo.png）
   return IMAGE_REF_RE.test(s)
 }
 
@@ -533,6 +515,7 @@ export class TaskService {
   private readonly onChanged: () => void
   private readonly userDataDir: string
   private readonly mcpManager: McpManager | null
+  private readonly skillManager: SkillManager
   private schedulerTimer: NodeJS.Timeout | null = null
 
   constructor(opts: { onChanged: () => void; userDataDir: string; mcpManager?: McpManager | null }) {
@@ -543,6 +526,7 @@ export class TaskService {
     this.onChanged = opts.onChanged
     this.userDataDir = opts.userDataDir
     this.mcpManager = opts.mcpManager ?? null
+    this.skillManager = new SkillManager({ workspaceDir: process.cwd() })
 
     // 如果上次异常退出，pending/running/paused 状态会悬挂；这里统一标记为 failed（便于用户看见原因）
     this.writeState((draft) => {
@@ -665,6 +649,7 @@ export class TaskService {
     } catch {
       // ignore
     }
+    void cancelCliExecStreamSessionsForTask(t.id).catch(() => undefined)
     for (const w of rt.waiters.splice(0)) w()
 
     this.writeState((draft) => {
@@ -769,6 +754,11 @@ export class TaskService {
         isCanceled: () => rt.canceled,
         setCancelCurrent: (fn) => {
           rt.cancelCurrent = fn
+        },
+        refreshSkillRegistry: async () => {
+          const skillManagedDirRaw =
+            typeof settings.orchestrator?.skillManagedDir === 'string' ? settings.orchestrator.skillManagedDir.trim() : ''
+          await this.skillManager.refresh({ managedDir: skillManagedDirRaw || undefined })
         },
       },
       { maxStepOutputChars: MAX_STEP_OUTPUT_CHARS },
@@ -1099,6 +1089,116 @@ export class TaskService {
       return toolByName.get(needle) ?? null
     }
 
+    const skillSystemMessages: Array<Record<string, unknown>> = []
+    let effectiveAgentRequest = request
+    const deferredSkillLogs: string[] = []
+    const skillEnabled = settings.orchestrator?.skillEnabled !== false
+    const skillAllowModelInvocation = settings.orchestrator?.skillAllowModelInvocation !== false
+    const skillManagedDirRaw =
+      typeof settings.orchestrator?.skillManagedDir === 'string' ? settings.orchestrator.skillManagedDir : ''
+    const skillVerboseLogging = settings.orchestrator?.skillVerboseLogging === true
+    const skillRuntimeOptions: SkillManagerRuntimeOptions = {
+      enabled: skillEnabled,
+      allowModelInvocation: skillAllowModelInvocation,
+      managedDir: skillManagedDirRaw.trim() || undefined,
+    }
+
+    try {
+      const skillDiagnostics = await this.skillManager.getDiagnostics(skillRuntimeOptions)
+      if (skillVerboseLogging) {
+        if (!skillDiagnostics.enabled) {
+          deferredSkillLogs.push('[Skill] disabled by settings')
+        } else {
+          deferredSkillLogs.push(
+            `[Skill] loaded: total=${skillDiagnostics.totalSkills}, visible=${skillDiagnostics.modelVisibleSkills}, commands=${skillDiagnostics.totalCommands}, source(managed/workspace)=${skillDiagnostics.sourceCounts.managed}/${skillDiagnostics.sourceCounts.workspace}`,
+          )
+          deferredSkillLogs.push(`[Skill] managedDir: ${skillDiagnostics.managedDir}`)
+          if (!skillAllowModelInvocation) deferredSkillLogs.push('[Skill] model auto invocation disabled (skip available_skills prompt)')
+          if (skillDiagnostics.conflicts.length > 0) {
+            deferredSkillLogs.push(`[Skill] conflicts: ${skillDiagnostics.conflicts.length}`)
+            for (const c of skillDiagnostics.conflicts.slice(0, 5)) {
+              deferredSkillLogs.push(
+                `[Skill] conflict/${c.type}: key=${c.key}, kept=${c.kept}${c.replaced ? `, replaced=${c.replaced}` : ''}${c.note ? `, note=${c.note}` : ''}`,
+              )
+            }
+            if (skillDiagnostics.conflicts.length > 5) {
+              deferredSkillLogs.push(`[Skill] conflicts truncated: +${skillDiagnostics.conflicts.length - 5}`)
+            }
+          }
+        }
+      }
+
+      const skillsPrompt = await this.skillManager.buildSkillsPrompt(skillRuntimeOptions)
+      if (skillsPrompt) {
+        skillSystemMessages.push({
+          role: 'system',
+          content:
+            '## Skills（技能）\n' +
+            '在回答前先浏览 <available_skills> 的描述；如果某个技能与任务高度匹配，优先使用该技能。\n' +
+            '可用辅助工具：skill.list（查看已加载技能）、skill.install（从 Git 仓库安装到托管目录）、skill.refresh（刷新缓存）。\n' +
+            '若需要技能详细步骤，优先使用 skill.read 按技能名读取（更稳、更省上下文）；示例：skill.read {name:\"技能名\"}。\n' +
+            '运行本地命令一律优先使用 cli.exec_stream（start/poll/stop）；对会先输出提示/二维码路径再长时间等待的脚本，必须用流式方式，不要长时间阻塞等待。\n' +
+            '一次最多先读取 1 个技能，避免无关技能占用上下文。\n' +
+            skillsPrompt,
+        })
+      }
+
+      const reqTrim = request.trim()
+      if (reqTrim) {
+        const matchResult = await this.skillManager.matchWithTrace(reqTrim, skillRuntimeOptions)
+        const match = matchResult.match
+        if (skillVerboseLogging && reqTrim.startsWith('/')) {
+          const trace = matchResult.trace
+          const selectedText = trace.selected
+            ? `${trace.selected.skillName} (/${trace.selected.commandName}, score=${trace.selected.score})`
+            : 'none'
+          deferredSkillLogs.push(
+            `[Skill] match trace: mode=${trace.mode}, reason=${trace.reason ?? 'n/a'}, query=${trace.query ?? '-'}, selected=${selectedText}`,
+          )
+          if (trace.candidates.length > 1) {
+            const top = trace.candidates
+              .slice(0, 3)
+              .map((c) => `${c.skillName}/${c.commandName}@${c.score}`)
+              .join(', ')
+            deferredSkillLogs.push(`[Skill] match candidates: ${top}${trace.candidates.length > 3 ? ' ...' : ''}`)
+          }
+        }
+        if (match) {
+          const skillName = match.command.skillName
+          deferredSkillLogs.push(`[Skill] matched: ${skillName} (/${match.command.name})`)
+
+          const loaded = await this.skillManager.readSkillContent(skillName, skillRuntimeOptions)
+          if (loaded) {
+            const skillBody = clampText(loaded.content, 24000)
+            skillSystemMessages.push({
+              role: 'system',
+              content:
+                `本轮请求已显式指定技能：${loaded.skill.name}。\n` +
+                `请严格优先遵循该技能步骤；若技能与系统安全/工具事实冲突，以系统规则与工具输出为准。`,
+            })
+            skillSystemMessages.push({
+              role: 'system',
+              content: `【SKILL: ${loaded.skill.name}】\n来源：${loaded.skill.filePath}\n\n${skillBody}`,
+            })
+          } else {
+            deferredSkillLogs.push(`[Skill] read failed: ${skillName}`)
+            skillSystemMessages.push({
+              role: 'system',
+              content:
+                `本轮请求已显式指定技能：${skillName}，但系统读取技能文件失败。` +
+                `请根据用户请求继续执行；如需要可尝试用 skill.read 读取技能文件。`,
+            })
+          }
+
+          const argsText = (match.args ?? '').trim()
+          effectiveAgentRequest = argsText || `请按已指定技能「${skillName}」完成本次请求。`
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      deferredSkillLogs.push(`[Skill] setup skipped: ${clampText(msg, 160)}`)
+    }
+
     const messages: Array<Record<string, unknown>> = []
     if (system) messages.push({ role: 'system', content: system })
     if (extraContext) messages.push({ role: 'system', content: extraContext })
@@ -1116,6 +1216,7 @@ export class TaskService {
       content:
         '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。',
     })
+    if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
     // 注入历史对话（history），让 agent 能够理解对话上下文，避免答非所问
     const historyRaw = Array.isArray(obj?.history) ? obj.history : []
@@ -1128,7 +1229,7 @@ export class TaskService {
         messages.push({ role, content })
       }
     }
-    const requestText = request.trim()
+    const requestText = effectiveAgentRequest.trim()
     const lastHistoryMessage = [...messages].reverse().find((m) => m.role === 'user' || m.role === 'assistant')
     const lastHistoryUserText =
       lastHistoryMessage?.role === 'user' && typeof lastHistoryMessage.content === 'string'
@@ -1159,19 +1260,19 @@ export class TaskService {
 
       type VisionPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
       const parts: VisionPart[] = []
-      if (request.trim()) parts.push({ type: 'text', text: request })
+      if (effectiveAgentRequest.trim()) parts.push({ type: 'text', text: effectiveAgentRequest })
       for (const p of visionImagePaths) {
         const url = await fileToDataUrl(p)
         if (!url) continue
         parts.push({ type: 'image_url', image_url: { url } })
       }
       if (parts.length === 0) {
-        if (!hasSameTailUserRequest) messages.push({ role: 'user', content: request })
+        if (!hasSameTailUserRequest) messages.push({ role: 'user', content: effectiveAgentRequest })
       } else {
         messages.push({ role: 'user', content: parts })
       }
     } else {
-      if (!hasSameTailUserRequest) messages.push({ role: 'user', content: request })
+      if (!hasSameTailUserRequest) messages.push({ role: 'user', content: effectiveAgentRequest })
     }
 
     const userMsgRef = messages.find((m) => m.role === 'user') as Record<string, unknown> | undefined
@@ -1181,7 +1282,7 @@ export class TaskService {
       const m = userMsgRef
       if (!m) return false
       if (!Array.isArray(m.content)) return false
-      m.content = request
+      m.content = effectiveAgentRequest
       visionStripped = true
       return true
     }
@@ -1231,6 +1332,7 @@ export class TaskService {
       if (logs.length > 120) logs.splice(0, logs.length - 120)
       updateProgress(force)
     }
+    for (const line of deferredSkillLogs) pushLog(line, true)
 
     const toolPreview = (v: unknown, max: number) => clampText(typeof v === 'string' ? v : JSON.stringify(v ?? ''), max)
 
@@ -1310,8 +1412,21 @@ export class TaskService {
     const maxTokensRaw =
       typeof maxTokensCandidate === 'number' && Number.isFinite(maxTokensCandidate) ? Math.trunc(maxTokensCandidate) : 900
     const thinkingEffortOverride = readString(apiOverride, 'thinkingEffort')
-    const baseThinkingEffort = normalizeThinkingEffort((baseAi as { thinkingEffort?: unknown }).thinkingEffort)
-    const reasoningOptions = buildReasoningOptions(model, thinkingEffortOverride || baseThinkingEffort, maxTokensRaw)
+    const reasoningOptions = buildOpenAICompatReasoningOptions({
+      model,
+      maxTokens: maxTokensRaw,
+      settings: {
+        thinkingEffort: thinkingEffortOverride || (baseAi as { thinkingEffort?: unknown }).thinkingEffort,
+        thinkingProvider: readString(apiOverride, 'thinkingProvider') || (baseAi as { thinkingProvider?: unknown }).thinkingProvider,
+        openaiReasoningEffort:
+          readString(apiOverride, 'openaiReasoningEffort') || (baseAi as { openaiReasoningEffort?: unknown }).openaiReasoningEffort,
+        claudeThinkingEffort:
+          readString(apiOverride, 'claudeThinkingEffort') || (baseAi as { claudeThinkingEffort?: unknown }).claudeThinkingEffort,
+        geminiThinkingEffort:
+          readString(apiOverride, 'geminiThinkingEffort') || (baseAi as { geminiThinkingEffort?: unknown }).geminiThinkingEffort,
+      },
+      claudeDisabledMinMaxTokens: 2048,
+    })
     const maxTokens = reasoningOptions.maxTokens
     const timeoutMs =
       typeof obj?.timeoutMs === 'number'
@@ -1859,11 +1974,11 @@ export class TaskService {
     const buildToolGuideForTextMode = (): string => {
       const lines: string[] = []
       lines.push('重要：工具输出是事实来源。严禁编造/猜测工具执行结果。')
-      lines.push('如果 TOOL_RESULT 为空、乱码、或与你需要的答案不一致：必须明确说明“工具输出不可用/无法解析”，并优先选择重试（可换更简单/更稳的命令或加 -NoProfile）。')
+      lines.push('如果工具结果块（TOOL_RESULT）为空、乱码、或与你需要的答案不一致：必须明确说明“工具输出不可用/无法解析”，并优先选择重试（可换更简单/更稳的命令或加 -NoProfile）。')
       lines.push('只有当不需要工具时，才直接给最终回答。')
-      lines.push('当你需要调用工具时：不要输出任何自然语言前置话术，直接输出一个或多个 TOOL_REQUEST。')
+      lines.push('当你需要调用工具时：不要输出任何自然语言前置话术，直接输出一个或多个工具调用块（TOOL_REQUEST）。')
       lines.push('')
-      lines.push('你可以通过“文本协议 TOOL_REQUEST”来调用工具。')
+      lines.push('你可以通过下面的兼容工具调用格式来调用工具。')
       lines.push('重要：用户仅说“打开/进入某网站”时，只需打开网页（优先 browser.open；必要时截图/交互才用 browser.playwright），不要擅自抓取全文/总结；只有用户明确要“抓取/总结/提炼”时才做 extract 或 summarize。')
       lines.push('')
       lines.push('格式（必须严格匹配，不要放在代码块里）：')
@@ -1872,7 +1987,7 @@ export class TaskService {
       lines.push(`input_json:${VCP_VALUE_START}{"url":"https://example.com","stripHtml":true}${VCP_VALUE_END}`)
       lines.push(TOOL_REQUEST_END)
       lines.push('')
-      lines.push('工具返回后，你会收到 TOOL_RESULT 块；然后继续下一步或给出最终答复。')
+      lines.push('工具返回后，你会收到工具结果块（TOOL_RESULT）；然后继续下一步或给出最终答复。')
       lines.push('')
       lines.push('可用工具（tool_name 必须使用下面的内部名，不要编造）：')
       for (const d of toolDefs) {
@@ -2342,8 +2457,9 @@ export class TaskService {
         content:
           '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。',
       })
+      if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
-      messages.push({ role: 'user', content: request })
+      messages.push({ role: 'user', content: effectiveAgentRequest })
 
       if (executedCallOrder.length > 0) {
         messages.push({

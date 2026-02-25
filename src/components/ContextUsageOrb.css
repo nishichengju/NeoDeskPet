@@ -11,7 +11,8 @@
   -webkit-app-region: no-drag;
   user-select: none;
   touch-action: none;
-  contain: layout paint;
+  /* 不能用 paint containment，否则 tooltip 会被裁掉 */
+  contain: layout;
   will-change: left, top;
 }
 
@@ -33,6 +34,7 @@
   border-radius: 999px;
   background: conic-gradient(rgba(34, 197, 94, 0.95) var(--ndp-context-pct, 0%), rgba(255, 255, 255, 0.18) 0);
   filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.28));
+  transition: transform 0.12s ease, filter 0.12s ease;
 }
 
 .ndp-context-orb-inner {
@@ -41,6 +43,15 @@
   border-radius: 999px;
   background: rgba(20, 20, 24, 0.6);
   border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.ndp-context-orb:hover .ndp-context-orb-ring {
+  transform: scale(1.08);
+  filter: drop-shadow(0 10px 28px rgba(34, 197, 94, 0.36));
+}
+
+.ndp-context-orb:hover .ndp-context-orb-inner {
+  border-color: rgba(255, 255, 255, 0.28);
 }
 
 .ndp-context-orb-tooltip {
@@ -59,6 +70,16 @@
   box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
   z-index: 61;
   pointer-events: none;
+}
+
+.ndp-context-orb[data-tooltip-x='left'] .ndp-context-orb-tooltip {
+  left: auto;
+  right: 22px;
+}
+
+.ndp-context-orb[data-tooltip-y='bottom'] .ndp-context-orb-tooltip {
+  top: 22px;
+  transform: none;
 }
 
 .ndp-context-orb-tooltip-title {

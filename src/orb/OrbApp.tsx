@@ -12,6 +12,7 @@ import type {
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, getAIService, type ChatMessage } from '../services/aiService'
 import { MarkdownMessage } from '../components/MarkdownMessage'
+import { stripToolProtocolDisplayArtifacts } from '../utils/toolProtocolDisplay'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
 type PopoverKind = 'menu' | 'history'
@@ -69,7 +70,7 @@ function toLocalMediaSrc(mediaPath: string): string {
 }
 
 function normalizeInterleavedTextSegment(text: string): string {
-  return String(text ?? '')
+  return stripToolProtocolDisplayArtifacts(String(text ?? ''))
     .replace(/\r\n/g, '\n')
     .replace(/^\n+/g, '')
     .replace(/\n+$/g, '')

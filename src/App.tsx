@@ -1,16 +1,19 @@
 import './App.css'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type {
-  AIThinkingEffort,
+  AIReasoningProvider,
   AppSettings,
   BubbleStyle,
   ChatMessageBlock,
   ChatMessageRecord,
   ChatSessionSummary,
+  ClaudeThinkingEffort,
   ContextUsageSnapshot,
+  GeminiThinkingEffort,
   McpStateSnapshot,
   McpServerConfig,
   MemoryRetrieveResult,
+  OpenAIReasoningEffort,
   Persona,
   PersonaSummary,
   TaskCreateArgs,
@@ -19,12 +22,16 @@ import type {
   TailDirection,
 } from '../electron/types'
 import { getBuiltinToolDefinitions, getToolGroupId, isToolEnabled } from '../electron/toolRegistry'
+import { resolveReasoningUiState, toLegacyThinkingEffortFromProviderLevel } from '../electron/reasoningConfig'
 import { getApi } from './neoDeskPetApi'
 import { getWindowType } from './windowType'
 import { MemoryConsoleWindow } from './windows/MemoryConsoleWindow'
 import { Live2DView } from './live2d/Live2DView'
 import { SpeechBubble } from './components/SpeechBubble'
 import { ContextUsageOrb } from './components/ContextUsageOrb'
+import { MarkdownMessage } from './components/MarkdownMessage'
+import { OrbApp } from './orb/OrbApp'
+import { OrbMenuWindow } from './orb/OrbMenuWindow'
 import {
   getAvailableModels,
   parseModelMetadata,
@@ -34,6 +41,7 @@ import {
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatMessage, type ChatUsage } from './services/aiService'
 import { TtsPlayer } from './services/ttsService'
 import { splitTextIntoTtsSegments } from './services/textSegmentation'
+import { stripToolProtocolDisplayArtifacts } from './utils/toolProtocolDisplay'
 
 function App() {
   const windowType = getWindowType()
@@ -57,6 +65,14 @@ function App() {
 
   if (windowType === 'memory') {
     return <MemoryConsoleWindow api={api} settings={settings} />
+  }
+
+  if (windowType === 'orb') {
+    return <OrbApp api={api} />
+  }
+
+  if (windowType === 'orb-menu') {
+    return <OrbMenuWindow api={api} />
   }
 
   return <PetWindow />
@@ -178,7 +194,7 @@ function clampIntValue(v: unknown, fallback: number, min: number, max: number): 
 }
 
 function normalizeAssistantDisplayText(text: string, opts?: { trim?: boolean }): string {
-  const cleaned = String(text ?? '')
+  const cleaned = stripToolProtocolDisplayArtifacts(String(text ?? ''))
     .replace(/\[表情[：:]\s*[^\]]+\]/g, '')
     .replace(/\[动作[：:]\s*[^\]]+\]/g, '')
     .replace(/\r\n/g, '\n')
@@ -268,7 +284,7 @@ function joinTextBlocks(blocks: ChatMessageBlock[]): string {
 }
 
 function normalizeInterleavedTextSegment(text: string): string {
-  return String(text ?? '')
+  return stripToolProtocolDisplayArtifacts(String(text ?? ''))
     .replace(/\r\n/g, '\n')
     .replace(/^\n+/g, '')
     .replace(/\n+$/g, '')
@@ -613,6 +629,8 @@ function PetWindow() {
   const [tasks, setTasks] = useState<TaskRecord[]>([])
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot | null>(null)
   const toolAnimRef = useRef<{ motionGroups: string[]; expressions: string[] }>({ motionGroups: [], expressions: [] })
+  const taskPanelRef = useRef<HTMLDivElement | null>(null)
+  const lastTaskPanelRectSigRef = useRef<string>('')
 
   // 默认不提供任何“固定人设台词”，避免与 AI 设置里的人设割裂
   const defaultPhrases: string[] = []
@@ -1545,6 +1563,58 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
     return true
   })
 
+  useEffect(() => {
+    if (!api) return
+
+    let disposed = false
+    let raf = 0
+    let ro: ResizeObserver | null = null
+
+    const sendTaskPanelRect = () => {
+      if (disposed) return
+      const el = taskPanelRef.current
+      if (!el || visibleTasks.length === 0) {
+        if (lastTaskPanelRectSigRef.current !== 'none') {
+          lastTaskPanelRectSigRef.current = 'none'
+          api.setPetOverlayRects(null)
+        }
+        return
+      }
+
+      const rect = el.getBoundingClientRect()
+      const pad = 12
+      const x = Math.round(rect.left - pad)
+      const y = Math.round(rect.top - pad)
+      const width = Math.round(rect.width + pad * 2)
+      const height = Math.round(rect.height + pad * 2)
+      const viewportWidth = Math.round(window.innerWidth || 0)
+      const viewportHeight = Math.round(window.innerHeight || 0)
+      const sig = `${x},${y},${width},${height},${viewportWidth},${viewportHeight}`
+      if (sig === lastTaskPanelRectSigRef.current) return
+      lastTaskPanelRectSigRef.current = sig
+      api.setPetOverlayRects({ taskPanel: { x, y, width, height, viewportWidth, viewportHeight } })
+    }
+
+    sendTaskPanelRect()
+    raf = window.requestAnimationFrame(sendTaskPanelRect)
+    const onResize = () => sendTaskPanelRect()
+    window.addEventListener('resize', onResize)
+
+    if (typeof ResizeObserver !== 'undefined' && taskPanelRef.current) {
+      ro = new ResizeObserver(() => sendTaskPanelRect())
+      ro.observe(taskPanelRef.current)
+    }
+
+    return () => {
+      disposed = true
+      window.cancelAnimationFrame(raf)
+      window.removeEventListener('resize', onResize)
+      ro?.disconnect()
+      lastTaskPanelRectSigRef.current = ''
+      api.setPetOverlayRects(null)
+    }
+  }, [api, visibleTasks.length, taskPanelX, taskPanelY])
+
   // Get model URL directly from settings
   const modelJsonUrl = settings?.live2dModelFile ?? '/live2d/Haru/Haru.model3.json'
 
@@ -1781,10 +1851,16 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       )}
       {visibleTasks.length > 0 && (
         <div
+          ref={taskPanelRef}
           className="ndp-task-panel"
+          data-no-window-drag="true"
           style={{ left: `${taskPanelX}%`, top: `${taskPanelY}%`, transform: 'translate(-50%, 0)' }}
           onMouseEnter={() => api?.setPetOverlayHover(true)}
           onMouseLeave={() => api?.setPetOverlayHover(false)}
+          onPointerEnter={() => api?.setPetOverlayHover(true)}
+          onPointerLeave={() => api?.setPetOverlayHover(false)}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
           onContextMenu={(e) => {
@@ -1824,6 +1900,7 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
                   {task.status === 'running' && (
                     <button
                       className="ndp-task-btn"
+                      onPointerDown={(e) => e.stopPropagation()}
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={() => void api?.pauseTask(task.id).catch((err) => console.error(err))}
                     >
@@ -1833,6 +1910,7 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
                   {task.status === 'paused' && (
                     <button
                       className="ndp-task-btn"
+                      onPointerDown={(e) => e.stopPropagation()}
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={() => void api?.resumeTask(task.id).catch((err) => console.error(err))}
                     >
@@ -1841,6 +1919,7 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
                   )}
                   <button
                     className="ndp-task-btn ndp-task-btn-danger"
+                    onPointerDown={(e) => e.stopPropagation()}
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={() => {
                       if (!api) return
@@ -5377,7 +5456,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             value={toolCallingMode}
             onChange={(e) => void setToolCallingMode(e.target.value as 'auto' | 'native' | 'text')}
             disabled={!plannerEnabled || !toolCallingEnabled}
-            title="auto=优先原生tools，失败降级文本协议；native=强制原生；text=强制文本协议（更稳）"
+            title="auto=优先原生工具调用，失败自动降级兼容模式；native=仅原生工具调用；text=兼容模式（通常更稳）"
           >
             <option value="auto">auto</option>
             <option value="native">native</option>
@@ -5561,6 +5640,26 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             const renderRun = (r: (typeof runs)[number], idx: number): React.ReactNode => {
               const progress = runs.length > 1 ? `${idx + 1}/${runs.length}` : ''
               const pillStatus = r.status === 'error' ? 'failed' : r.status
+              const isPreviewableToolImagePath = (raw: string): boolean => {
+                const s = String(raw ?? '').trim()
+                if (!s) return false
+                if (/^data:image\//i.test(s)) return true
+                if (/^blob:/i.test(s)) return true
+                if (/^file:\/\//i.test(s)) return true
+                if (/^https?:\/\//i.test(s)) return /^https?:\/\/(127\.0\.0\.1|localhost)(?::\d+)?\//i.test(s)
+                if (/^\/\//.test(s)) return false
+                if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\//.test(s)) return false
+                return true
+              }
+              const toolImagePaths = Array.isArray(r.imagePaths)
+                ? Array.from(
+                    new Set(
+                      r.imagePaths
+                        .map((x) => String(x ?? '').trim())
+                        .filter((x) => x && isPreviewableToolImagePath(x)),
+                    ),
+                  ).slice(0, 8)
+                : []
               const mm = r.outputPreview ? parseMmvectorResults(r.outputPreview) : null
               const mmMedia =
                 mm?.results?.filter((x) => {
@@ -5570,87 +5669,131 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                   return false
                 }) ?? []
               return (
-                <details key={r.id} className="ndp-tooluse">
-                  <summary className="ndp-tooluse-summary">
-                    <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
-                      DeskPet · ToolUse: {r.toolName}
-                      {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
-                    </span>
-                  </summary>
-                  <div className="ndp-tooluse-body">
-                    <div className="ndp-tooluse-run">
-                      <div className="ndp-tooluse-run-title">
-                        <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${r.status}`}>{r.status}</span>
-                        <span className="ndp-tooluse-run-name">{r.toolName}</span>
-                      </div>
-                      {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
-                      {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
-                      {mmMedia.length > 0 ? (
-                        <div className="ndp-mmvector-results">
-                          <div className="ndp-mmvector-title">多模态结果（可预览/播放）</div>
-                          <div className="ndp-mmvector-grid">
-                            {mmMedia.map((it) => {
-                              const isVideo = String(it.type ?? '') === 'video'
-                              const src = isVideo
-                                ? toMediaSrc(String(it.videoUrl ?? ''), String(it.videoPath ?? ''))
-                                : toMediaSrc('', String(it.imagePath ?? ''))
-                              if (!src) return null
-                              const labelParts: string[] = []
-                              if (it.filename) labelParts.push(String(it.filename))
-                              if (typeof it.score === 'number' && Number.isFinite(it.score)) labelParts.push(it.score.toFixed(4))
-                              const label = labelParts.join(' · ')
-                              return (
-                                <div key={`mmv-${String(it.id ?? '')}-${src}`} className="ndp-mmvector-item">
-                                  {isVideo ? (
-                                    <LocalVideo api={api} videoPath={src} className="ndp-mmvector-video" controls preload="metadata" playsInline />
-                                  ) : (
-                                    <MmvectorImage imagePath={String(it.imagePath ?? '')} alt={String(it.filename ?? 'image')} />
-                                  )}
-                                  <div className="ndp-mmvector-meta" title={src}>
-                                    {label || src}
-                                  </div>
-                                  <div className="ndp-mmvector-actions">
-                                    <button
-                                      className="ndp-btn ndp-btn-mini"
-                                      onClick={() => {
-                                        const target = isVideo
-                                          ? (String(it.videoUrl ?? '').trim() || String(it.videoPath ?? '').trim() || src)
-                                          : (String(it.imagePath ?? '').trim() || src)
-                                        void (async () => {
-                                          const raw = String(target ?? '').trim()
-                                          if (!raw) return
-                                          if (/^(https?:|data:|blob:)/i.test(raw)) {
-                                            window.open(raw, '_blank')
-                                            return
-                                          }
-                                          if (api) {
-                                            try {
-                                              const res = await api.getChatAttachmentUrl(raw)
-                                              if (res?.ok && typeof res.url === 'string') {
-                                                window.open(res.url, '_blank')
-                                                return
-                                              }
-                                            } catch {
-                                              /* ignore */
-                                            }
-                                          }
-                                          window.open(toLocalMediaSrc(raw), '_blank')
-                                        })()
-                                      }}
-                                    >
-                                      打开
-                                    </button>
-                                  </div>
-                                </div>
-                              )
-                            })}
+                <>
+                  {toolImagePaths.length > 0 ? (
+                    <div className="ndp-mmvector-results">
+                      <div className="ndp-mmvector-title">工具输出图片（可预览）</div>
+                      <div className="ndp-mmvector-grid">
+                        {toolImagePaths.map((imgPath, imgIdx) => (
+                          <div key={`tool-img-${String(r.id ?? `${idx}`)}-${imgIdx}`} className="ndp-mmvector-item">
+                            <div
+                              className="ndp-mmvector-image-hit"
+                              onClick={() => {
+                                void (async () => {
+                                  const raw = String(imgPath ?? '').trim()
+                                  if (!raw) return
+                                  if (/^(https?:|data:|blob:)/i.test(raw)) {
+                                    window.open(raw, '_blank')
+                                    return
+                                  }
+                                  if (api) {
+                                    try {
+                                      const res = await api.getChatAttachmentUrl(raw)
+                                      if (res?.ok && typeof res.url === 'string') {
+                                        window.open(res.url, '_blank')
+                                        return
+                                      }
+                                    } catch {
+                                      /* ignore */
+                                    }
+                                  }
+                                  window.open(toLocalMediaSrc(raw), '_blank')
+                                })()
+                              }}
+                              title={imgPath}
+                            >
+                              <MmvectorImagePreview api={api} imagePath={imgPath} alt={`tool-image-${imgIdx + 1}`} />
+                            </div>
+                            <div className="ndp-mmvector-meta" title={imgPath}>
+                              image {imgIdx + 1}
+                            </div>
                           </div>
-                        </div>
-                      ) : null}
-                      {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                </details>
+                  ) : null}
+                  <details key={r.id} className="ndp-tooluse">
+                    <summary className="ndp-tooluse-summary">
+                      <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
+                        DeskPet · ToolUse: {r.toolName}
+                        {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
+                      </span>
+                    </summary>
+                    <div className="ndp-tooluse-body">
+                      <div className="ndp-tooluse-run">
+                        <div className="ndp-tooluse-run-title">
+                          <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${r.status}`}>{r.status}</span>
+                          <span className="ndp-tooluse-run-name">{r.toolName}</span>
+                        </div>
+                        {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
+                        {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
+                        {mmMedia.length > 0 ? (
+                          <div className="ndp-mmvector-results">
+                            <div className="ndp-mmvector-title">多模态结果（可预览/播放）</div>
+                            <div className="ndp-mmvector-grid">
+                              {mmMedia.map((it) => {
+                                const isVideo = String(it.type ?? '') === 'video'
+                                const src = isVideo
+                                  ? toMediaSrc(String(it.videoUrl ?? ''), String(it.videoPath ?? ''))
+                                  : toMediaSrc('', String(it.imagePath ?? ''))
+                                if (!src) return null
+                                const labelParts: string[] = []
+                                if (it.filename) labelParts.push(String(it.filename))
+                                if (typeof it.score === 'number' && Number.isFinite(it.score)) labelParts.push(it.score.toFixed(4))
+                                const label = labelParts.join(' · ')
+                                return (
+                                  <div key={`mmv-${String(it.id ?? '')}-${src}`} className="ndp-mmvector-item">
+                                    {isVideo ? (
+                                      <LocalVideo api={api} videoPath={src} className="ndp-mmvector-video" controls preload="metadata" playsInline />
+                                    ) : (
+                                      <MmvectorImage imagePath={String(it.imagePath ?? '')} alt={String(it.filename ?? 'image')} />
+                                    )}
+                                    <div className="ndp-mmvector-meta" title={src}>
+                                      {label || src}
+                                    </div>
+                                    <div className="ndp-mmvector-actions">
+                                      <button
+                                        className="ndp-btn ndp-btn-mini"
+                                        onClick={() => {
+                                          const target = isVideo
+                                            ? (String(it.videoUrl ?? '').trim() || String(it.videoPath ?? '').trim() || src)
+                                            : (String(it.imagePath ?? '').trim() || src)
+                                          void (async () => {
+                                            const raw = String(target ?? '').trim()
+                                            if (!raw) return
+                                            if (/^(https?:|data:|blob:)/i.test(raw)) {
+                                              window.open(raw, '_blank')
+                                              return
+                                            }
+                                            if (api) {
+                                              try {
+                                                const res = await api.getChatAttachmentUrl(raw)
+                                                if (res?.ok && typeof res.url === 'string') {
+                                                  window.open(res.url, '_blank')
+                                                  return
+                                                }
+                                              } catch {
+                                                /* ignore */
+                                              }
+                                            }
+                                            window.open(toLocalMediaSrc(raw), '_blank')
+                                          })()
+                                        }}
+                                      >
+                                        打开
+                                      </button>
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+                        {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
+                      </div>
+                    </div>
+                  </details>
+                </>
               )
             }
 
@@ -5872,18 +6015,23 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                   </div>
                 ) : (
                   <div className="ndp-msg-content">
-                    {isUser || blocks.length === 0
+                    {isUser
                       ? m.content
-                      : (() => {
+                      : blocks.length === 0
+                        ? (() => {
+                            const text = normalizeInterleavedTextSegment(String(m.content ?? ''))
+                            return text ? <MarkdownMessage text={text} /> : null
+                          })()
+                        : (() => {
                           let toolSeen = 0
                           let statusSeen = 0
                           let textSeen = 0
                           return blocks.map((b) => {
                           if (b.type === 'text') {
-                            const text = String(b.text ?? '')
+                            const text = normalizeInterleavedTextSegment(String(b.text ?? ''))
                             if (!text) return null
                             const key = `${m.id}-text-${toolSeen}-${textSeen++}`
-                            return <div key={key}>{text}</div>
+                            return <MarkdownMessage key={key} text={text} />
                           }
                           if (b.type === 'status') {
                             const text = String(b.text ?? '').trim()
@@ -9399,7 +9547,12 @@ function AISettingsTab(props: {
   const temperature = aiSettings?.temperature ?? 0.7
   const maxTokens = aiSettings?.maxTokens ?? 64000
   const maxContextTokens = aiSettings?.maxContextTokens ?? 128000
-  const thinkingEffort = aiSettings?.thinkingEffort ?? 'disabled'
+  const reasoningUi = resolveReasoningUiState(model, aiSettings ?? {})
+  const thinkingProvider = reasoningUi.providerChoice
+  const thinkingProviderEffective = reasoningUi.providerEffective
+  const openaiReasoningEffort = reasoningUi.openaiReasoningEffort
+  const claudeThinkingEffort = reasoningUi.claudeThinkingEffort
+  const geminiThinkingEffort = reasoningUi.geminiThinkingEffort
   const systemPrompt = aiSettings?.systemPrompt ?? ''
   const enableVision = aiSettings?.enableVision ?? false
   const enableChatStreaming = aiSettings?.enableChatStreaming ?? false
@@ -9467,6 +9620,38 @@ function AISettingsTab(props: {
   const toolAiMaxTokens = orchestrator?.toolAiMaxTokens ?? 900
   const toolAiTimeoutMs = orchestrator?.toolAiTimeoutMs ?? 60000
   const toolAgentMaxTurns = orchestrator?.toolAgentMaxTurns ?? 8
+  const skillEnabled = orchestrator?.skillEnabled ?? true
+  const skillAllowModelInvocation = orchestrator?.skillAllowModelInvocation ?? true
+  const skillManagedDir = orchestrator?.skillManagedDir ?? ''
+  const skillVerboseLogging = orchestrator?.skillVerboseLogging ?? false
+
+  const selectedReasoningProvider: Exclude<AIReasoningProvider, 'auto'> =
+    thinkingProvider === 'auto' ? (thinkingProviderEffective ?? 'openai') : thinkingProvider
+  const providerDisplayName =
+    selectedReasoningProvider === 'openai' ? 'OpenAI' : selectedReasoningProvider === 'claude' ? 'Claude' : 'Gemini'
+  const inferredProviderText =
+    thinkingProvider === 'auto'
+      ? thinkingProviderEffective == null
+        ? '自动模式：当前模型名未识别，默认按 OpenAI 兼容参数处理。'
+        : `自动模式：当前按 ${providerDisplayName} 规则映射。`
+      : `手动模式：固定按 ${providerDisplayName} 规则映射。`
+
+  const applyProviderThinkingLevel = (
+    provider: Exclude<AIReasoningProvider, 'auto'>,
+    level: OpenAIReasoningEffort | ClaudeThinkingEffort | GeminiThinkingEffort,
+  ) => {
+    if (!api) return
+    const legacy = toLegacyThinkingEffortFromProviderLevel(provider, level)
+    if (provider === 'openai') {
+      void api.setAISettings({ openaiReasoningEffort: level as OpenAIReasoningEffort, thinkingEffort: legacy })
+      return
+    }
+    if (provider === 'claude') {
+      void api.setAISettings({ claudeThinkingEffort: level as ClaudeThinkingEffort, thinkingEffort: legacy })
+      return
+    }
+    void api.setAISettings({ geminiThinkingEffort: level as GeminiThinkingEffort, thinkingEffort: legacy })
+  }
 
   // Format large numbers for display
   const formatTokens = (n: number) => {
@@ -9592,20 +9777,76 @@ function AISettingsTab(props: {
       <h3>生成设置</h3>
 
       <div className="ndp-setting-item">
-        <label>思考强度</label>
+        <label>思考提供商</label>
         <select
           className="ndp-select"
-          value={thinkingEffort}
-          onChange={(e) => api?.setAISettings({ thinkingEffort: e.target.value as AIThinkingEffort })}
+          value={thinkingProvider}
+          onChange={(e) => api?.setAISettings({ thinkingProvider: e.target.value as AIReasoningProvider })}
         >
-          <option value="disabled">禁用（disabled）</option>
-          <option value="low">低（low）</option>
-          <option value="medium">中（medium）</option>
-          <option value="high">高（high）</option>
+          <option value="auto">自动（按模型名推断）</option>
+          <option value="openai">OpenAI（含 GPT-5 / Codex 系列）</option>
+          <option value="claude">Claude（4.6 系列等）</option>
+          <option value="gemini">Gemini（3.1 Pro 等）</option>
         </select>
-        <p className="ndp-setting-hint">
-          Claude 会映射为 thinking(type=enabled/budget_tokens)，OpenAI 推理模型会映射为 reasoning_effort。
-        </p>
+        <p className="ndp-setting-hint">{inferredProviderText}</p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>思考强度（{providerDisplayName}）</label>
+        {selectedReasoningProvider === 'openai' ? (
+          <>
+            <select
+              className="ndp-select"
+              value={openaiReasoningEffort}
+              onChange={(e) => applyProviderThinkingLevel('openai', e.target.value as OpenAIReasoningEffort)}
+            >
+              <option value="disabled">禁用（本地不下发）</option>
+              <option value="minimal">极低（minimal）</option>
+              <option value="low">低（low）</option>
+              <option value="medium">中（medium）</option>
+              <option value="high">高（high）</option>
+              <option value="xhigh">超高（xhigh）</option>
+            </select>
+            <p className="ndp-setting-hint">
+              通过 OpenAI 兼容参数 `reasoning_effort` 下发；`minimal/xhigh` 主要用于 GPT-5 / Codex 推理模型（网关需支持）。
+            </p>
+          </>
+        ) : null}
+        {selectedReasoningProvider === 'claude' ? (
+          <>
+            <select
+              className="ndp-select"
+              value={claudeThinkingEffort}
+              onChange={(e) => applyProviderThinkingLevel('claude', e.target.value as ClaudeThinkingEffort)}
+            >
+              <option value="disabled">禁用（disabled）</option>
+              <option value="low">低（low）</option>
+              <option value="medium">中（medium）</option>
+              <option value="high">高（high）</option>
+            </select>
+            <p className="ndp-setting-hint">
+              当前程序走 OpenAI 兼容 `chat/completions`，会映射为 Claude 的 `thinking.budget_tokens`（兼容网关更稳）。
+            </p>
+          </>
+        ) : null}
+        {selectedReasoningProvider === 'gemini' ? (
+          <>
+            <select
+              className="ndp-select"
+              value={geminiThinkingEffort}
+              onChange={(e) => applyProviderThinkingLevel('gemini', e.target.value as GeminiThinkingEffort)}
+            >
+              <option value="disabled">禁用（本地不下发）</option>
+              <option value="low">低（low）</option>
+              <option value="medium">中（medium）</option>
+              <option value="high">高（high）</option>
+            </select>
+            <p className="ndp-setting-hint">
+              当前程序走 OpenAI 兼容 `chat/completions`，Gemini 将映射为兼容字段 `reasoning_effort`；Gemini 3.1 Pro 建议使用低/中/高。
+            </p>
+          </>
+        ) : null}
+        <p className="ndp-setting-hint">兼容旧配置：会自动同步一个旧版统一强度字段，避免历史逻辑失效。</p>
       </div>
 
       {/* Temperature */}
@@ -9668,12 +9909,12 @@ function AISettingsTab(props: {
           value={toolMode}
           onChange={(e) => api?.setOrchestratorSettings({ toolCallingMode: e.target.value as 'auto' | 'native' | 'text' })}
         >
-          <option value="auto">auto（优先原生tools，失败降级文本协议）</option>
-          <option value="native">native（强制原生 tools/tool_calls）</option>
-          <option value="text">text（强制文本协议 TOOL_REQUEST，最稳）</option>
+          <option value="auto">auto（优先原生工具调用，失败自动降级兼容模式）</option>
+          <option value="native">native（仅使用原生工具调用）</option>
+          <option value="text">text（兼容模式：文本工具调用）</option>
         </select>
         <p className="ndp-setting-hint">
-          Gemini/部分代理的 OpenAI-compat 原生 tools 可能要求 thought_signature，容易出错；选 text 可绕开此类兼容坑。
+          部分模型或代理的原生工具调用兼容性不稳定时，可改用 text 兼容模式绕开。
         </p>
       </div>
 
@@ -9691,6 +9932,59 @@ function AISettingsTab(props: {
           <span>{toolAgentMaxTurns}</span>
         </div>
         <p className="ndp-setting-hint">命中“已达到最大回合”时可调大；建议 6~12，过大会更慢且更耗工具调用。</p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={skillEnabled}
+            onChange={(e) => api?.setOrchestratorSettings({ skillEnabled: e.target.checked })}
+          />
+          <span>启用 Skill（技能提示与 /skill 命令）</span>
+        </label>
+        <p className="ndp-setting-hint">关闭后将禁用 Skills 提示注入与显式 `/skill` 指令匹配，便于排查 Agent 行为。</p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={skillAllowModelInvocation}
+            disabled={!skillEnabled}
+            onChange={(e) => api?.setOrchestratorSettings({ skillAllowModelInvocation: e.target.checked })}
+          />
+          <span>允许模型自动选用 Skill（注入 available_skills）</span>
+        </label>
+        <p className="ndp-setting-hint">
+          关闭后仅保留手动 `/skill xxx ...` 触发；模型不会自动看到技能列表。
+        </p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>托管 Skill 目录（可选）</label>
+        <input
+          type="text"
+          className="ndp-input"
+          value={skillManagedDir}
+          placeholder="%USERPROFILE%\\.neodeskpet\\skills（留空使用默认）"
+          onChange={(e) => api?.setOrchestratorSettings({ skillManagedDir: e.target.value })}
+        />
+        <p className="ndp-setting-hint">
+          工作区 Skills 固定读取当前项目 <code>skills/</code>；这里用于配置全局托管目录（留空走默认路径）。
+        </p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label className="ndp-checkbox-label">
+          <input
+            type="checkbox"
+            checked={skillVerboseLogging}
+            onChange={(e) => api?.setOrchestratorSettings({ skillVerboseLogging: e.target.checked })}
+          />
+          <span>记录 Skill 调试日志（任务日志里可见）</span>
+        </label>
+        <p className="ndp-setting-hint">会记录 Skill 加载统计、冲突处理与命中详情，便于定位“为什么选了某个 skill”。</p>
       </div>
 
       <div className="ndp-setting-item">

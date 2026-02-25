@@ -15,6 +15,14 @@ import type {
   MemoryConsoleSettings,
   TtsSettings,
 } from './types'
+import {
+  normalizeClaudeThinkingEffort,
+  normalizeGeminiThinkingEffort,
+  normalizeOpenAIReasoningEffort,
+  normalizeReasoningProvider,
+  normalizeThinkingEffortLegacy,
+  resolveReasoningUiState,
+} from './reasoningConfig'
 
 const defaultAISettings: AISettings = {
   // OpenAI compatible API settings
@@ -26,6 +34,10 @@ const defaultAISettings: AISettings = {
   maxTokens: 64000,
   maxContextTokens: 128000,
   thinkingEffort: 'disabled',
+  thinkingProvider: 'auto',
+  openaiReasoningEffort: 'disabled',
+  claudeThinkingEffort: 'disabled',
+  geminiThinkingEffort: 'disabled',
   systemPrompt: '',
   enableVision: false,
   enableChatStreaming: false,
@@ -71,6 +83,11 @@ const defaultOrchestratorSettings: OrchestratorSettings = {
   toolCallingEnabled: false,
   toolCallingMode: 'text',
 
+  skillEnabled: true,
+  skillAllowModelInvocation: true,
+  skillManagedDir: '',
+  skillVerboseLogging: false,
+
   toolUseCustomAi: false,
   toolAiApiKey: '',
   toolAiBaseUrl: '',
@@ -90,11 +107,6 @@ const defaultToolSettings: ToolSettings = {
 const defaultMcpSettings: McpSettings = {
   enabled: false,
   servers: [],
-}
-
-function normalizeThinkingEffort(value: unknown): AISettings['thinkingEffort'] {
-  if (value === 'low' || value === 'medium' || value === 'high' || value === 'disabled') return value
-  return 'disabled'
 }
 
 function normalizeMcpServerId(value: unknown, fallback: string): string {
@@ -336,6 +348,11 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   merged.bubble = { ...defaultBubbleSettings, ...((value?.bubble ?? {}) as Partial<BubbleSettings>) }
   merged.taskPanel = { ...defaultTaskPanelSettings, ...((value?.taskPanel ?? {}) as Partial<TaskPanelSettings>) }
   merged.orchestrator = { ...defaultOrchestratorSettings, ...((value?.orchestrator ?? {}) as Partial<OrchestratorSettings>) }
+  merged.orchestrator.skillEnabled = merged.orchestrator.skillEnabled !== false
+  merged.orchestrator.skillAllowModelInvocation = merged.orchestrator.skillAllowModelInvocation !== false
+  merged.orchestrator.skillVerboseLogging = merged.orchestrator.skillVerboseLogging === true
+  merged.orchestrator.skillManagedDir =
+    typeof merged.orchestrator.skillManagedDir === 'string' ? merged.orchestrator.skillManagedDir.trim() : ''
   merged.tools = {
     ...defaultToolSettings,
     ...((value?.tools ?? {}) as Partial<ToolSettings>),
@@ -376,7 +393,32 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   }
 
   merged.ai = { ...defaultAISettings, ...((value?.ai ?? {}) as Partial<AISettings>) }
-  merged.ai.thinkingEffort = normalizeThinkingEffort((merged.ai as { thinkingEffort?: unknown }).thinkingEffort)
+  merged.ai.thinkingEffort = normalizeThinkingEffortLegacy((merged.ai as { thinkingEffort?: unknown }).thinkingEffort)
+  merged.ai.thinkingProvider = normalizeReasoningProvider((merged.ai as { thinkingProvider?: unknown }).thinkingProvider)
+  merged.ai.openaiReasoningEffort = normalizeOpenAIReasoningEffort(
+    (merged.ai as { openaiReasoningEffort?: unknown }).openaiReasoningEffort,
+  )
+  merged.ai.claudeThinkingEffort = normalizeClaudeThinkingEffort(
+    (merged.ai as { claudeThinkingEffort?: unknown }).claudeThinkingEffort,
+  )
+  merged.ai.geminiThinkingEffort = normalizeGeminiThinkingEffort(
+    (merged.ai as { geminiThinkingEffort?: unknown }).geminiThinkingEffort,
+  )
+  const resolvedThinking = resolveReasoningUiState(merged.ai.model, merged.ai)
+  merged.ai.thinkingEffort =
+    resolvedThinking.providerEffective == null
+      ? merged.ai.thinkingEffort
+      : resolvedThinking.providerEffective === 'openai'
+        ? normalizeThinkingEffortLegacy(
+            resolvedThinking.openaiReasoningEffort === 'xhigh'
+              ? 'high'
+              : resolvedThinking.openaiReasoningEffort === 'minimal'
+                ? 'low'
+                : resolvedThinking.openaiReasoningEffort,
+          )
+        : resolvedThinking.providerEffective === 'claude'
+          ? normalizeThinkingEffortLegacy(resolvedThinking.claudeThinkingEffort)
+          : normalizeThinkingEffortLegacy(resolvedThinking.geminiThinkingEffort)
   merged.aiProfiles = normalizeAiProfiles(value?.aiProfiles)
   const activeProfileIdRaw = String(value?.activeAiProfileId ?? '').trim()
   const hasActive = activeProfileIdRaw && merged.aiProfiles.some((p) => p.id === activeProfileIdRaw)
@@ -454,6 +496,10 @@ const store = new Store<AppSettings>({
           maxTokens: 64000,
           maxContextTokens: 128000,
           thinkingEffort: 'disabled',
+          thinkingProvider: 'auto',
+          openaiReasoningEffort: 'disabled',
+          claudeThinkingEffort: 'disabled',
+          geminiThinkingEffort: 'disabled',
           systemPrompt: (oldAi.systemPrompt as string) || defaultAISettings.systemPrompt,
           enableVision: false,
           enableChatStreaming: false,
@@ -719,7 +765,14 @@ const store = new Store<AppSettings>({
         store.set('ai', defaultAISettings)
         return
       }
-      store.set('ai.thinkingEffort', normalizeThinkingEffort(ai.thinkingEffort))
+      store.set('ai.thinkingEffort', normalizeThinkingEffortLegacy(ai.thinkingEffort))
+      store.set('ai.thinkingProvider', normalizeReasoningProvider((ai as Partial<AISettings>).thinkingProvider))
+      store.set(
+        'ai.openaiReasoningEffort',
+        normalizeOpenAIReasoningEffort((ai as Partial<AISettings>).openaiReasoningEffort),
+      )
+      store.set('ai.claudeThinkingEffort', normalizeClaudeThinkingEffort((ai as Partial<AISettings>).claudeThinkingEffort))
+      store.set('ai.geminiThinkingEffort', normalizeGeminiThinkingEffort((ai as Partial<AISettings>).geminiThinkingEffort))
     },
   },
 })
