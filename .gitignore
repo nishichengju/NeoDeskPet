@@ -37,6 +37,31 @@ mcp-output/
 perplexity-ai-main/
 多模态向量/
 
+# 无关第三方项目 / 本地参考仓库（不要提交）
+ComfyUI-AnimaTool-main/
+Fun-ASR/
+GenericAgent-main/
+OpenTypeless-main/
+Operit-main1.7.0/
+Prisma-main/
+SenseVoice-ASR/
+VCPToolBox-main/
+sky-memory-system-main/
+
+# 浏览器自动化临时配置目录
+.playwright-mcp/
+.tmp-pw-*/
+
+# 曾误提交到根目录的临时文件
+ai_bg1.jpg
+ai_bg2.jpg
+calc_num.py
+solve.py
+对话.txt
+提示词.txt
+文生图手机版.js
+问题.txt
+
 # Large local assets / backups (do not commit)
 GPT-SoVITS-v2_ProPlus/
 *.zip
