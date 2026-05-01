@@ -7,7 +7,15 @@ import electron from 'vite-plugin-electron/simple'
 export default defineConfig({
   optimizeDeps: {
     // 显式限定 dep optimizer 的入口（用绝对路径），避免误扫描项目目录下的其它前端源码（如 Gradio 的 _frontend_code/**/index.html）
-    entries: [path.resolve(__dirname, 'index.html')],
+    entries: [path.resolve(__dirname, 'index.html'), path.resolve(__dirname, 'demo/orb-motion-lab/index.html')],
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        orbMotionLab: path.resolve(__dirname, 'demo/orb-motion-lab/index.html'),
+      },
+    },
   },
   server: {
     watch: {

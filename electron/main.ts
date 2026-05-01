@@ -1,6 +1,7 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen } from 'electron'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import * as http from 'node:http'
 import * as fs from 'node:fs/promises'
@@ -13,6 +14,7 @@ import { scanLive2dModels } from './modelScanner'
 import { listTtsOptions } from './ttsOptions'
 import { TaskService } from './taskService'
 import { setLive2dCapabilitiesFromRenderer } from './live2dToolState'
+import { closeAllBrowserControlServices } from './browserControlService'
 import {
   addChatMessage,
   clearChatSession,
@@ -74,6 +76,7 @@ import type {
   TaskListResult,
   TaskRecord,
   TtsSettings,
+  WorldBookSettings,
 } from './types'
 import { MemoryService } from './memoryService'
 import { McpManager } from './mcpManager'
@@ -199,6 +202,8 @@ setWindowManagerInstance(windowManager)
 
 const LIVE2D_MOUSE_POLL_MS = 33
 let live2dMouseTrackingTimer: NodeJS.Timeout | null = null
+let browserControlServicesClosed = false
+let browserControlServicesClosing: Promise<void> | null = null
 
 let orbUiState: OrbUiState = 'ball'
 
@@ -468,6 +473,348 @@ let registeredAsrHotkey: string | null = null
 let pendingAsrTranscript: string[] = []
 let asrTranscriptReadyWebContentsId: number | null = null
 let lastContextUsage: ContextUsageSnapshot | null = null
+
+const OPEN_TYPELESS_MANAGED_ASR_SCRIPT_DIR = path.join(process.env.APP_ROOT, 'OpenTypeless-main')
+const OPEN_TYPELESS_MANAGED_ASR_SCRIPT_FILE = path.join(OPEN_TYPELESS_MANAGED_ASR_SCRIPT_DIR, 'doubao_asr_api.py')
+const OPEN_TYPELESS_MANAGED_ASR_WS_PATH_RE = /^\/demo\/ws\/realtime\/?$/
+
+type ManagedAsrEndpoint = {
+  host: string
+  port: number
+  protocol: 'ws:' | 'wss:'
+  healthUrl: string
+  key: string
+}
+
+let managedAsrProcess: ChildProcess | null = null
+let managedAsrProcessEndpointKey: string | null = null
+let managedAsrStartPromise: Promise<void> | null = null
+let managedAsrLastSuccessfulLauncher: string | null = null
+const managedAsrFailedLaunchers = new Set<string>()
+
+function parseManagedAsrEndpoint(asr: AsrSettings | undefined | null): ManagedAsrEndpoint | null {
+  if (!asr) return null
+  const rawWsUrl = String(asr.wsUrl ?? '').trim()
+  if (!rawWsUrl) return null
+
+  try {
+    const u = new URL(rawWsUrl)
+    if (u.protocol !== 'ws:' && u.protocol !== 'wss:') return null
+    if (!OPEN_TYPELESS_MANAGED_ASR_WS_PATH_RE.test(u.pathname)) return null
+    const host = String(u.hostname ?? '').trim().toLowerCase()
+    if (host !== '127.0.0.1' && host !== 'localhost') return null
+    const portRaw = u.port ? Number(u.port) : u.protocol === 'wss:' ? 443 : 80
+    if (!Number.isFinite(portRaw) || portRaw <= 0) return null
+    const port = Math.trunc(portRaw)
+    const httpProto = u.protocol === 'wss:' ? 'https:' : 'http:'
+    return {
+      host,
+      port,
+      protocol: u.protocol,
+      healthUrl: `${httpProto}//${host}:${port}/health`,
+      key: `${host}:${port}`,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function delayMs(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, Math.trunc(ms))))
+}
+
+async function probeAsrHealth(
+  endpoint: ManagedAsrEndpoint,
+  opts?: { timeoutMs?: number; child?: ChildProcess | null },
+): Promise<boolean> {
+  const timeoutMs = Math.max(200, Math.trunc(opts?.timeoutMs ?? 1200))
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    const child = opts?.child
+    if (child && child.exitCode !== null) return false
+
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 800)
+    try {
+      const res = await fetch(endpoint.healthUrl, { method: 'GET', cache: 'no-store', signal: ac.signal })
+      if (res.ok) return true
+    } catch {
+      // ignore
+    } finally {
+      clearTimeout(timer)
+    }
+
+    await delayMs(200)
+  }
+
+  return false
+}
+
+async function stopManagedAsrApi(reason: string): Promise<void> {
+  const child = managedAsrProcess
+  managedAsrProcess = null
+  managedAsrProcessEndpointKey = null
+  managedAsrStartPromise = null
+  if (!child) return
+  if (child.exitCode !== null) return
+
+  console.info(`[ASR API] stopping (${reason}) pid=${child.pid ?? 'unknown'}`)
+  await new Promise<void>((resolve) => {
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        // ignore
+      }
+      done()
+    }, 2500)
+
+    child.once('exit', () => {
+      clearTimeout(timer)
+      done()
+    })
+
+    // Windows 下通过 shell 启动时，child 可能只是 cmd.exe；直接 child.kill() 可能留下 uv/python 子进程。
+    // 使用 taskkill /T /F 结束整个进程树，避免 ASR 服务残留占用端口。
+    const childPid = typeof child.pid === 'number' && Number.isFinite(child.pid) ? child.pid : 0
+    if (process.platform === 'win32' && childPid > 0) {
+      try {
+        const killer = spawn('taskkill', ['/PID', String(childPid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+        killer.once('error', () => {
+          try {
+            child.kill()
+          } catch {
+            // ignore
+          }
+        })
+      } catch {
+        try {
+          child.kill()
+        } catch {
+          clearTimeout(timer)
+          done()
+        }
+      }
+      return
+    }
+
+    try {
+      child.kill()
+    } catch {
+      clearTimeout(timer)
+      done()
+    }
+  })
+}
+
+async function closeBrowserControlServicesOnce(): Promise<void> {
+  if (browserControlServicesClosed) return
+  if (!browserControlServicesClosing) {
+    const timeout = new Promise<void>((resolve) => {
+      setTimeout(resolve, 3_000)
+    })
+    browserControlServicesClosing = Promise.race([closeAllBrowserControlServices(), timeout])
+      .catch((err) => {
+        console.warn('[BrowserControl] close failed:', err)
+      })
+      .then(() => {
+        browserControlServicesClosed = true
+      })
+  }
+  await browserControlServicesClosing
+}
+
+async function launchManagedAsrProcess(endpoint: ManagedAsrEndpoint): Promise<void> {
+  // opuslib 在 Windows 上用 ctypes.util.find_library('opus')，只查 PATH 里的 opus.dll。
+  // 把放了 opus.dll 的脚本目录加到 PATH 最前面，子进程才能找到。
+  const pathSep = process.platform === 'win32' ? ';' : ':'
+  const basePath = process.env.PATH ?? process.env.Path ?? ''
+  const augmentedPath = `${OPEN_TYPELESS_MANAGED_ASR_SCRIPT_DIR}${pathSep}${basePath}`
+
+  const env = {
+    ...process.env,
+    PATH: augmentedPath,
+    DOUBAO_ASR_HOST: endpoint.host,
+    DOUBAO_ASR_PORT: String(endpoint.port),
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+    UV_NO_PROGRESS: '1',
+    NO_COLOR: '1',
+  }
+
+  const candidates: Array<{ cmd: string; args: string[]; label: string }> = [
+    {
+      cmd: 'C:\\Users\\Administrator\\scoop\\shims\\uv.exe',
+      args: [
+        'run',
+        '--python',
+        'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311\\python.exe',
+        'doubao_asr_api.py',
+      ],
+      label: 'uv run --python Python311 doubao_asr_api.py',
+    },
+    {
+      cmd: 'uv',
+      args: [
+        'run',
+        '--python',
+        'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311\\python.exe',
+        'doubao_asr_api.py',
+      ],
+      label: 'uv (PATH) run --python Python311 doubao_asr_api.py',
+    },
+    ...(process.platform === 'win32' ? [{ cmd: 'py', args: ['-3', 'doubao_asr_api.py'], label: 'py -3 doubao_asr_api.py' }] : []),
+    { cmd: 'python', args: ['doubao_asr_api.py'], label: 'python doubao_asr_api.py' },
+  ].sort((a, b) => {
+    const score = (x: { label: string }) => {
+      if (managedAsrLastSuccessfulLauncher && x.label === managedAsrLastSuccessfulLauncher) return 0
+      if (managedAsrFailedLaunchers.has(x.label)) return 2
+      return 1
+    }
+    return score(a) - score(b)
+  })
+
+  let lastError: Error | null = null
+
+  for (const candidate of candidates) {
+    let child: ChildProcess | null = null
+    try {
+      child = await new Promise<ChildProcess>((resolve, reject) => {
+        const launched = spawn(candidate.cmd, candidate.args, {
+          cwd: OPEN_TYPELESS_MANAGED_ASR_SCRIPT_DIR,
+          env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+          // Windows 下必须开 shell 让 cmd 帮忙查找 .exe/.cmd/.shim 后缀，否则 spawn('uv') 找不到 scoop/py launcher 这类 shim
+          shell: process.platform === 'win32',
+        })
+
+        launched.once('error', reject)
+        launched.once('spawn', () => resolve(launched))
+      })
+    } catch (err) {
+      managedAsrFailedLaunchers.add(candidate.label)
+      lastError = err instanceof Error ? err : new Error(String(err))
+      continue
+    }
+
+    const onStdout = (chunk: unknown) => {
+      const text = String(chunk ?? '').trim()
+      if (!text) return
+      for (const line of text.split(/\r?\n/)) {
+        const s = line.trim()
+        if (s) console.info(`[ASR API] ${s}`)
+      }
+    }
+    const onStderr = (chunk: unknown) => {
+      // Windows 下 cmd/uv 的错误消息可能是 GBK 编码，按 UTF-8 解码会变成 ???。
+      // 用 latin1 保留原始字节，至少英文/ASCII 错误码可读；Python 程序自身用 PYTHONIOENCODING=utf-8 不受影响。
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ''))
+      const textUtf8 = buf.toString('utf-8').trim()
+      const textLatin1 = buf.toString('latin1').trim()
+      const text = textUtf8.includes('\uFFFD') || /\?{3,}/.test(textUtf8) ? textLatin1 : textUtf8
+      if (!text) return
+      for (const line of text.split(/\r?\n/)) {
+        const s = line.trim()
+        if (s) console.warn(`[ASR API] ${s}`)
+      }
+    }
+
+    child.stdout?.on('data', onStdout)
+    child.stderr?.on('data', onStderr)
+    child.once('exit', (code, signal) => {
+      if (managedAsrProcess === child) {
+        managedAsrProcess = null
+        managedAsrProcessEndpointKey = null
+      }
+      console.info(
+        `[ASR API] exited (${candidate.label}) pid=${child?.pid ?? 'unknown'} code=${code ?? 'null'} signal=${signal ?? 'null'}`,
+      )
+    })
+
+    managedAsrProcess = child
+    managedAsrProcessEndpointKey = endpoint.key
+    console.info(`[ASR API] starting (${candidate.label}) on ${endpoint.key}`)
+
+    const ok = await probeAsrHealth(endpoint, { timeoutMs: 15_000, child })
+    if (ok) {
+      managedAsrLastSuccessfulLauncher = candidate.label
+      managedAsrFailedLaunchers.delete(candidate.label)
+      return
+    }
+
+    managedAsrFailedLaunchers.add(candidate.label)
+    lastError = new Error(`ASR API failed health check after start: ${candidate.label}`)
+    await stopManagedAsrApi(`health-check-failed:${candidate.label}`)
+  }
+
+  throw lastError ?? new Error('No available command could start OpenTypeless ASR API')
+}
+
+async function ensureManagedAsrApiRunning(reason: string): Promise<void> {
+  const settings = getSettings()
+  const endpoint = parseManagedAsrEndpoint(settings.asr)
+  if (!settings.asr?.enabled || !endpoint) {
+    await stopManagedAsrApi(`${reason}:disabled-or-external`)
+    return
+  }
+
+  if (managedAsrProcess && managedAsrProcess.exitCode !== null) {
+    managedAsrProcess = null
+    managedAsrProcessEndpointKey = null
+  }
+
+  if (managedAsrProcess && managedAsrProcessEndpointKey && managedAsrProcessEndpointKey !== endpoint.key) {
+    await stopManagedAsrApi(`${reason}:endpoint-changed`)
+  }
+
+  if (managedAsrProcess && managedAsrProcessEndpointKey === endpoint.key) {
+    const ok = await probeAsrHealth(endpoint, { timeoutMs: 1200, child: managedAsrProcess })
+    if (ok) return
+    await stopManagedAsrApi(`${reason}:unhealthy`)
+  }
+
+  const externalReady = await probeAsrHealth(endpoint, { timeoutMs: 500 })
+  if (externalReady) {
+    console.info(`[ASR API] detected existing OpenTypeless service on ${endpoint.key}; skip managed startup`)
+    return
+  }
+
+  if (managedAsrStartPromise) {
+    await managedAsrStartPromise
+    return
+  }
+
+  managedAsrStartPromise = (async () => {
+    try {
+      await fs.access(OPEN_TYPELESS_MANAGED_ASR_SCRIPT_FILE)
+      await launchManagedAsrProcess(endpoint)
+    } finally {
+      managedAsrStartPromise = null
+    }
+  })()
+
+  await managedAsrStartPromise
+}
+
+async function syncManagedAsrApi(reason: string): Promise<void> {
+  try {
+    await ensureManagedAsrApiRunning(reason)
+  } catch (err) {
+    console.error('[ASR API] sync failed:', err)
+  }
+}
 
 function syncAsrHotkey() {
   if (!app.isReady()) return
@@ -806,6 +1153,13 @@ function registerIpc() {
     return getSettings()
   })
 
+  ipcMain.handle('settings:setWorldBookSettings', (_event, worldBook: Partial<WorldBookSettings>) => {
+    const current = getSettings()
+    setSettings({ worldBook: { ...current.worldBook, ...worldBook } })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
   // Context usage snapshot (chat -> main -> pet/chat)
   ipcMain.on('contextUsage:set', (_event, snapshot: ContextUsageSnapshot | null) => {
     lastContextUsage = snapshot && typeof snapshot === 'object' ? snapshot : null
@@ -828,9 +1182,10 @@ function registerIpc() {
     return getSettings()
   })
 
-  ipcMain.handle('settings:setAsrSettings', (_event, asr: Partial<AsrSettings>) => {
+  ipcMain.handle('settings:setAsrSettings', async (_event, asr: Partial<AsrSettings>) => {
     const current = getSettings()
     setSettings({ asr: { ...current.asr, ...asr } })
+    await syncManagedAsrApi('ipc:settings:setAsrSettings')
     broadcastSettingsChanged()
     syncAsrHotkey()
     return getSettings()
@@ -1205,7 +1560,10 @@ function registerIpc() {
 
   // TTS options (scan local GPT-SoVITS directory)
   ipcMain.handle('tts:listOptions', () => {
-    return listTtsOptions(process.env.APP_ROOT ?? process.cwd())
+    const settings = getSettings()
+    const configured = (settings.tts?.ttsRoot ?? '').trim()
+    const ttsRoot = configured || path.join(process.env.APP_ROOT ?? process.cwd(), 'GPT-SoVITS-v2_ProPlus')
+    return listTtsOptions(ttsRoot)
   })
 
   // TTS HTTP proxy (avoid renderer CORS/preflight issues)
@@ -1401,6 +1759,28 @@ function registerIpc() {
     }
   })
 
+  // Bubble preview (chat -> pet): 仅用于实时可视化占位/流式文本，不触发 TTS。
+  ipcMain.on('bubble:preview', (_event, payload: unknown) => {
+    const petWin = windowManager.getPetWindow()
+    if (!petWin || petWin.isDestroyed()) return
+
+    const obj = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
+    const text = typeof obj.text === 'string' ? obj.text : ''
+    const clear = obj.clear === true
+    const placeholder = obj.placeholder === true
+    const pinPrevious = obj.pinPrevious === true
+    const autoHideDelay =
+      typeof obj.autoHideDelay === 'number' && Number.isFinite(obj.autoHideDelay) ? Math.trunc(obj.autoHideDelay) : undefined
+
+    petWin.webContents.send('bubble:preview', {
+      ...(text ? { text } : {}),
+      ...(clear ? { clear: true } : {}),
+      ...(placeholder ? { placeholder: true } : {}),
+      ...(pinPrevious ? { pinPrevious: true } : {}),
+      ...(typeof autoHideDelay === 'number' ? { autoHideDelay } : {}),
+    })
+  })
+
   // ASR 文本转发：从桌宠窗口发往聊天窗口（手动模式也会使用）。
   ipcMain.on('asr:reportTranscript', (_event, text: string) => {
     const cleaned = String(text ?? '').trim()
@@ -1446,6 +1826,17 @@ function registerIpc() {
     if (!chatWin || chatWin.isDestroyed()) return
     if (event.sender.id !== chatWin.webContents.id) return
     asrTranscriptReadyWebContentsId = event.sender.id
+  })
+
+  // Chat -> Pet: sync current ASR compose baseline (used to keep subtitle accumulation aligned with chat input edits)
+  ipcMain.on('asr:composePreviewSync', (_event, payload: unknown) => {
+    const petWin = windowManager.getPetWindow()
+    if (!petWin || petWin.isDestroyed()) return
+
+    const obj = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const baseText = typeof obj.baseText === 'string' ? obj.baseText : ''
+    const clearFinals = obj.clearFinals === true
+    petWin.webContents.send('asr:composePreviewSync', { baseText, clearFinals })
   })
 
   // TTS segmented sync: forward utterance segments to pet window
@@ -1510,7 +1901,7 @@ function registerIpc() {
     if (mode === 'orb') {
       // 切换到 orb 时同步 Orb UI 状态，避免窗口状态不一致。
       broadcastOrbStateChanged(orbUiState)
-      windowManager.setOrbUiState(orbUiState, { focus: true })
+      windowManager.setOrbUiState(orbUiState, { focus: true, animate: false })
     }
     broadcastSettingsChanged()
   })
@@ -1542,20 +1933,23 @@ function registerIpc() {
     const state = typeof stateRaw === 'string' ? (stateRaw.trim() as OrbUiState) : ''
     if (state !== 'ball' && state !== 'bar' && state !== 'panel') return { state: orbUiState }
 
-    const opts = optsRaw && typeof optsRaw === 'object' && !Array.isArray(optsRaw) ? (optsRaw as { focus?: unknown }) : null
+    const opts = optsRaw && typeof optsRaw === 'object' && !Array.isArray(optsRaw)
+      ? (optsRaw as { focus?: unknown; animate?: unknown })
+      : null
     const focus = opts ? Boolean(opts.focus) : false
+    const animate = opts ? Boolean(opts.animate) : false
 
     orbUiState = state
+    windowManager.setOrbUiState(state, { focus, animate })
     broadcastOrbStateChanged(state)
-    windowManager.setOrbUiState(state, { focus })
     return { state }
   })
 
   ipcMain.handle('orb:toggleUiState', () => {
     const next: OrbUiState = orbUiState === 'ball' ? 'bar' : orbUiState === 'bar' ? 'panel' : 'ball'
     orbUiState = next
+    windowManager.setOrbUiState(next, { focus: true, animate: false })
     broadcastOrbStateChanged(next)
-    windowManager.setOrbUiState(next, { focus: true })
     return { state: next }
   })
 
@@ -1647,6 +2041,14 @@ function registerIpc() {
       applyWindowDragMove(session, cursor)
     }
 
+    if (session.isPetWindow) {
+      try {
+        windowManager.persistPetBoundsNow()
+      } catch {
+        // ignore
+      }
+    }
+
     cleanupWindowDragSession(session, { snapOrb: true })
   })
   // Pet window context menu
@@ -1705,6 +2107,8 @@ function registerIpc() {
         click: () => {
           const current = getSettings()
           setSettings({ asr: { ...current.asr, enabled: !current.asr.enabled } })
+          void syncManagedAsrApi('menu:toggle-asr')
+          syncAsrHotkey()
           broadcastSettingsChanged()
         },
       },
@@ -1771,12 +2175,22 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   try {
     windowManager.setAppQuitting(true)
   } catch (_) {
     /* ignore */
   }
+
+  if (!browserControlServicesClosed) {
+    event.preventDefault()
+    void closeBrowserControlServicesOnce().finally(() => {
+      app.quit()
+    })
+    return
+  }
+
+  void stopManagedAsrApi('app:before-quit')
 })
 
 app.on('will-quit', () => {
@@ -1785,6 +2199,7 @@ app.on('will-quit', () => {
     clearInterval(live2dMouseTrackingTimer)
     live2dMouseTrackingTimer = null
   }
+  void stopManagedAsrApi('app:will-quit')
   void mcpManager?.sync({ enabled: false, servers: [] })
 })
 
@@ -1796,6 +2211,65 @@ app.whenReady().then(() => {
   if (isDebugLogEnabled()) {
     console.info(`[DebugLog] enabled, path=${getDebugLogPath()}`)
   }
+
+  process.on('uncaughtException', (err) => {
+    try {
+      appendDebugLog('main', 'process.uncaughtException', {
+        message: err?.message ?? String(err),
+        stack: err?.stack ?? '',
+      })
+    } catch {
+      // ignore
+    }
+    console.error('[Main] uncaughtException:', err)
+  })
+
+  process.on('unhandledRejection', (reason) => {
+    try {
+      const err = reason instanceof Error ? reason : new Error(String(reason))
+      appendDebugLog('main', 'process.unhandledRejection', {
+        message: err.message,
+        stack: err.stack ?? '',
+      })
+    } catch {
+      // ignore
+    }
+    console.error('[Main] unhandledRejection:', reason)
+  })
+
+  app.on('render-process-gone', (_event, webContents, details) => {
+    try {
+      appendDebugLog('main', 'app.render-process-gone', {
+        wcId: webContents.id,
+        url: webContents.getURL(),
+        reason: details.reason,
+        exitCode: details.exitCode,
+      })
+    } catch {
+      // ignore
+    }
+    console.error('[Main] render-process-gone:', {
+      wcId: webContents.id,
+      reason: details.reason,
+      exitCode: details.exitCode,
+      url: webContents.getURL(),
+    })
+  })
+
+  app.on('child-process-gone', (_event, details) => {
+    try {
+      appendDebugLog('main', 'app.child-process-gone', {
+        type: details.type,
+        reason: details.reason,
+        exitCode: details.exitCode,
+        name: details.name,
+        serviceName: details.serviceName,
+      })
+    } catch {
+      // ignore
+    }
+    console.error('[Main] child-process-gone:', details)
+  })
 
   try {
     memoryService = new MemoryService(app.getPath('userData'))
@@ -1925,7 +2399,7 @@ app.whenReady().then(() => {
   windowManager.applyDisplayMode()
   if (getSettings().displayMode === 'orb') {
     broadcastOrbStateChanged(orbUiState)
-    windowManager.setOrbUiState(orbUiState, { focus: false })
+    windowManager.setOrbUiState(orbUiState, { focus: false, animate: false })
   }
   startLive2dMouseTrackingPump()
   createTray(windowManager)
@@ -1941,6 +2415,7 @@ app.whenReady().then(() => {
   })
 
   syncAsrHotkey()
+  void syncManagedAsrApi('app:ready')
   broadcastSettingsChanged()
 })
 

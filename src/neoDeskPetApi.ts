@@ -46,6 +46,7 @@ import type {
   ContextUsageSnapshot,
   DisplayMode,
   OrbUiState,
+  WorldBookSettings,
 } from '../electron/types'
 import type { TtsOptions } from '../electron/ttsOptions'
 
@@ -55,6 +56,8 @@ export type Live2DMotionListener = (motionGroup: string, index: number) => void
 export type Live2DParamScriptListener = (payload: unknown) => void
 export type Live2DMouseTargetListener = (payload: { x: number; y: number; t?: number }) => void
 export type BubbleMessageListener = (message: string) => void
+export type BubblePreviewPayload = { text?: string; clear?: boolean; placeholder?: boolean; autoHideDelay?: number; pinPrevious?: boolean }
+export type BubblePreviewListener = (payload: BubblePreviewPayload) => void
 
 export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[]; fullText?: string }
 export type TtsSegmentStartedPayload = { utteranceId: string; segmentIndex: number; text: string }
@@ -113,6 +116,8 @@ export type NeoDeskPetApi = {
   setChatProfile(chatProfile: Partial<ChatProfile>): Promise<AppSettings>
   // Chat UI appearance
   setChatUiSettings(chatUi: Partial<ChatUiSettings>): Promise<AppSettings>
+  // World book / setting library
+  setWorldBookSettings(worldBook: Partial<WorldBookSettings>): Promise<AppSettings>
   // TTS settings
   setTtsSettings(tts: Partial<TtsSettings>): Promise<AppSettings>
   listTtsOptions(): Promise<TtsOptions>
@@ -138,9 +143,11 @@ export type NeoDeskPetApi = {
   // ASR hotkey / transcript (pet <-> main <-> chat)
   onAsrHotkeyToggle(listener: () => void): () => void
   reportAsrTranscript(text: string): void
+  syncAsrComposePreview(payload: { baseText: string; clearFinals?: boolean }): void
   notifyAsrTranscriptReady(): void
   takeAsrTranscript(): Promise<string>
   onAsrTranscript(listener: (text: string) => void): () => void
+  onAsrComposePreview(listener: (payload: { baseText: string; clearFinals?: boolean }) => void): () => void
   // Model scanner
   scanModels(): Promise<ScannedModel[]>
   // Chat sessions/messages
@@ -236,7 +243,7 @@ export type NeoDeskPetApi = {
 
   // Orb window state
   getOrbUiState(): Promise<{ state: OrbUiState }>
-  setOrbUiState(state: OrbUiState, opts?: { focus?: boolean }): Promise<{ state: OrbUiState }>
+  setOrbUiState(state: OrbUiState, opts?: { focus?: boolean; animate?: boolean }): Promise<{ state: OrbUiState }>
   toggleOrbUiState(): Promise<{ state: OrbUiState }>
   setOrbOverlayBounds(payload: { width: number; height: number; focus?: boolean }): Promise<{ ok: true }>
   clearOrbOverlayBounds(payload?: { focus?: boolean }): Promise<{ ok: true }>
@@ -261,6 +268,8 @@ export type NeoDeskPetApi = {
   // Bubble message
   onBubbleMessage(listener: BubbleMessageListener): () => void
   sendBubbleMessage(message: string): void
+  onBubblePreview(listener: BubblePreviewListener): () => void
+  sendBubblePreview(payload: BubblePreviewPayload): void
 
   // TTS segmented sync (chat -> pet)
   enqueueTtsUtterance(payload: TtsEnqueuePayload): void

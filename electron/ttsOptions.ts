@@ -52,9 +52,7 @@ function dedupeLabels<T extends { label: string }>(items: T[]): T[] {
   return next
 }
 
-export function listTtsOptions(appRoot: string): TtsOptions {
-  const ttsRoot = path.join(appRoot, 'GPT-SoVITS-v2_ProPlus')
-
+export function listTtsOptions(ttsRoot: string): TtsOptions {
   const gptModels: TtsModelOption[] = []
   const sovitsModels: TtsModelOption[] = []
   const refAudios: TtsRefAudioOption[] = []

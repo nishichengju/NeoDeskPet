@@ -1,5 +1,6 @@
 ﻿import './orb.css'
 import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent as ReactWheelEvent } from 'react'
+import { flushSync } from 'react-dom'
 import type {
   AppSettings,
   ChatMessageBlock,
@@ -16,10 +17,19 @@ import { stripToolProtocolDisplayArtifacts } from '../utils/toolProtocolDisplay'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
 type PopoverKind = 'menu' | 'history'
+type OrbUiTransition =
+  | 'idle'
+  | 'opening-bar'
+  | 'opening-panel'
+  | 'expanding-panel'
+  | 'closing-bar-to-ball'
+  | 'closing-panel-to-ball'
 
 const ORB_BALL_SIZE = 40
 const ORB_BAR_HEIGHT = 80
 const ORB_POPOVER_GAP = 10
+const ORB_UI_OPEN_MS = 220
+const ORB_UI_CLOSE_MS = 260
 
 const MENU_WIDTH = 240
 const MENU_RADIUS = 16
@@ -40,6 +50,31 @@ function normalizeMode(state: OrbUiState): OrbMode {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v))
+}
+
+function getDockSideFromWindow(): 'left' | 'right' {
+  try {
+    const winCenterX = window.screenX + window.outerWidth / 2
+    const s = screen as unknown as { availLeft?: number; availWidth?: number; width?: number }
+    const screenLeft = s.availLeft ?? 0
+    const screenWidth = s.availWidth ?? screen.width
+    const screenCenterX = screenLeft + screenWidth / 2
+    return winCenterX < screenCenterX ? 'left' : 'right'
+  } catch {
+    return 'left'
+  }
+}
+
+function getDockSideFromScreenX(screenX: number): 'left' | 'right' {
+  try {
+    const s = screen as unknown as { availLeft?: number; availWidth?: number; width?: number }
+    const screenLeft = s.availLeft ?? 0
+    const screenWidth = s.availWidth ?? screen.width
+    const screenCenterX = screenLeft + screenWidth / 2
+    return screenX < screenCenterX ? 'left' : 'right'
+  } catch {
+    return 'left'
+  }
 }
 
 function newMessageId(): string {
@@ -265,9 +300,20 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const [mode, setMode] = useState<OrbMode>('ball')
   const [renderMode, setRenderMode] = useState<OrbMode>('ball')
+  const [dockSide, setDockSide] = useState<'left' | 'right'>(() => getDockSideFromWindow())
+  const [uiTransition, setUiTransition] = useState<OrbUiTransition>('idle')
+  const [resizeMask, setResizeMask] = useState(false)
   const [dragging, setDragging] = useState(false)
   const dragStartRef = useRef<{ x: number; y: number; time: number } | null>(null)
   const dragLastPointRef = useRef<{ x: number; y: number } | null>(null)
+  const prevModeRef = useRef<OrbMode>('ball')
+  const dockSideRef = useRef<'left' | 'right'>(dockSide)
+  const transitionTimerRef = useRef<number | null>(null)
+  const resizeMaskRafRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    dockSideRef.current = dockSide
+  }, [dockSide])
 
   type PendingAttachment = { id: string; kind: 'image' | 'video'; path: string; filename: string; previewDataUrl?: string }
   type ImageViewerRequestItem = { source: string; title?: string }
@@ -510,18 +556,16 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     window.requestAnimationFrame(() => clearOverlayBounds())
   }, [clearOverlayBounds])
 
-  const dockSide: 'left' | 'right' = (() => {
-    try {
-      const winCenterX = window.screenX + window.outerWidth / 2
-      const s = screen as unknown as { availLeft?: number; availWidth?: number; width?: number }
-      const screenLeft = s.availLeft ?? 0
-      const screenWidth = s.availWidth ?? screen.width
-      const screenCenterX = screenLeft + screenWidth / 2
-      return winCenterX < screenCenterX ? 'left' : 'right'
-    } catch {
-      return 'left'
-    }
-  })()
+  const syncDockSide = useCallback((next: 'left' | 'right') => {
+    dockSideRef.current = next
+    setDockSide(next)
+  }, [])
+
+  const lockDockSide = useCallback((): 'left' | 'right' => {
+    const next = dockSideRef.current
+    syncDockSide(next)
+    return next
+  }, [syncDockSide])
 
   useEffect(() => {
     if (!api) return
@@ -545,11 +589,47 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     }
   }, [api])
 
+  const clearUiTransitionTimer = useCallback(() => {
+    if (transitionTimerRef.current == null) return
+    window.clearTimeout(transitionTimerRef.current)
+    transitionTimerRef.current = null
+  }, [])
+
+  const clearResizeMaskRaf = useCallback(() => {
+    if (resizeMaskRafRef.current == null) return
+    window.cancelAnimationFrame(resizeMaskRafRef.current)
+    resizeMaskRafRef.current = null
+  }, [])
+
   useEffect(() => {
+    const prevMode = prevModeRef.current
+    prevModeRef.current = mode
+
     if (mode !== 'ball') {
       setRenderMode(mode)
+
+      clearUiTransitionTimer()
+      const nextTransition: OrbUiTransition =
+        prevMode === 'ball'
+          ? mode === 'panel'
+            ? 'opening-panel'
+            : 'opening-bar'
+          : prevMode === 'bar' && mode === 'panel'
+            ? 'expanding-panel'
+            : 'idle'
+
+      setUiTransition(nextTransition)
+      if (nextTransition !== 'idle') {
+        transitionTimerRef.current = window.setTimeout(() => {
+          transitionTimerRef.current = null
+          setUiTransition('idle')
+        }, ORB_UI_OPEN_MS)
+      }
       return
     }
+
+    clearUiTransitionTimer()
+    setUiTransition('idle')
 
     const ready = () => window.innerWidth <= ORB_BALL_SIZE + 4 && window.innerHeight <= ORB_BALL_SIZE + 4
     if (ready()) {
@@ -569,7 +649,15 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       window.removeEventListener('resize', onResize)
       window.cancelAnimationFrame(raf)
     }
-  }, [mode])
+  }, [clearUiTransitionTimer, mode])
+
+  useEffect(
+    () => () => {
+      clearUiTransitionTimer()
+      clearResizeMaskRaf()
+    },
+    [clearResizeMaskRaf, clearUiTransitionTimer],
+  )
 
   useEffect(() => {
     if (!api) return
@@ -605,7 +693,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     return () => clearTimeout(t)
   }, [mode])
 
-  const openBall = useCallback(() => {
+  const openBall = useCallback((opts?: { immediate?: boolean }) => {
     if (!api) return
     if (mode === 'ball') return
     popoverTokenRef.current += 1
@@ -613,18 +701,99 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     setMessageMenu(null)
     overlayActiveRef.current = false
     clearOverlayBounds({ force: true })
-    void api.setOrbUiState('ball', { focus: false }).catch((err) => console.error(err))
-  }, [api, clearOverlayBounds, mode])
+
+    clearUiTransitionTimer()
+    if (opts?.immediate) {
+      setUiTransition('idle')
+      void api.setOrbUiState('ball', { focus: false, animate: false }).catch((err) => console.error(err))
+      return
+    }
+
+    const closingTransition: OrbUiTransition = renderMode === 'panel' ? 'closing-panel-to-ball' : 'closing-bar-to-ball'
+    if (uiTransition === 'closing-panel-to-ball' || uiTransition === 'closing-bar-to-ball') return
+    setUiTransition(closingTransition)
+    transitionTimerRef.current = window.setTimeout(() => {
+      transitionTimerRef.current = null
+      void api.setOrbUiState('ball', { focus: false, animate: false }).catch((err) => console.error(err))
+    }, ORB_UI_CLOSE_MS)
+  }, [api, clearOverlayBounds, clearUiTransitionTimer, mode, renderMode, uiTransition])
 
   const openBar = useCallback(() => {
     if (!api) return
-    void api.setOrbUiState('bar', { focus: true }).catch((err) => console.error(err))
-  }, [api])
+    clearUiTransitionTimer()
+    clearResizeMaskRaf()
+    const nextTransition: OrbUiTransition = mode === 'ball' ? 'opening-bar' : 'idle'
+    if (mode === 'ball') {
+      flushSync(() => {
+        setResizeMask(true)
+      })
+      resizeMaskRafRef.current = window.requestAnimationFrame(() => {
+        resizeMaskRafRef.current = null
+        flushSync(() => {
+          lockDockSide()
+          setRenderMode('bar')
+          setUiTransition(nextTransition)
+        })
+        void api.setOrbUiState('bar', { focus: true, animate: false }).catch((err) => console.error(err))
+        resizeMaskRafRef.current = window.requestAnimationFrame(() => {
+          resizeMaskRafRef.current = null
+          setResizeMask(false)
+        })
+      })
+    } else {
+      flushSync(() => {
+        lockDockSide()
+        setRenderMode('bar')
+        setUiTransition(nextTransition)
+      })
+      void api.setOrbUiState('bar', { focus: true, animate: false }).catch((err) => console.error(err))
+    }
+    if (nextTransition !== 'idle') {
+      transitionTimerRef.current = window.setTimeout(() => {
+        transitionTimerRef.current = null
+        setUiTransition('idle')
+      }, ORB_UI_OPEN_MS)
+    }
+  }, [api, clearResizeMaskRaf, clearUiTransitionTimer, lockDockSide, mode])
 
   const openPanel = useCallback(() => {
     if (!api) return
-    void api.setOrbUiState('panel', { focus: true }).catch((err) => console.error(err))
-  }, [api])
+    clearUiTransitionTimer()
+    clearResizeMaskRaf()
+    const nextTransition: OrbUiTransition =
+      mode === 'ball' ? 'opening-panel' : mode === 'bar' ? 'expanding-panel' : 'idle'
+    if (mode === 'ball') {
+      flushSync(() => {
+        setResizeMask(true)
+      })
+      resizeMaskRafRef.current = window.requestAnimationFrame(() => {
+        resizeMaskRafRef.current = null
+        flushSync(() => {
+          lockDockSide()
+          setRenderMode('panel')
+          setUiTransition(nextTransition)
+        })
+        void api.setOrbUiState('panel', { focus: true, animate: false }).catch((err) => console.error(err))
+        resizeMaskRafRef.current = window.requestAnimationFrame(() => {
+          resizeMaskRafRef.current = null
+          setResizeMask(false)
+        })
+      })
+    } else {
+      flushSync(() => {
+        lockDockSide()
+        setRenderMode('panel')
+        setUiTransition(nextTransition)
+      })
+      void api.setOrbUiState('panel', { focus: true, animate: false }).catch((err) => console.error(err))
+    }
+    if (nextTransition !== 'idle') {
+      transitionTimerRef.current = window.setTimeout(() => {
+        transitionTimerRef.current = null
+        setUiTransition('idle')
+      }, ORB_UI_OPEN_MS)
+    }
+  }, [api, clearResizeMaskRaf, clearUiTransitionTimer, lockDockSide, mode])
 
   useEffect(() => {
     const onBlur = () => {
@@ -898,6 +1067,9 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       const clickThresholdSq = 10 * 10
       const clickTimeMs = 350
       const isClick = movedSq < clickThresholdSq && Date.now() - start.time < clickTimeMs
+      if (!isClick) {
+        syncDockSide(getDockSideFromScreenX(e.x))
+      }
       if (!isClick) return
 
       if (popoverKindRef.current) {
@@ -909,13 +1081,11 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         const sid = String(currentSessionId ?? '').trim()
         const summary = sid ? sessionSummaries.find((s) => s.id === sid) ?? null : null
         const hasMessages = typeof summary?.messageCount === 'number' && summary.messageCount > 0
-        setTimeout(() => {
-          if (hasMessages) openPanel()
-          else openBar()
-        }, 40)
+        if (hasMessages) openPanel()
+        else openBar()
       }
     },
-    [api, closePopover, currentSessionId, mode, openBar, openPanel, sessionSummaries],
+    [api, closePopover, currentSessionId, mode, openBar, openPanel, sessionSummaries, syncDockSide],
   )
 
   const onBarMouseDown = useCallback(
@@ -1262,7 +1432,8 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         return
       }
 
-      const itemCount = 4
+      const target = panelMessagesRef.current.find((m) => m.id === messageId) ?? null
+      const itemCount = target?.role === 'assistant' ? 5 : 4
       const menuHeight = MSG_MENU_PADDING * 2 + itemCount * MSG_MENU_ITEM_HEIGHT
 
       const rect = rootRef.current?.getBoundingClientRect()
@@ -1282,9 +1453,13 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
   const handleStartEdit = useCallback(
     (messageId: string) => {
       const msg = panelMessagesRef.current.find((m) => m.id === messageId) ?? null
-      if (!msg || msg.role !== 'user') return
+      if (!msg) return
+      const editText =
+        msg.role === 'assistant' && Array.isArray(msg.blocks) && msg.blocks.length > 0
+          ? joinTextBlocks(msg.blocks) || String(msg.content ?? '')
+          : String(msg.content ?? '')
       setEditingMessageId(messageId)
-      setEditingMessageContent(String(msg.content ?? ''))
+      setEditingMessageContent(editText)
       closeMessageMenu()
     },
     [closeMessageMenu],
@@ -1547,13 +1722,29 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       const sid = ensuredId || currentSessionIdRef.current
       if (!sid) return
 
-      const nextContent = editingMessageContent
+      const nextContent = String(editingMessageContent ?? '')
       const prev = panelMessagesRef.current
-      const next = prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, updatedAt: Date.now() } : m))
+      const target = prev.find((m) => m.id === messageId) ?? null
+      if (!target) return
+      const isAssistant = target.role === 'assistant'
+      const nextBlocks: ChatMessageBlock[] | undefined = isAssistant ? [{ type: 'text', text: nextContent }] : undefined
+      const next = prev.map((m) =>
+        m.id === messageId
+          ? {
+              ...m,
+              content: nextContent,
+              ...(isAssistant ? { blocks: nextBlocks, taskId: undefined } : {}),
+              updatedAt: Date.now(),
+            }
+          : m,
+      )
       applyPanelMessages(next)
 
       try {
-        await api.updateChatMessage(sid, messageId, nextContent)
+        await api.updateChatMessageRecord(sid, messageId, {
+          content: nextContent,
+          ...(isAssistant ? { blocks: nextBlocks, taskId: undefined } : {}),
+        })
         void refreshSessions().catch(() => undefined)
       } catch (err) {
         console.error('[orb] update message failed:', err)
@@ -1570,10 +1761,12 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
   )
 
   const rootClassName = useMemo(() => {
-    const classes = [`ndp-orbapp-root`, `ndp-orbapp-mode-${renderMode}`]
+    const classes = [`ndp-orbapp-root`, `ndp-orbapp-mode-${renderMode}`, `ndp-orbapp-dock-${dockSide}`]
     if (dragging) classes.push('ndp-orbapp-dragging')
+    if (resizeMask) classes.push('ndp-orbapp-resize-mask')
+    if (uiTransition !== 'idle') classes.push(`ndp-orbapp-transition-${uiTransition}`)
     return classes.join(' ')
-  }, [dragging, renderMode])
+  }, [dockSide, dragging, renderMode, resizeMask, uiTransition])
 
   useEffect(() => {
     const root = document.documentElement
@@ -1797,40 +1990,6 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
                   </div>
                   {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
                   {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
-                  {false ? (
-                    <div className="ndp-orbpanel-attachments" data-orb-nodrag="true">
-                      {toolImagePaths.map((imgPath, imgIdx) => (
-                        <div
-                          key={`tool-img-${String(r.id ?? `${taskId}-run-${idx}`)}-${imgIdx}`}
-                          className="ndp-orbpanel-attachment"
-                          title={imgPath}
-                          onClick={() => {
-                            void (async () => {
-                              const raw = String(imgPath ?? '').trim()
-                              if (!raw) return
-                              if (/^(https?:|data:|blob:)/i.test(raw)) {
-                                window.open(raw, '_blank')
-                                return
-                              }
-                              try {
-                                const res = await api?.getChatAttachmentUrl(raw)
-                                if (res?.ok && typeof res.url === 'string') {
-                                  window.open(res.url, '_blank')
-                                  return
-                                }
-                              } catch {
-                                /* ignore */
-                              }
-                              window.open(toLocalMediaSrc(raw), '_blank')
-                            })()
-                          }}
-                        >
-                          <OrbImagePreview api={api} className="ndp-orbpanel-image" imagePath={imgPath} alt={`tool-image-${imgIdx + 1}`} />
-                          <div className="ndp-orbpanel-attachment-meta">image {imgIdx + 1}</div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
                   {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
                 </div>
               </div>
@@ -2156,6 +2315,9 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       }}
       onContextMenu={openMenuPopover}
     >
+      <div className="ndp-orbapp-shell">
+        <div className="ndp-orbapp-shell-skin" aria-hidden="true"></div>
+        <div className="ndp-orbapp-shell-main">
         <div className="ndp-orbapp-bar-frame">
           <div className="ndp-orbapp-bar-pill" aria-hidden="true">
             <div className="ndp-orbapp-ball-icon"></div>
@@ -2340,7 +2502,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
 
             {panelMessages.map((m) => {
               const isUser = m.role === 'user'
-              const isEditing = isUser && editingMessageId === m.id
+              const isEditing = editingMessageId === m.id
               const attachmentsNode = renderMessageAttachments(m)
               return (
                 <div
@@ -2348,35 +2510,31 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
                   className={isUser ? 'ndp-orbpanel-msg ndp-orbpanel-msg-user' : 'ndp-orbpanel-msg ndp-orbpanel-msg-assistant'}
                   onContextMenu={(e) => openMessageMenu(e, m.id)}
                 >
-                  {isUser ? (
-                    isEditing ? (
-                      <div className="ndp-orbpanel-edit" data-orb-nodrag="true">
-                        <textarea
-                          className="ndp-orbpanel-edit-textarea"
-                          value={editingMessageContent}
-                          onChange={(e) => setEditingMessageContent(e.target.value)}
-                          rows={3}
-                          data-orb-nodrag="true"
-                        />
-                        <div className="ndp-orbpanel-edit-actions" data-orb-nodrag="true">
-                          <button className="ndp-orbpanel-edit-btn" onClick={() => void handleSaveEdit()} data-orb-nodrag="true">
-                            保存
-                          </button>
-                          <button
-                            className="ndp-orbpanel-edit-btn"
-                            onClick={() => void handleSaveEdit({ resend: true })}
-                            data-orb-nodrag="true"
-                          >
+                  {isEditing ? (
+                    <div className="ndp-orbpanel-edit" data-orb-nodrag="true">
+                      <textarea
+                        className="ndp-orbpanel-edit-textarea"
+                        value={editingMessageContent}
+                        onChange={(e) => setEditingMessageContent(e.target.value)}
+                        rows={3}
+                        data-orb-nodrag="true"
+                      />
+                      <div className="ndp-orbpanel-edit-actions" data-orb-nodrag="true">
+                        <button className="ndp-orbpanel-edit-btn" onClick={() => void handleSaveEdit()} data-orb-nodrag="true">
+                          保存
+                        </button>
+                        {isUser ? (
+                          <button className="ndp-orbpanel-edit-btn" onClick={() => void handleSaveEdit({ resend: true })} data-orb-nodrag="true">
                             保存并重发
                           </button>
-                          <button className="ndp-orbpanel-edit-btn ndp-orbpanel-edit-btn-ghost" onClick={handleCancelEdit} data-orb-nodrag="true">
-                            取消
-                          </button>
-                        </div>
+                        ) : null}
+                        <button className="ndp-orbpanel-edit-btn ndp-orbpanel-edit-btn-ghost" onClick={handleCancelEdit} data-orb-nodrag="true">
+                          取消
+                        </button>
                       </div>
-                    ) : (
-                      <MarkdownMessage text={String(m.content ?? '')} />
-                    )
+                    </div>
+                  ) : isUser ? (
+                    <MarkdownMessage text={String(m.content ?? '')} />
                   ) : (
                     renderMessageBlocks(m)
                   )}
@@ -2388,6 +2546,9 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
           </div>
         </div>
       ) : null}
+
+        </div>
+      </div>
 
       {imageViewer.open && imageViewer.items.length > 0 ? (
         <div className="ndp-orbimg-viewer" data-orb-nodrag="true" onClick={closeImageViewer}>
@@ -2453,11 +2614,9 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
               复制正文
             </button>
           ) : null}
-          {messageMenuTarget.role === 'user' ? (
-            <button className="ndp-orbapp-msgmenu-item" onClick={() => handleStartEdit(messageMenuTarget.id)}>
-              编辑
-            </button>
-          ) : null}
+          <button className="ndp-orbapp-msgmenu-item" onClick={() => handleStartEdit(messageMenuTarget.id)}>
+            编辑
+          </button>
           <button className="ndp-orbapp-msgmenu-item" onClick={() => void handleResend(messageMenuTarget.id)}>
             重新生成
           </button>

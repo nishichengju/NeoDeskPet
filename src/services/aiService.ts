@@ -29,6 +29,10 @@ export const ABORTED_ERROR = '__ABORTED__'
 // Pattern to match expression/motion tags like [表情:星星眼] or [动作:Idle]
 const EXPRESSION_TAG_PATTERN = /\[表情[：:]\s*([^\]]+)\]/g
 const MOTION_TAG_PATTERN = /\[动作[：:]\s*([^\]]+)\]/g
+const REQUEST_CONNECT_TIMEOUT_MS = 20_000
+const TRANSIENT_RETRY_LIMIT = 2
+const RETRY_BASE_DELAY_MS = 500
+const RETRY_JITTER_MS = 250
 
 function extractApiErrorMessage(errorData: unknown, status: number, statusText: string): string {
   const fallback = `HTTP ${status}: ${statusText}`
@@ -88,6 +92,138 @@ function buildRetryPayloadForThinkingBudget(payload: Record<string, unknown>, er
   )
   if (minRequired <= currentMaxTokens) return null
   return { ...payload, max_tokens: minRequired }
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError'
+}
+
+function isSignalAborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true
+}
+
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)
+}
+
+function isTransientErrorMessage(errorMessage: string): boolean {
+  const s = String(errorMessage ?? '').toLowerCase()
+  if (!s.trim()) return false
+  return (
+    s.includes('timeout') ||
+    s.includes('timed out') ||
+    s.includes('network error') ||
+    s.includes('networkerror') ||
+    s.includes('fetch failed') ||
+    s.includes('failed to fetch') ||
+    s.includes('socket hang up') ||
+    s.includes('econnreset') ||
+    s.includes('econnrefused') ||
+    s.includes('etimedout') ||
+    s.includes('connection reset') ||
+    s.includes('connection refused') ||
+    s.includes('service unavailable') ||
+    s.includes('gateway timeout') ||
+    s.includes('bad gateway') ||
+    s.includes('temporarily unavailable') ||
+    s.includes('rate limit') ||
+    s.includes('too many requests') ||
+    s.includes('连接超时') ||
+    s.includes('网络') ||
+    s.includes('连接失败') ||
+    s.includes('连接重置')
+  )
+}
+
+function shouldRetryTransientError(attempt: number, err: unknown): boolean {
+  if (attempt >= TRANSIENT_RETRY_LIMIT) return false
+  if (isAbortError(err)) return false
+  const msg = err instanceof Error ? err.message : String(err)
+  return isTransientErrorMessage(msg)
+}
+
+function shouldRetryTransientHttpFailure(attempt: number, status: number): boolean {
+  if (attempt >= TRANSIENT_RETRY_LIMIT) return false
+  return isTransientHttpStatus(status)
+}
+
+function retryDelayMs(attempt: number): number {
+  const backoff = RETRY_BASE_DELAY_MS * Math.max(1, 2 ** attempt)
+  const jitter = Math.floor(Math.random() * RETRY_JITTER_MS)
+  return backoff + jitter
+}
+
+async function waitForRetryDelay(ms: number, signal?: AbortSignal): Promise<boolean> {
+  if (ms <= 0) return false
+  if (signal?.aborted) return true
+  return await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve(false)
+    }, ms)
+    const onAbort = () => {
+      cleanup()
+      resolve(true)
+    }
+    const cleanup = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function readApiHttpError(response: Response): Promise<{ status: number; statusText: string; message: string }> {
+  const errorData = await response.json().catch(() => ({}))
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    message: extractApiErrorMessage(errorData, response.status, response.statusText),
+  }
+}
+
+async function postChatCompletion(args: {
+  endpoint: string
+  apiKey: string
+  body: Record<string, unknown>
+  signal?: AbortSignal
+  timeoutMs?: number
+}): Promise<Response> {
+  const ac = new AbortController()
+  const timeoutMs = Math.max(1_000, Math.trunc(args.timeoutMs ?? REQUEST_CONNECT_TIMEOUT_MS))
+  let timedOut = false
+  const onOuterAbort = () => ac.abort()
+  const timer = setTimeout(() => {
+    timedOut = true
+    ac.abort()
+  }, timeoutMs)
+
+  if (args.signal?.aborted) {
+    ac.abort()
+  } else {
+    args.signal?.addEventListener('abort', onOuterAbort, { once: true })
+  }
+
+  try {
+    if (args.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    return await fetch(args.endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${args.apiKey}`,
+      },
+      body: JSON.stringify(args.body),
+      signal: ac.signal,
+    })
+  } catch (err) {
+    if (timedOut) {
+      throw new Error(`连接超时（>${timeoutMs}ms）`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+    args.signal?.removeEventListener('abort', onOuterAbort)
+  }
 }
 
 function buildChatCompletionPayload(args: {
@@ -268,66 +404,82 @@ export class AIService {
       geminiThinkingEffort,
     })
 
-    try {
-      let response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
-        signal: options?.signal,
-      })
+    const endpoint = `${baseUrl}/chat/completions`
+    let bodyForAttempt = requestBody
+    let didThinkingBudgetRetry = false
+    const totalAttempts = TRANSIENT_RETRY_LIMIT + 1
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        const errorMessage = extractApiErrorMessage(errorData, response.status, response.statusText)
-        const retryBody = isThinkingBudgetError(errorMessage)
-          ? buildRetryPayloadForThinkingBudget(requestBody, errorMessage)
-          : null
-        if (retryBody) {
-          response = await fetch(`${baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify(retryBody),
-            signal: options?.signal,
-          })
-        }
+    for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+      try {
+        const response = await postChatCompletion({
+          endpoint,
+          apiKey,
+          body: bodyForAttempt,
+          signal: options?.signal,
+        })
+
+        if (options?.signal?.aborted) return { content: '', error: ABORTED_ERROR }
         if (!response.ok) {
-          const retryErrorData = await response.json().catch(() => ({}))
-          const retryErrorMessage = extractApiErrorMessage(retryErrorData, response.status, response.statusText)
-          return { content: '', error: `API 错误: ${retryErrorMessage}` }
-        }
-      }
-
-      const data = await response.json()
-      const rawContent = data.choices?.[0]?.message?.content || ''
-
-      // Extract expression/motion tags
-      const { cleanedText, expression, motion } = extractTags(rawContent)
-
-      // 读取 API 返回的真实 token 统计
-      const usageData = data.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined
-      const usage: ChatUsage | undefined = usageData
-        ? {
-            promptTokens: usageData.prompt_tokens ?? 0,
-            completionTokens: usageData.completion_tokens ?? 0,
-            totalTokens: usageData.total_tokens ?? 0,
+          const apiErr = await readApiHttpError(response)
+          if (!didThinkingBudgetRetry && isThinkingBudgetError(apiErr.message)) {
+            const retryBody = buildRetryPayloadForThinkingBudget(bodyForAttempt, apiErr.message)
+            if (retryBody) {
+              didThinkingBudgetRetry = true
+              bodyForAttempt = retryBody
+              continue
+            }
           }
-        : undefined
 
-      return { content: cleanedText, expression, motion, usage }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return { content: '', error: ABORTED_ERROR }
+          if (shouldRetryTransientHttpFailure(attempt, apiErr.status)) {
+            const delayMs = retryDelayMs(attempt)
+            console.warn(
+              `[AIService] Chat transient API failure, retry ${attempt + 2}/${totalAttempts} in ${delayMs}ms: ${apiErr.status} ${apiErr.message}`,
+            )
+            if (await waitForRetryDelay(delayMs, options?.signal)) {
+              return { content: '', error: ABORTED_ERROR }
+            }
+            continue
+          }
+          return { content: '', error: `API 错误: ${apiErr.message}` }
+        }
+
+        const data = await response.json()
+        if (options?.signal?.aborted) return { content: '', error: ABORTED_ERROR }
+        const rawContent = data.choices?.[0]?.message?.content || ''
+
+        // Extract expression/motion tags
+        const { cleanedText, expression, motion } = extractTags(rawContent)
+
+        // 读取 API 返回的真实 token 统计
+        const usageData = data.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined
+        const usage: ChatUsage | undefined = usageData
+          ? {
+              promptTokens: usageData.prompt_tokens ?? 0,
+              completionTokens: usageData.completion_tokens ?? 0,
+              totalTokens: usageData.total_tokens ?? 0,
+            }
+          : undefined
+
+        return { content: cleanedText, expression, motion, usage }
+      } catch (err) {
+        if (isAbortError(err) || isSignalAborted(options?.signal)) {
+          return { content: '', error: ABORTED_ERROR }
+        }
+        const errorMessage = err instanceof Error ? err.message : String(err)
+        if (shouldRetryTransientError(attempt, err)) {
+          const delayMs = retryDelayMs(attempt)
+          console.warn(`[AIService] Chat transient error, retry ${attempt + 2}/${totalAttempts} in ${delayMs}ms: ${errorMessage}`)
+          if (await waitForRetryDelay(delayMs, options?.signal)) {
+            return { content: '', error: ABORTED_ERROR }
+          }
+          continue
+        }
+        console.error('[AIService] Chat error:', errorMessage)
+        return { content: '', error: errorMessage }
       }
-      const errorMessage = err instanceof Error ? err.message : String(err)
-      console.error('[AIService] Chat error:', errorMessage)
-      return { content: '', error: errorMessage }
     }
+
+    return { content: '', error: '请求失败：重试后仍未成功' }
   }
 
   /**
@@ -374,119 +526,168 @@ export class AIService {
       stream: true,
     })
 
-    try {
-      let response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
-        signal: options?.signal,
-      })
+    const endpoint = `${baseUrl}/chat/completions`
+    let bodyForAttempt = requestBody
+    let didThinkingBudgetRetry = false
+    const totalAttempts = TRANSIENT_RETRY_LIMIT + 1
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        const errorMessage = extractApiErrorMessage(errorData, response.status, response.statusText)
-        const retryBody = isThinkingBudgetError(errorMessage)
-          ? buildRetryPayloadForThinkingBudget(requestBody, errorMessage)
-          : null
-        if (retryBody) {
-          response = await fetch(`${baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify(retryBody),
-            signal: options?.signal,
-          })
-        }
-        if (!response.ok) {
-          const retryErrorData = await response.json().catch(() => ({}))
-          const retryErrorMessage = extractApiErrorMessage(retryErrorData, response.status, response.statusText)
-          return { content: '', error: `API 错误: ${retryErrorMessage}` }
-        }
-      }
-
-      if (!response.body) {
-        return { content: '', error: '流式响应为空（response.body 不存在）' }
-      }
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder('utf-8')
-
-      let buffer = ''
+    for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
       let rawContent = ''
-      let streamEnded = false
-      let usage: ChatUsage | undefined // 用于存储流式响应中的 usage
+      let usage: ChatUsage | undefined
+      try {
+        const response = await postChatCompletion({
+          endpoint,
+          apiKey,
+          body: bodyForAttempt,
+          signal: options?.signal,
+        })
 
-      while (!streamEnded) {
-        const { value, done } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-
-        // Parse SSE as line stream: each "data: ..." is terminated by \n
-        let hasMoreLines = true
-        while (hasMoreLines) {
-          const lineEnd = buffer.indexOf('\n')
-          if (lineEnd === -1) break
-
-          const line = buffer.slice(0, lineEnd).trim()
-          buffer = buffer.slice(lineEnd + 1)
-          if (!line.startsWith('data:')) continue
-
-          const dataStr = line.slice('data:'.length).trim()
-          if (!dataStr) continue
-          if (dataStr === '[DONE]') {
-            buffer = ''
-            streamEnded = true
-            hasMoreLines = false
-            break
-          }
-
-          let payload: unknown
-          try {
-            payload = JSON.parse(dataStr)
-          } catch {
-            continue
-          }
-
-          // 尝试读取 usage（某些 API 在流式最后一条消息或每条消息中包含 usage）
-          const payloadObj = payload as {
-            choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
-            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-          }
-          if (payloadObj.usage) {
-            usage = {
-              promptTokens: payloadObj.usage.prompt_tokens ?? 0,
-              completionTokens: payloadObj.usage.completion_tokens ?? 0,
-              totalTokens: payloadObj.usage.total_tokens ?? 0,
+        if (!response.ok) {
+          const apiErr = await readApiHttpError(response)
+          if (!didThinkingBudgetRetry && isThinkingBudgetError(apiErr.message)) {
+            const retryBody = buildRetryPayloadForThinkingBudget(bodyForAttempt, apiErr.message)
+            if (retryBody) {
+              didThinkingBudgetRetry = true
+              bodyForAttempt = retryBody
+              continue
             }
           }
 
-          const choice = payloadObj.choices?.[0]
-          const delta = choice?.delta?.content ?? ''
-          const msg = choice?.message?.content ?? ''
-          const piece = delta || msg
-          if (!piece) continue
-
-          rawContent += piece
-          options?.onDelta?.(piece)
+          if (shouldRetryTransientHttpFailure(attempt, apiErr.status)) {
+            const delayMs = retryDelayMs(attempt)
+            console.warn(
+              `[AIService] Chat stream transient API failure, retry ${attempt + 2}/${totalAttempts} in ${delayMs}ms: ${apiErr.status} ${apiErr.message}`,
+            )
+            if (await waitForRetryDelay(delayMs, options?.signal)) {
+              return { content: '', error: ABORTED_ERROR }
+            }
+            continue
+          }
+          return { content: '', error: `API 错误: ${apiErr.message}` }
         }
-      }
 
-      const { cleanedText, expression, motion } = extractTags(rawContent)
-      return { content: cleanedText, expression, motion, usage }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return { content: '', error: ABORTED_ERROR }
+        if (!response.body) {
+          throw new Error('流式响应为空（response.body 不存在）')
+        }
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder('utf-8')
+        const onAbort = () => {
+          void reader.cancel().catch(() => undefined)
+        }
+        if (options?.signal?.aborted) {
+          await reader.cancel().catch(() => undefined)
+          return { content: '', error: ABORTED_ERROR }
+        }
+        options?.signal?.addEventListener('abort', onAbort, { once: true })
+
+        let buffer = ''
+        let streamEnded = false
+
+        try {
+          while (!streamEnded) {
+            if (options?.signal?.aborted) {
+              await reader.cancel().catch(() => undefined)
+              return { content: '', error: ABORTED_ERROR }
+            }
+            const { value, done } = await reader.read()
+            if (options?.signal?.aborted) {
+              await reader.cancel().catch(() => undefined)
+              return { content: '', error: ABORTED_ERROR }
+            }
+            if (done) break
+
+            buffer += decoder.decode(value, { stream: true })
+
+            // Parse SSE as line stream: each "data: ..." is terminated by \n
+            let hasMoreLines = true
+            while (hasMoreLines) {
+              if (options?.signal?.aborted) {
+                await reader.cancel().catch(() => undefined)
+                return { content: '', error: ABORTED_ERROR }
+              }
+              const lineEnd = buffer.indexOf('\n')
+              if (lineEnd === -1) break
+
+              const line = buffer.slice(0, lineEnd).trim()
+              buffer = buffer.slice(lineEnd + 1)
+              if (!line.startsWith('data:')) continue
+
+              const dataStr = line.slice('data:'.length).trim()
+              if (!dataStr) continue
+              if (dataStr === '[DONE]') {
+                buffer = ''
+                streamEnded = true
+                hasMoreLines = false
+                break
+              }
+
+              let payload: unknown
+              try {
+                payload = JSON.parse(dataStr)
+              } catch {
+                continue
+              }
+
+              // 尝试读取 usage（某些 API 在流式最后一条消息或每条消息中包含 usage）
+              const payloadObj = payload as {
+                choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
+                usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+              }
+              if (payloadObj.usage) {
+                usage = {
+                  promptTokens: payloadObj.usage.prompt_tokens ?? 0,
+                  completionTokens: payloadObj.usage.completion_tokens ?? 0,
+                  totalTokens: payloadObj.usage.total_tokens ?? 0,
+                }
+              }
+
+              const choice = payloadObj.choices?.[0]
+              const delta = choice?.delta?.content ?? ''
+              const msg = choice?.message?.content ?? ''
+              const piece = delta || msg
+              if (!piece) continue
+
+              if (options?.signal?.aborted) {
+                await reader.cancel().catch(() => undefined)
+                return { content: '', error: ABORTED_ERROR }
+              }
+              rawContent += piece
+              options?.onDelta?.(piece)
+            }
+          }
+        } finally {
+          options?.signal?.removeEventListener('abort', onAbort)
+        }
+
+        const { cleanedText, expression, motion } = extractTags(rawContent)
+        return { content: cleanedText, expression, motion, usage }
+      } catch (err) {
+        if (isAbortError(err) || isSignalAborted(options?.signal)) {
+          return { content: '', error: ABORTED_ERROR }
+        }
+
+        const errorMessage = err instanceof Error ? err.message : String(err)
+        if (rawContent.trim()) {
+          // 已经有有效输出时不自动重试，避免重复内容；把错误透传给上层用于提示“中断”
+          const { cleanedText, expression, motion } = extractTags(rawContent)
+          return { content: cleanedText, expression, motion, usage, error: errorMessage }
+        }
+
+        if (shouldRetryTransientError(attempt, err)) {
+          const delayMs = retryDelayMs(attempt)
+          console.warn(`[AIService] Chat stream transient error, retry ${attempt + 2}/${totalAttempts} in ${delayMs}ms: ${errorMessage}`)
+          if (await waitForRetryDelay(delayMs, options?.signal)) {
+            return { content: '', error: ABORTED_ERROR }
+          }
+          continue
+        }
+        console.error('[AIService] Chat stream error:', errorMessage)
+        return { content: '', error: errorMessage }
       }
-      const errorMessage = err instanceof Error ? err.message : String(err)
-      console.error('[AIService] Chat stream error:', errorMessage)
-      return { content: '', error: errorMessage }
     }
+
+    return { content: '', error: '请求失败：重试后仍未成功' }
   }
 
   private ensureSystemPrompt(messages: ChatMessage[], systemPrompt: string): ChatMessage[] {

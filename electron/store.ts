@@ -12,6 +12,8 @@ import type {
   McpServerConfig,
   ChatProfile,
   ChatUiSettings,
+  WorldBookEntry,
+  WorldBookSettings,
   MemoryConsoleSettings,
   TtsSettings,
 } from './types'
@@ -33,6 +35,12 @@ const defaultAISettings: AISettings = {
   temperature: 0.7,
   maxTokens: 64000,
   maxContextTokens: 128000,
+  autoContextCompressionEnabled: true,
+  autoContextCompressionApiSource: 'main',
+  autoContextCompressionProfileId: '',
+  autoContextCompressionModel: '',
+  autoContextCompressionThresholdPct: 85,
+  autoContextCompressionTargetPct: 65,
   thinkingEffort: 'disabled',
   thinkingProvider: 'auto',
   openaiReasoningEffort: 'disabled',
@@ -162,6 +170,13 @@ const defaultChatUi: ChatUiSettings = {
   contextOrbY: 14,
 }
 
+const defaultWorldBookSettings: WorldBookSettings = {
+  enabled: true,
+  activeTagIds: [],
+  maxChars: 6000,
+  entries: [],
+}
+
 const defaultMemorySettings = {
   enabled: true,
   includeSharedOnRetrieve: true,
@@ -231,15 +246,24 @@ const defaultTtsSettings: TtsSettings = {
   streaming: true,
   segmented: false,
   pauseMs: 280,
+  playbackTextMode: 'full',
+  playbackRegex: '',
+  playbackRegexFlags: 'g',
+  ttsRoot: '',
 }
 
 const defaultAsrSettings: AsrSettings = {
   enabled: false,
-  wsUrl: 'ws://127.0.0.1:8766/ws',
+  wsUrl: 'ws://127.0.0.1:8000/demo/ws/realtime',
   micDeviceId: '',
-  // Electron/Chromium 下 AudioWorklet 在部分机器上会导致采集 PCM 异常，从而触发 SenseVoice 的“🎼等富文本标记”误判；
+  // Electron/Chromium 下 AudioWorklet 在部分机器上会导致采集 PCM 异常；
   // 先默认使用 ScriptProcessor（更稳定），如需更低延迟可在设置里切回 worklet。
   captureBackend: 'script',
+  replaceRules: '',
+  fillerWords: '嗯, 啊, 呃, 额, 唔',
+  stripFillers: true,
+  ignoreCaseReplace: true,
+  processInterim: false,
   language: 'auto',
   useItn: true,
   autoSend: false,
@@ -297,6 +321,8 @@ const defaultSettings: AppSettings = {
   chatProfile: defaultChatProfile,
   // Chat UI
   chatUi: defaultChatUi,
+  // World book / setting library
+  worldBook: defaultWorldBookSettings,
   // TTS
   tts: defaultTtsSettings,
   // ASR
@@ -336,6 +362,102 @@ function normalizeAiProfiles(value: unknown): AIProfile[] {
 
   return out
 }
+
+function normalizeWorldBookTag(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 40)
+}
+
+function normalizeWorldBookEntry(value: unknown, index: number, seenIds: Set<string>): WorldBookEntry | null {
+  if (!value || typeof value !== 'object') return null
+  const obj = value as Partial<WorldBookEntry> & Record<string, unknown>
+  const now = Date.now()
+  const rawId = String(obj.id ?? '').trim()
+  const baseId = rawId || `wb_${now.toString(36)}_${index + 1}`
+  let id = baseId.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || `wb_${index + 1}`
+  let n = 2
+  while (seenIds.has(id)) {
+    id = `${baseId}_${n}`.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || `wb_${index + 1}_${n}`
+    n += 1
+  }
+  seenIds.add(id)
+
+  const title = String(obj.title ?? '').trim().slice(0, 120) || `设定 ${index + 1}`
+  const content = String(obj.content ?? '').replace(/\r\n/g, '\n').slice(0, 20000)
+  const tagSeen = new Set<string>()
+  const tags = (Array.isArray(obj.tags) ? obj.tags : [])
+    .map(normalizeWorldBookTag)
+    .filter(Boolean)
+    .filter((tag) => {
+      const key = tag.toLowerCase()
+      if (tagSeen.has(key)) return false
+      tagSeen.add(key)
+      return true
+    })
+    .slice(0, 20)
+  const scope = obj.scope === 'persona' ? 'persona' : 'global'
+  const personaId = typeof obj.personaId === 'string' ? obj.personaId.trim().slice(0, 80) : ''
+  const priorityRaw = typeof obj.priority === 'number' && Number.isFinite(obj.priority) ? Math.trunc(obj.priority) : 100
+  const priority = Math.max(0, Math.min(9999, priorityRaw))
+  const createdAt = typeof obj.createdAt === 'number' && Number.isFinite(obj.createdAt) ? Math.trunc(obj.createdAt) : now
+  const updatedAt = typeof obj.updatedAt === 'number' && Number.isFinite(obj.updatedAt) ? Math.trunc(obj.updatedAt) : createdAt
+
+  return {
+    id,
+    title,
+    content,
+    tags,
+    enabled: obj.enabled !== false,
+    scope,
+    ...(scope === 'persona' && personaId ? { personaId } : {}),
+    priority,
+    createdAt,
+    updatedAt,
+  }
+}
+
+function normalizeWorldBookSettings(value: unknown): WorldBookSettings {
+  const raw = value && typeof value === 'object' ? (value as Partial<WorldBookSettings> & Record<string, unknown>) : {}
+  const seenIds = new Set<string>()
+  const entries = (Array.isArray(raw.entries) ? raw.entries : [])
+    .map((entry, index) => normalizeWorldBookEntry(entry, index, seenIds))
+    .filter((entry): entry is WorldBookEntry => Boolean(entry))
+    .slice(0, 300)
+
+  const allTagKeys = new Map<string, string>()
+  for (const entry of entries) {
+    for (const tag of entry.tags) {
+      const key = tag.toLowerCase()
+      if (!allTagKeys.has(key)) allTagKeys.set(key, tag)
+    }
+  }
+
+  const activeSeen = new Set<string>()
+  const activeTagIds = (Array.isArray(raw.activeTagIds) ? raw.activeTagIds : [])
+    .map(normalizeWorldBookTag)
+    .filter(Boolean)
+    .map((tag) => allTagKeys.get(tag.toLowerCase()) ?? tag)
+    .filter((tag) => {
+      const key = tag.toLowerCase()
+      if (activeSeen.has(key)) return false
+      activeSeen.add(key)
+      return true
+    })
+    .slice(0, 80)
+
+  const maxCharsRaw = typeof raw.maxChars === 'number' && Number.isFinite(raw.maxChars) ? Math.trunc(raw.maxChars) : defaultWorldBookSettings.maxChars
+  const maxChars = Math.max(500, Math.min(30000, maxCharsRaw))
+
+  return {
+    enabled: raw.enabled !== false,
+    activeTagIds,
+    maxChars,
+    entries,
+  }
+}
+
 function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings {
   const merged: AppSettings = { ...defaultSettings, ...(value ?? {}) } as AppSettings
 
@@ -433,13 +555,27 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
   }
   merged.chatProfile = { ...defaultChatProfile, ...((value?.chatProfile ?? {}) as Partial<ChatProfile>) }
   merged.chatUi = { ...defaultChatUi, ...((value?.chatUi ?? {}) as Partial<ChatUiSettings>) }
+  merged.worldBook = normalizeWorldBookSettings(value?.worldBook)
   merged.memory = { ...defaultMemorySettings, ...((value?.memory ?? {}) as Partial<typeof defaultMemorySettings>) }
   merged.memoryConsole = {
     ...defaultMemoryConsoleSettings,
     ...((value?.memoryConsole ?? {}) as Partial<MemoryConsoleSettings>),
   }
   merged.tts = { ...defaultTtsSettings, ...((value?.tts ?? {}) as Partial<TtsSettings>) }
+  if (!['full', 'quoted', 'regex'].includes(String(merged.tts.playbackTextMode ?? ''))) {
+    merged.tts.playbackTextMode = defaultTtsSettings.playbackTextMode
+  }
+  merged.tts.playbackRegex = String(merged.tts.playbackRegex ?? '').slice(0, 2000)
+  merged.tts.playbackRegexFlags = String(merged.tts.playbackRegexFlags ?? '')
+    .replace(/[^dgimsuvy]/g, '')
+    .slice(0, 12)
+  merged.tts.ttsRoot = String(merged.tts.ttsRoot ?? '').trim()
   merged.asr = { ...defaultAsrSettings, ...((value?.asr ?? {}) as Partial<AsrSettings>) }
+  // 兼容旧版 SenseVoice 默认地址，自动迁移到 OpenTypeless 实时 WebSocket 地址
+  const asrWsUrl = String(merged.asr.wsUrl ?? '').trim()
+  if (!asrWsUrl || asrWsUrl === 'ws://127.0.0.1:8766/ws' || asrWsUrl === 'ws://localhost:8766/ws') {
+    merged.asr.wsUrl = defaultAsrSettings.wsUrl
+  }
 
   // 宠物窗口尺寸始终由 petScale 决定，避免历史脏数据导致拖拽后“模型越来越大”
   const rawPetScale = typeof merged.petScale === 'number' && Number.isFinite(merged.petScale) ? merged.petScale : defaultSettings.petScale
@@ -773,6 +909,16 @@ const store = new Store<AppSettings>({
       )
       store.set('ai.claudeThinkingEffort', normalizeClaudeThinkingEffort((ai as Partial<AISettings>).claudeThinkingEffort))
       store.set('ai.geminiThinkingEffort', normalizeGeminiThinkingEffort((ai as Partial<AISettings>).geminiThinkingEffort))
+    },
+    '0.21.0': (store) => {
+      const tts = store.get('tts') as Partial<TtsSettings> | undefined
+      if (!tts) {
+        store.set('tts', defaultTtsSettings)
+        return
+      }
+      if (typeof tts.playbackTextMode !== 'string') store.set('tts.playbackTextMode', defaultTtsSettings.playbackTextMode)
+      if (typeof tts.playbackRegex !== 'string') store.set('tts.playbackRegex', defaultTtsSettings.playbackRegex)
+      if (typeof tts.playbackRegexFlags !== 'string') store.set('tts.playbackRegexFlags', defaultTtsSettings.playbackRegexFlags)
     },
   },
 })

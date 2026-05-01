@@ -365,6 +365,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delay))
 }
 
+function finalTextClaimsToolAction(text: string): boolean {
+  const raw = String(text ?? '').trim()
+  if (!raw) return false
+  const negated = /(?:没有|没|未|无法|不能|失败|没能).{0,12}(?:调用|使用|运行|执行|搜索|搜|查询|截图|截屏|打开|点击|读取|写入|保存|修改|修复|工具)/u.test(raw)
+  if (negated) return false
+  return /(?:调用了|使用了|运行了|执行了|搜索了|搜到了|查到了|找到了|截图了|截屏了|打开了|点击了|读取了|写入了|保存了|修改了|下载了|安装了|创建了|生成了|修好了|已调用|已搜索|已截图|已打开|已读取|已写入|已修改|已保存|工具返回|搜索结果|截图已经|已经帮你)/u.test(raw)
+}
+
 function parseToolInput(input: string | undefined): ToolInput {
   const raw = typeof input === 'string' ? input.trim() : ''
   if (!raw) return ''
@@ -1136,8 +1144,9 @@ export class TaskService {
             '## Skills（技能）\n' +
             '在回答前先浏览 <available_skills> 的描述；如果某个技能与任务高度匹配，优先使用该技能。\n' +
             '可用辅助工具：skill.list（查看已加载技能）、skill.install（从 Git 仓库安装到托管目录）、skill.refresh（刷新缓存）。\n' +
-            '若需要技能详细步骤，优先使用 skill.read 按技能名读取（更稳、更省上下文）；示例：skill.read {name:\"技能名\"}。\n' +
-            '运行本地命令一律优先使用 cli.exec_stream（start/poll/stop）；对会先输出提示/二维码路径再长时间等待的脚本，必须用流式方式，不要长时间阻塞等待。\n' +
+            '若用户点名某个技能/搜索渠道（例如“用 grok 搜索”），必须先用 skill.read 读取对应技能并按技能步骤执行，不要先改用 browser.fetch/mcp.fetch.fetch 等通用网页抓取。\n' +
+            '若需要技能详细步骤，优先使用 skill.read 按技能名读取（更稳、更省上下文）；示例：skill.read {name:"技能名"}。\n' +
+            '运行本地命令一律优先使用 cli.exec_stream（start/poll/stop）；对会先输出提示/二维码路径再长时间等待的脚本，必须用流式方式，不要长时间阻塞等待。Windows 运行 .py 脚本必须写 python "脚本.py"，不要用 & "脚本.py" 直接执行。\n' +
             '一次最多先读取 1 个技能，避免无关技能占用上下文。\n' +
             skillsPrompt,
         })
@@ -1214,7 +1223,7 @@ export class TaskService {
     messages.push({
       role: 'system',
       content:
-        '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。',
+        '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
     })
     if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
@@ -1309,6 +1318,7 @@ export class TaskService {
     })
 
     const updateProgress = (force?: boolean) => {
+      if (rt.canceled) return
       const nowTs = Date.now()
       if (!force && nowTs - lastProgressAt < 250) return
       lastProgressAt = nowTs
@@ -1432,6 +1442,69 @@ export class TaskService {
       typeof obj?.timeoutMs === 'number'
         ? Math.max(2000, Math.min(180000, Math.trunc(obj.timeoutMs)))
         : Math.max(2000, Math.min(180000, Math.trunc(prefer.timeoutMs)))
+    const transientRetryLimit = 2
+    const transientRetryBaseDelayMs = 500
+    const transientRetryJitterMs = 250
+    type RetryableLlmError = Error & { status?: number }
+
+    const withHttpStatus = (message: string, status: number): RetryableLlmError => {
+      const err = new Error(message) as RetryableLlmError
+      err.status = status
+      return err
+    }
+    const readErrorStatus = (err: unknown): number | null => {
+      const status = (err as { status?: unknown })?.status
+      return typeof status === 'number' && Number.isFinite(status) ? status : null
+    }
+    const isAbortLikeError = (err: unknown): boolean => {
+      if (err instanceof DOMException && err.name === 'AbortError') return true
+      const msg = String(err instanceof Error ? err.message : err ?? '').toLowerCase()
+      return msg === 'canceled' || msg === 'cancelled'
+    }
+    const isTransientHttpStatus = (status: number): boolean =>
+      status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)
+    const isTransientErrorMessage = (message: string): boolean => {
+      const s = String(message ?? '').toLowerCase()
+      return (
+        s.includes('timeout') ||
+        s.includes('timed out') ||
+        s.includes('network error') ||
+        s.includes('networkerror') ||
+        s.includes('fetch failed') ||
+        s.includes('failed to fetch') ||
+        s.includes('socket hang up') ||
+        s.includes('econnreset') ||
+        s.includes('econnrefused') ||
+        s.includes('etimedout') ||
+        s.includes('connection reset') ||
+        s.includes('connection refused') ||
+        s.includes('service unavailable') ||
+        s.includes('gateway timeout') ||
+        s.includes('bad gateway') ||
+        s.includes('temporarily unavailable') ||
+        s.includes('rate limit') ||
+        s.includes('too many requests') ||
+        s.includes('连接超时') ||
+        s.includes('网络') ||
+        s.includes('连接失败') ||
+        s.includes('连接重置')
+      )
+    }
+    const shouldRetryTransientError = (attempt: number, err: unknown, status: number | null): boolean => {
+      if (attempt >= transientRetryLimit) return false
+      if (isAbortLikeError(err)) return false
+      if (status != null && isTransientHttpStatus(status)) return true
+      const msg = err instanceof Error ? err.message : String(err)
+      return isTransientErrorMessage(msg)
+    }
+    const transientRetryDelayMs = (attempt: number): number => {
+      const backoff = transientRetryBaseDelayMs * Math.max(1, 2 ** attempt)
+      const jitter = Math.floor(Math.random() * transientRetryJitterMs)
+      return backoff + jitter
+    }
+    const sleep = async (ms: number): Promise<void> => {
+      await new Promise<void>((resolve) => setTimeout(resolve, ms))
+    }
 
     if (!baseUrl || !model) throw new Error('未配置工具 LLM baseUrl/model（设置 → AI 设置 → 工具/Agent 或 AI 设置）')
 
@@ -1444,13 +1517,9 @@ export class TaskService {
     const sessionId = task.id
 
     const callLlmNative = async (
-      attempt = 0,
+      visionRetryAttempt = 0,
       opts?: { onDelta?: (delta: string) => void },
     ): Promise<{ contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage }> => {
-      const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
-      rt.cancelCurrent = () => ac.abort(new Error('canceled'))
-
       const parseNativeAssistantMessage = (
         msg: AssistantMessage,
       ): { contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage } => {
@@ -1536,216 +1605,251 @@ export class TaskService {
         return { contentText, toolCalls, rawToolCalls: rawToolCalls.map((c, idx) => ensureToolCallId(c, idx)), assistantMsgRaw }
       }
 
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          signal: ac.signal,
-          headers: { ...headers, Accept: 'text/event-stream' },
-          body: JSON.stringify({
-            model,
-            temperature,
-            max_tokens: maxTokens,
-            ...reasoningOptions.extra,
-            messages,
-            tools,
-            tool_choice: 'auto',
-            sessionId,
-            stream: true,
-          }),
-        })
+      for (let transientAttempt = 0; transientAttempt <= transientRetryLimit; transientAttempt += 1) {
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
+        rt.cancelCurrent = () => ac.abort(new Error('canceled'))
+        let emittedAnyOutput = false
 
-        if (!res.ok) {
-          const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
-          const errMsg = errData?.error?.message || `HTTP ${res.status}`
-          throw new Error(errMsg)
-        }
+        try {
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            signal: ac.signal,
+            headers: { ...headers, Accept: 'text/event-stream' },
+            body: JSON.stringify({
+              model,
+              temperature,
+              max_tokens: maxTokens,
+              ...reasoningOptions.extra,
+              messages,
+              tools,
+              tool_choice: 'auto',
+              sessionId,
+              stream: true,
+            }),
+          })
 
-        let msg: AssistantMessage = { role: 'assistant' }
-        const contentType = String(res.headers.get('content-type') ?? '')
-        const isSse = contentType.includes('text/event-stream')
-        if (isSse && res.body) {
-          const reader = res.body.getReader()
-          const decoder = new TextDecoder('utf-8')
-          let buffer = ''
-
-          let role: string | undefined
-          let contentText = ''
-          let legacyFnName = ''
-          let legacyFnArgs = ''
-          const toolCallsAcc: Array<{
-            id?: string
-            type?: string
-            function?: { name?: string; arguments?: string }
-          }> = []
-
-          const mergeStreamStr = (prev: string, next: string): string => {
-            const p = prev ?? ''
-            const n = next ?? ''
-            if (!n) return p
-            if (!p) return n
-            if (n.startsWith(p)) return n
-            if (p.startsWith(n)) return p
-            return p + n
+          if (!res.ok) {
+            const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
+            const errMsg = errData?.error?.message || `HTTP ${res.status}`
+            throw withHttpStatus(errMsg, res.status)
           }
 
-          const ensureToolAcc = (idx: number) => {
-            if (!toolCallsAcc[idx]) toolCallsAcc[idx] = { type: 'function', function: { name: '', arguments: '' } }
-            const it = toolCallsAcc[idx]!
-            if (!it.function) it.function = { name: '', arguments: '' }
-            if (typeof it.type !== 'string' || !it.type) it.type = 'function'
-            return it
-          }
+          let msg: AssistantMessage = { role: 'assistant' }
+          const contentType = String(res.headers.get('content-type') ?? '')
+          const isSse = contentType.includes('text/event-stream')
+          if (isSse && res.body) {
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder('utf-8')
+            let buffer = ''
+            const throwIfCanceled = () => {
+              if (rt.canceled) throw new Error('canceled')
+            }
 
-          let streamDone = false
-          while (!streamDone) {
-            const { value, done } = await reader.read()
-            if (done) break
-            buffer += decoder.decode(value, { stream: true })
+            let role: string | undefined
+            let contentText = ''
+            let legacyFnName = ''
+            let legacyFnArgs = ''
+            const toolCallsAcc: Array<{
+              id?: string
+              type?: string
+              function?: { name?: string; arguments?: string }
+            }> = []
 
-            let hasMoreLines = true
-            while (hasMoreLines) {
-              const lineEnd = buffer.indexOf('\n')
-              if (lineEnd === -1) {
-                hasMoreLines = false
-                break
-              }
-              const line = buffer.slice(0, lineEnd).trim()
-              buffer = buffer.slice(lineEnd + 1)
-              if (!line.startsWith('data:')) continue
-              const dataStr = line.slice('data:'.length).trim()
-              if (!dataStr) continue
-              if (dataStr === '[DONE]') {
-                streamDone = true
-                hasMoreLines = false
-                break
-              }
+            const mergeStreamStr = (prev: string, next: string): string => {
+              const p = prev ?? ''
+              const n = next ?? ''
+              if (!n) return p
+              if (!p) return n
+              if (n.startsWith(p)) return n
+              if (p.startsWith(n)) return p
+              return p + n
+            }
 
-              let payload: unknown
-              try {
-                payload = JSON.parse(dataStr)
-              } catch {
-                continue
-              }
+            const ensureToolAcc = (idx: number) => {
+              if (!toolCallsAcc[idx]) toolCallsAcc[idx] = { type: 'function', function: { name: '', arguments: '' } }
+              const it = toolCallsAcc[idx]!
+              if (!it.function) it.function = { name: '', arguments: '' }
+              if (typeof it.type !== 'string' || !it.type) it.type = 'function'
+              return it
+            }
 
-              const payloadObj = payload as {
-                choices?: Array<{ delta?: Record<string, unknown>; message?: Record<string, unknown> }>
-              }
-              const choice = payloadObj.choices?.[0]
-              const deltaObj = choice?.delta ?? null
-              const msgObj = choice?.message ?? null
+            let streamDone = false
+            while (!streamDone) {
+              throwIfCanceled()
+              const { value, done } = await reader.read()
+              throwIfCanceled()
+              if (done) break
+              buffer += decoder.decode(value, { stream: true })
 
-              if (deltaObj && typeof deltaObj === 'object') {
-                const deltaRole = (deltaObj as { role?: unknown }).role
-                if (!role && typeof deltaRole === 'string' && deltaRole.trim()) role = deltaRole.trim()
-              }
+              let hasMoreLines = true
+              while (hasMoreLines) {
+                throwIfCanceled()
+                const lineEnd = buffer.indexOf('\n')
+                if (lineEnd === -1) {
+                  hasMoreLines = false
+                  break
+                }
+                const line = buffer.slice(0, lineEnd).trim()
+                buffer = buffer.slice(lineEnd + 1)
+                if (!line.startsWith('data:')) continue
+                const dataStr = line.slice('data:'.length).trim()
+                if (!dataStr) continue
+                if (dataStr === '[DONE]') {
+                  streamDone = true
+                  hasMoreLines = false
+                  break
+                }
 
-              const deltaContent = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { content?: unknown }).content : undefined
-              const msgContent = msgObj && typeof msgObj === 'object' ? (msgObj as { content?: unknown }).content : undefined
+                let payload: unknown
+                try {
+                  payload = JSON.parse(dataStr)
+                } catch {
+                  continue
+                }
 
-              const piece = (() => {
-                if (typeof deltaContent === 'string' && deltaContent) return deltaContent
-                if (typeof msgContent !== 'string' || !msgContent) return ''
-                return msgContent.startsWith(contentText) ? msgContent.slice(contentText.length) : msgContent
-              })()
-              if (piece) {
-                contentText += piece
-                opts?.onDelta?.(piece)
-              }
+                const payloadObj = payload as {
+                  choices?: Array<{ delta?: Record<string, unknown>; message?: Record<string, unknown> }>
+                }
+                const choice = payloadObj.choices?.[0]
+                const deltaObj = choice?.delta ?? null
+                const msgObj = choice?.message ?? null
 
-              const toolCallsDelta = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { tool_calls?: unknown }).tool_calls : undefined
-              if (Array.isArray(toolCallsDelta)) {
-                for (let i = 0; i < toolCallsDelta.length; i += 1) {
-                  const raw = toolCallsDelta[i]
-                  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
-                  const rec = raw as Record<string, unknown>
-                  const idx = typeof rec.index === 'number' ? rec.index : i
-                  const acc = ensureToolAcc(Math.max(0, idx))
+                if (deltaObj && typeof deltaObj === 'object') {
+                  const deltaRole = (deltaObj as { role?: unknown }).role
+                  if (!role && typeof deltaRole === 'string' && deltaRole.trim()) role = deltaRole.trim()
+                }
 
-                  const id = typeof rec.id === 'string' ? rec.id : ''
-                  if (id.trim()) acc.id = id.trim()
+                const deltaContent = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { content?: unknown }).content : undefined
+                const msgContent = msgObj && typeof msgObj === 'object' ? (msgObj as { content?: unknown }).content : undefined
 
-                  const type = typeof rec.type === 'string' ? rec.type : ''
-                  if (type.trim()) acc.type = type.trim()
+                const piece = (() => {
+                  if (typeof deltaContent === 'string' && deltaContent) return deltaContent
+                  if (typeof msgContent !== 'string' || !msgContent) return ''
+                  return msgContent.startsWith(contentText) ? msgContent.slice(contentText.length) : msgContent
+                })()
+                if (piece) {
+                  throwIfCanceled()
+                  emittedAnyOutput = true
+                  contentText += piece
+                  opts?.onDelta?.(piece)
+                }
 
-                  const fnRaw = rec.function
-                  if (fnRaw && typeof fnRaw === 'object' && !Array.isArray(fnRaw)) {
-                    const fn = fnRaw as Record<string, unknown>
-                    const name = typeof fn.name === 'string' ? fn.name : ''
-                    if (name) acc.function!.name = mergeStreamStr(acc.function!.name ?? '', name)
+                const toolCallsDelta = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { tool_calls?: unknown }).tool_calls : undefined
+                if (Array.isArray(toolCallsDelta) && toolCallsDelta.length > 0) {
+                  emittedAnyOutput = true
+                  for (let i = 0; i < toolCallsDelta.length; i += 1) {
+                    const raw = toolCallsDelta[i]
+                    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+                    const rec = raw as Record<string, unknown>
+                    const idx = typeof rec.index === 'number' ? rec.index : i
+                    const acc = ensureToolAcc(Math.max(0, idx))
 
-                    const argsVal = fn.arguments
-                    const argsStr =
-                      typeof argsVal === 'string'
-                        ? argsVal
-                        : argsVal != null
-                          ? (() => {
-                              try {
-                                return JSON.stringify(argsVal)
-                              } catch {
-                                return ''
-                              }
-                            })()
-                          : ''
-                    if (argsStr) acc.function!.arguments = mergeStreamStr(acc.function!.arguments ?? '', argsStr)
+                    const id = typeof rec.id === 'string' ? rec.id : ''
+                    if (id.trim()) acc.id = id.trim()
+
+                    const type = typeof rec.type === 'string' ? rec.type : ''
+                    if (type.trim()) acc.type = type.trim()
+
+                    const fnRaw = rec.function
+                    if (fnRaw && typeof fnRaw === 'object' && !Array.isArray(fnRaw)) {
+                      const fn = fnRaw as Record<string, unknown>
+                      const name = typeof fn.name === 'string' ? fn.name : ''
+                      if (name) acc.function!.name = mergeStreamStr(acc.function!.name ?? '', name)
+
+                      const argsVal = fn.arguments
+                      const argsStr =
+                        typeof argsVal === 'string'
+                          ? argsVal
+                          : argsVal != null
+                            ? (() => {
+                                try {
+                                  return JSON.stringify(argsVal)
+                                } catch {
+                                  return ''
+                                }
+                              })()
+                            : ''
+                      if (argsStr) acc.function!.arguments = mergeStreamStr(acc.function!.arguments ?? '', argsStr)
+                    }
                   }
                 }
-              }
 
-              const legacyFn = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { function_call?: unknown }).function_call : undefined
-              if (legacyFn && typeof legacyFn === 'object' && !Array.isArray(legacyFn)) {
-                const fc = legacyFn as Record<string, unknown>
-                const name = typeof fc.name === 'string' ? fc.name : ''
-                if (name) legacyFnName = mergeStreamStr(legacyFnName, name)
+                const legacyFn = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { function_call?: unknown }).function_call : undefined
+                if (legacyFn && typeof legacyFn === 'object' && !Array.isArray(legacyFn)) {
+                  emittedAnyOutput = true
+                  const fc = legacyFn as Record<string, unknown>
+                  const name = typeof fc.name === 'string' ? fc.name : ''
+                  if (name) legacyFnName = mergeStreamStr(legacyFnName, name)
 
-                const argsVal = fc.arguments
-                const argsStr =
-                  typeof argsVal === 'string'
-                    ? argsVal
-                    : argsVal != null
-                      ? (() => {
-                          try {
-                            return JSON.stringify(argsVal)
-                          } catch {
-                            return ''
-                          }
-                        })()
-                      : ''
-                if (argsStr) legacyFnArgs = mergeStreamStr(legacyFnArgs, argsStr)
+                  const argsVal = fc.arguments
+                  const argsStr =
+                    typeof argsVal === 'string'
+                      ? argsVal
+                      : argsVal != null
+                        ? (() => {
+                            try {
+                              return JSON.stringify(argsVal)
+                            } catch {
+                              return ''
+                            }
+                          })()
+                        : ''
+                  if (argsStr) legacyFnArgs = mergeStreamStr(legacyFnArgs, argsStr)
+                }
               }
             }
+
+            const toolCallsRaw = toolCallsAcc
+              .map((c, idx) => {
+                if (!c) return null
+                const fn = c.function ?? {}
+                const name = typeof fn.name === 'string' ? fn.name : ''
+                const args = typeof fn.arguments === 'string' ? fn.arguments : ''
+                if (!name.trim()) return null
+                return { id: typeof c.id === 'string' && c.id.trim() ? c.id : `call_${idx}`, type: 'function', function: { name, arguments: args } }
+              })
+              .filter((x): x is { id: string; type: string; function: { name: string; arguments: string } } => Boolean(x))
+
+            msg = { role: role || 'assistant', content: contentText }
+            if (toolCallsRaw.length) msg.tool_calls = toolCallsRaw
+            else if (legacyFnName.trim()) msg.function_call = { name: legacyFnName, arguments: legacyFnArgs }
+          } else {
+            const data = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: AssistantMessage }> }
+            msg = (data.choices?.[0]?.message ?? {}) as AssistantMessage
           }
 
-          const toolCallsRaw = toolCallsAcc
-            .map((c, idx) => {
-              if (!c) return null
-              const fn = c.function ?? {}
-              const name = typeof fn.name === 'string' ? fn.name : ''
-              const args = typeof fn.arguments === 'string' ? fn.arguments : ''
-              if (!name.trim()) return null
-              return { id: typeof c.id === 'string' && c.id.trim() ? c.id : `call_${idx}`, type: 'function', function: { name, arguments: args } }
-            })
-            .filter((x): x is { id: string; type: string; function: { name: string; arguments: string } } => Boolean(x))
+          const parsed = parseNativeAssistantMessage(msg)
+          if (parsed.contentText.trim() || parsed.toolCalls.length > 0 || parsed.rawToolCalls.length > 0) {
+            emittedAnyOutput = true
+          }
+          return parsed
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
+            throw new Error('canceled')
+          }
+          if (visionRetryAttempt === 0 && stripVisionFromUserMessage()) {
+            pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
+            return callLlmNative(1, opts)
+          }
 
-          msg = { role: role || 'assistant', content: contentText }
-          if (toolCallsRaw.length) msg.tool_calls = toolCallsRaw
-          else if (legacyFnName.trim()) msg.function_call = { name: legacyFnName, arguments: legacyFnArgs }
-        } else {
-          const data = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: AssistantMessage }> }
-          msg = (data.choices?.[0]?.message ?? {}) as AssistantMessage
+          const status = readErrorStatus(err)
+          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, err, status)) {
+            const delayMs = transientRetryDelayMs(transientAttempt)
+            pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
+            if (rt.canceled) throw new Error('canceled')
+            await sleep(delayMs)
+            if (rt.canceled) throw new Error('canceled')
+            continue
+          }
+          throw err
+        } finally {
+          clearTimeout(timer)
+          rt.cancelCurrent = undefined
         }
-
-        return parseNativeAssistantMessage(msg)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (attempt === 0 && stripVisionFromUserMessage()) {
-          pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
-          return callLlmNative(1, opts)
-        }
-        throw err
-      } finally {
-        clearTimeout(timer)
-        rt.cancelCurrent = undefined
       }
+      throw new Error('llm request retry exhausted')
     }
 
     const TOOL_REQUEST_START = '<<<[TOOL_REQUEST]>>>'
@@ -1754,17 +1858,122 @@ export class TaskService {
     const TOOL_RESULT_END = '<<<[END_TOOL_RESULT]>>>'
     const VCP_VALUE_START = '「始」'
     const VCP_VALUE_END = '「末」'
+    const TOOL_REQUEST_START_RE = /<{2,}\[TOOL_REQUEST\]>{2,}/gi
+    const TOOL_REQUEST_END_RE = /<{2,}\[END_TOOL_REQUEST\]>{2,}/gi
+
+    const findToolRequestMarker = (
+      text: string,
+      from: number,
+      kind: 'start' | 'end',
+    ): { index: number; length: number } | null => {
+      const re = kind === 'start' ? TOOL_REQUEST_START_RE : TOOL_REQUEST_END_RE
+      re.lastIndex = Math.max(0, from)
+      const m = re.exec(text)
+      if (!m) return null
+      return { index: m.index, length: m[0]?.length ?? 0 }
+    }
+
+    const hasToolRequestMarker = (text: string): boolean => {
+      const raw = String(text ?? '')
+      return /<{2,}\[TOOL_REQUEST\]>{2,}/i.test(raw)
+    }
+
+    const TEXT_TOOL_NAME_ALIASES: Record<string, string> = {
+      'mcp.fetch.fetch': 'browser.fetch',
+      'fetch.fetch': 'browser.fetch',
+      'web.fetch': 'browser.fetch',
+      'http.fetch': 'browser.fetch',
+      'url.fetch': 'browser.fetch',
+    }
+
+    const unwrapVcpValue = (value: unknown): string => {
+      let out = String(value ?? '').trim()
+      if (out.startsWith(VCP_VALUE_START) && out.endsWith(VCP_VALUE_END) && out.length >= VCP_VALUE_START.length + VCP_VALUE_END.length) {
+        out = out.slice(VCP_VALUE_START.length, out.length - VCP_VALUE_END.length).trim()
+      }
+      const pairs: Array<[string, string]> = [
+        ['"', '"'],
+        ["'", "'"],
+        ['“', '”'],
+        ['‘', '’'],
+      ]
+      for (const [l, r] of pairs) {
+        if (out.startsWith(l) && out.endsWith(r) && out.length >= l.length + r.length) {
+          out = out.slice(l.length, out.length - r.length).trim()
+          break
+        }
+      }
+      return out
+    }
+
+    const stripToolNameProtocolNoise = (value: unknown): string => {
+      let out = unwrapVcpValue(value)
+        .replace(/```[a-zA-Z0-9_-]*|```/g, '')
+        .replace(/^tool_name\s*[:：]\s*/i, '')
+        .trim()
+
+      // 兼容弱模型把 VCP 包裹符号写成 `「skill.read」始` / `skill.read「末」` 的情况。
+      out = out.replace(/[「」]/g, '').replace(/^(?:始|末)+/g, '').replace(/(?:始|末)+$/g, '').trim()
+      out = out.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '').trim()
+
+      const token = out.match(/[A-Za-z][A-Za-z0-9_.:-]*/)?.[0]
+      return (token ?? out).trim()
+    }
+
+    const resolveTextToolName = (
+      toolNameRaw: string,
+    ): { requestedName: string; cleanedName: string; effectiveName: string; def: ToolDefinition | null; aliasApplied: boolean } => {
+      const requestedName = String(toolNameRaw ?? '').trim()
+      const cleanedName = stripToolNameProtocolNoise(requestedName)
+
+      const direct = toolByName.get(cleanedName) ?? resolveToolDefByCallName(cleanedName)
+      if (direct) {
+        return { requestedName, cleanedName, effectiveName: direct.name, def: direct, aliasApplied: false }
+      }
+
+      const aliasTarget = TEXT_TOOL_NAME_ALIASES[cleanedName] ?? TEXT_TOOL_NAME_ALIASES[cleanedName.toLowerCase()]
+      if (aliasTarget) {
+        const aliased = toolByName.get(aliasTarget) ?? resolveToolDefByCallName(aliasTarget)
+        return { requestedName, cleanedName, effectiveName: aliasTarget, def: aliased, aliasApplied: Boolean(aliased) }
+      }
+
+      return { requestedName, cleanedName, effectiveName: cleanedName, def: null, aliasApplied: false }
+    }
+
+    const suggestToolNames = (toolNameRaw: string): string[] => {
+      const needle = stripToolNameProtocolNoise(toolNameRaw).toLowerCase()
+      if (!needle) return []
+
+      const parts = needle.split(/[.:_-]+/).filter(Boolean)
+      const tail = parts.at(-1) ?? needle
+      const scored = toolDefs
+        .map((d) => {
+          const name = d.name.toLowerCase()
+          const call = d.callName.toLowerCase()
+          let score = 0
+          if (name === needle || call === needle) score += 100
+          if (name.includes(needle) || call.includes(needle)) score += 30
+          if (tail && (name.includes(tail) || call.includes(tail))) score += 10
+          return { name: d.name, score }
+        })
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+        .slice(0, 5)
+        .map((x) => x.name)
+
+      return Array.from(new Set(scored))
+    }
 
     const findLastCompleteToolRequestEnd = (text: string): number => {
       const raw = String(text ?? '')
       let cursor = 0
       let lastEnd = -1
       while (cursor < raw.length) {
-        const s = raw.indexOf(TOOL_REQUEST_START, cursor)
-        if (s < 0) break
-        const e = raw.indexOf(TOOL_REQUEST_END, s + TOOL_REQUEST_START.length)
-        if (e < 0) break
-        lastEnd = e + TOOL_REQUEST_END.length
+        const s = findToolRequestMarker(raw, cursor, 'start')
+        if (!s) break
+        const e = findToolRequestMarker(raw, s.index + s.length, 'end')
+        if (!e) break
+        lastEnd = e.index + e.length
         cursor = lastEnd
       }
       return lastEnd
@@ -1772,173 +1981,200 @@ export class TaskService {
 
     const stripToolRequestBlocksForDisplay = (text: string): string => {
       const raw = String(text ?? '')
-      if (!raw.includes(TOOL_REQUEST_START)) return raw
+      if (!hasToolRequestMarker(raw)) return raw
       let out = ''
       let cursor = 0
       while (cursor < raw.length) {
-        const s = raw.indexOf(TOOL_REQUEST_START, cursor)
-        if (s < 0) {
+        const s = findToolRequestMarker(raw, cursor, 'start')
+        if (!s) {
           out += raw.slice(cursor)
           break
         }
-        out += raw.slice(cursor, s)
-        const e = raw.indexOf(TOOL_REQUEST_END, s + TOOL_REQUEST_START.length)
-        if (e < 0) break // 未闭合：隐藏剩余部分，避免 UI 暴露协议块
-        cursor = e + TOOL_REQUEST_END.length
+        out += raw.slice(cursor, s.index)
+        const e = findToolRequestMarker(raw, s.index + s.length, 'end')
+        if (!e) break // 未闭合：隐藏剩余部分，避免 UI 暴露协议块
+        cursor = e.index + e.length
       }
       return out
     }
 
     const callLlmText = async (
-      attempt = 0,
+      visionRetryAttempt = 0,
       opts?: { onDelta?: (delta: string) => void; stopOnToolRequest?: boolean },
     ): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> => {
-      const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
-      rt.cancelCurrent = () => ac.abort(new Error('canceled'))
+      for (let transientAttempt = 0; transientAttempt <= transientRetryLimit; transientAttempt += 1) {
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
+        rt.cancelCurrent = () => ac.abort(new Error('canceled'))
+        let emittedAnyOutput = false
 
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          signal: ac.signal,
-          headers,
-          body: JSON.stringify({
-            model,
-            temperature,
-            max_tokens: maxTokens,
-            ...reasoningOptions.extra,
-            messages,
-            sessionId,
-            stream: true,
-          }),
-        })
+        try {
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            signal: ac.signal,
+            headers,
+            body: JSON.stringify({
+              model,
+              temperature,
+              max_tokens: maxTokens,
+              ...reasoningOptions.extra,
+              messages,
+              sessionId,
+              stream: true,
+            }),
+          })
 
-        if (!res.ok) {
-          const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
-          const errMsg = errData?.error?.message || `HTTP ${res.status}`
-          throw new Error(errMsg)
-        }
+          if (!res.ok) {
+            const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
+            const errMsg = errData?.error?.message || `HTTP ${res.status}`
+            throw withHttpStatus(errMsg, res.status)
+          }
 
-        if (!res.body) {
-          throw new Error('Stream response body is null')
-        }
+          if (!res.body) {
+            throw new Error('Stream response body is null')
+          }
 
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder('utf-8')
-        let buffer = ''
-        let contentText = ''
-        let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined
+          const reader = res.body.getReader()
+          const decoder = new TextDecoder('utf-8')
+          let buffer = ''
+          let contentText = ''
+          let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined
+          const throwIfCanceled = () => {
+            if (rt.canceled) throw new Error('canceled')
+          }
 
-        let stoppedEarly = false
-        let streamDone = false
-        while (!streamDone && !stoppedEarly) {
-          const { value, done } = await reader.read()
-          streamDone = done
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
+          let stoppedEarly = false
+          let streamDone = false
+          while (!streamDone && !stoppedEarly) {
+            throwIfCanceled()
+            const { value, done } = await reader.read()
+            throwIfCanceled()
+            streamDone = done
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
 
-          // Parse SSE lines
-          let hasMoreLines = true
-          while (hasMoreLines && !stoppedEarly) {
-            const lineEnd = buffer.indexOf('\n')
-            if (lineEnd === -1) {
-              hasMoreLines = false
-              break
-            }
-            const line = buffer.slice(0, lineEnd).trim()
-            buffer = buffer.slice(lineEnd + 1)
-
-            if (!line.startsWith('data:')) continue
-            const dataStr = line.slice('data:'.length).trim()
-            if (!dataStr || dataStr === '[DONE]') continue
-
-            try {
-              const payload = JSON.parse(dataStr) as {
-                choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
-                usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+            // Parse SSE lines
+            let hasMoreLines = true
+            while (hasMoreLines && !stoppedEarly) {
+              throwIfCanceled()
+              const lineEnd = buffer.indexOf('\n')
+              if (lineEnd === -1) {
+                hasMoreLines = false
+                break
               }
+              const line = buffer.slice(0, lineEnd).trim()
+              buffer = buffer.slice(lineEnd + 1)
 
-              // Extract usage from stream (some APIs include it in the last chunk)
-              if (payload.usage) {
-                usage = {
-                  promptTokens: payload.usage.prompt_tokens ?? 0,
-                  completionTokens: payload.usage.completion_tokens ?? 0,
-                  totalTokens: payload.usage.total_tokens ?? 0,
+              if (!line.startsWith('data:')) continue
+              const dataStr = line.slice('data:'.length).trim()
+              if (!dataStr || dataStr === '[DONE]') continue
+
+              try {
+                const payload = JSON.parse(dataStr) as {
+                  choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
+                  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
                 }
-              }
 
-              // Extract content delta
-              const choice = payload.choices?.[0]
-              const delta = choice?.delta?.content ?? choice?.message?.content ?? ''
-              if (delta) {
-                const prevLen = contentText.length
-                contentText += delta
-
-                if (opts?.stopOnToolRequest) {
-                  const lastEnd = findLastCompleteToolRequestEnd(contentText)
-                  if (lastEnd >= 0) {
-                    const keptDelta = contentText.slice(prevLen, Math.min(lastEnd, contentText.length))
-                    if (keptDelta) opts.onDelta?.(keptDelta)
-                    contentText = contentText.slice(0, lastEnd)
-                    stoppedEarly = true
-                    break
+                // Extract usage from stream (some APIs include it in the last chunk)
+                if (payload.usage) {
+                  usage = {
+                    promptTokens: payload.usage.prompt_tokens ?? 0,
+                    completionTokens: payload.usage.completion_tokens ?? 0,
+                    totalTokens: payload.usage.total_tokens ?? 0,
                   }
                 }
 
-                opts?.onDelta?.(delta)
+                // Extract content delta
+                const choice = payload.choices?.[0]
+                const delta = choice?.delta?.content ?? choice?.message?.content ?? ''
+                if (delta) {
+                  throwIfCanceled()
+                  emittedAnyOutput = true
+                  const prevLen = contentText.length
+                  contentText += delta
+
+                  if (opts?.stopOnToolRequest) {
+                    const lastEnd = findLastCompleteToolRequestEnd(contentText)
+                    if (lastEnd >= 0) {
+                      const keptDelta = contentText.slice(prevLen, Math.min(lastEnd, contentText.length))
+                      if (keptDelta) opts.onDelta?.(keptDelta)
+                      contentText = contentText.slice(0, lastEnd)
+                      stoppedEarly = true
+                      break
+                    }
+                  }
+
+                  opts?.onDelta?.(delta)
+                }
+              } catch {
+                // Ignore parse errors for individual chunks
               }
-            } catch {
-              // Ignore parse errors for individual chunks
             }
           }
-        }
 
-        if (stoppedEarly) {
-          try {
-            await reader.cancel()
-          } catch {
-            // ignore
+          if (stoppedEarly) {
+            try {
+              await reader.cancel()
+            } catch {
+              // ignore
+            }
           }
-        }
 
-        const assistantMsgRaw: AssistantMessage = { role: 'assistant', content: contentText }
-        return { contentText, assistantMsgRaw, usage }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (attempt === 0 && stripVisionFromUserMessage()) {
-          pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
-          return callLlmText(1, opts)
+          const assistantMsgRaw: AssistantMessage = { role: 'assistant', content: contentText }
+          return { contentText, assistantMsgRaw, usage }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
+            throw new Error('canceled')
+          }
+          if (visionRetryAttempt === 0 && stripVisionFromUserMessage()) {
+            pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
+            return callLlmText(1, opts)
+          }
+
+          const status = readErrorStatus(err)
+          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, err, status)) {
+            const delayMs = transientRetryDelayMs(transientAttempt)
+            pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
+            if (rt.canceled) throw new Error('canceled')
+            await sleep(delayMs)
+            if (rt.canceled) throw new Error('canceled')
+            continue
+          }
+          throw err
+        } finally {
+          clearTimeout(timer)
+          rt.cancelCurrent = undefined
         }
-        throw err
-      } finally {
-        clearTimeout(timer)
-        rt.cancelCurrent = undefined
       }
+      throw new Error('llm request retry exhausted')
     }
 
-    const parseToolRequests = (text: string): { cleaned: string; calls: Array<{ toolName: string; input: ToolInput }> } => {
-      const raw = String(text ?? '')
-      if (!raw.includes(TOOL_REQUEST_START)) return { cleaned: raw.trim(), calls: [] }
+    type TextToolRequest = { toolName: string; input: ToolInput; rawToolName?: string; cleanedToolName?: string; aliasApplied?: boolean }
 
-      const calls: Array<{ toolName: string; input: ToolInput }> = []
+    const parseToolRequests = (text: string): { cleaned: string; calls: TextToolRequest[] } => {
+      const raw = String(text ?? '')
+      if (!hasToolRequestMarker(raw)) return { cleaned: raw.trim(), calls: [] }
+
+      const calls: TextToolRequest[] = []
       let cleaned = ''
       let cursor = 0
       while (cursor < raw.length) {
-        const s = raw.indexOf(TOOL_REQUEST_START, cursor)
-        if (s < 0) {
+        const s = findToolRequestMarker(raw, cursor, 'start')
+        if (!s) {
           cleaned += raw.slice(cursor)
           break
         }
-        cleaned += raw.slice(cursor, s)
-        const e = raw.indexOf(TOOL_REQUEST_END, s + TOOL_REQUEST_START.length)
-        if (e < 0) {
-          cleaned += raw.slice(s)
+        cleaned += raw.slice(cursor, s.index)
+        const e = findToolRequestMarker(raw, s.index + s.length, 'end')
+        if (!e) {
+          cleaned += raw.slice(s.index)
           break
         }
-        const block = raw.slice(s + TOOL_REQUEST_START.length, e).trim()
-        cursor = e + TOOL_REQUEST_END.length
+        const block = raw.slice(s.index + s.length, e.index).trim()
+        cursor = e.index + e.length
 
-        const paramRegex = /([\w_]+)\s*:\s*「始」([\s\S]*?)「末」\s*(?:,)?/g
+        const paramRegex = /([\w_]+)\s*[:：]\s*「始」([\s\S]*?)「末」\s*(?:,)?/g
         let m: RegExpExecArray | null
         let toolName = ''
         let inputJson = ''
@@ -1951,7 +2187,19 @@ export class TaskService {
           else kv[key] = val
         }
 
-        toolName = toolName.trim()
+        if (!toolName) {
+          const mm = block.match(/tool_name\s*[:：]\s*([^\r\n]+)/i)
+          if (mm?.[1]) toolName = mm[1]
+        }
+        if (!inputJson) {
+          const mm = block.match(/input_json\s*[:：]\s*([\s\S]*)$/i)
+          if (mm?.[1]) inputJson = mm[1]
+        }
+
+        const rawToolName = unwrapVcpValue(toolName).trim()
+        const resolvedTool = resolveTextToolName(rawToolName)
+        toolName = resolvedTool.effectiveName
+        inputJson = unwrapVcpValue(inputJson)
         if (!toolName) continue
 
         let input: ToolInput = {}
@@ -1965,7 +2213,13 @@ export class TaskService {
           input = kv as ToolInput
         }
 
-        calls.push({ toolName, input })
+        calls.push({
+          toolName,
+          rawToolName: resolvedTool.requestedName && resolvedTool.requestedName !== toolName ? resolvedTool.requestedName : undefined,
+          cleanedToolName: resolvedTool.cleanedName && resolvedTool.cleanedName !== toolName ? resolvedTool.cleanedName : undefined,
+          aliasApplied: resolvedTool.aliasApplied,
+          input,
+        })
       }
 
       return { cleaned: cleaned.trim(), calls }
@@ -1976,10 +2230,19 @@ export class TaskService {
       lines.push('重要：工具输出是事实来源。严禁编造/猜测工具执行结果。')
       lines.push('如果工具结果块（TOOL_RESULT）为空、乱码、或与你需要的答案不一致：必须明确说明“工具输出不可用/无法解析”，并优先选择重试（可换更简单/更稳的命令或加 -NoProfile）。')
       lines.push('只有当不需要工具时，才直接给最终回答。')
+      lines.push('重要：用户要求截图、识图、搜索/查询最新信息、打开并操作网页、读写/修改文件、运行命令、下载/安装/执行程序时，必须先调用工具；没有工具结果时禁止声称已经做过。')
       lines.push('当你需要调用工具时：不要输出任何自然语言前置话术，直接输出一个或多个工具调用块（TOOL_REQUEST）。')
       lines.push('')
       lines.push('你可以通过下面的兼容工具调用格式来调用工具。')
-      lines.push('重要：用户仅说“打开/进入某网站”时，只需打开网页（优先 browser.open；必要时截图/交互才用 browser.playwright），不要擅自抓取全文/总结；只有用户明确要“抓取/总结/提炼”时才做 extract 或 summarize。')
+      lines.push('重要：用户仅说“打开/进入某网站”且不需要后续搜索、点击、截图、提取时，才用 browser.open。browser.open 打开的是系统浏览器，不能继续自动化；只要任务包含搜索、点击、打开结果、截图或读取页面状态，必须使用 browser.playwright/browser.scan/browser.exec_js/browser.screenshot。')
+      lines.push('重要：连续操作同一动态网页时，先用 browser.tabs/browser.scan 获取 tabId，后续 browser.scan/browser.exec_js/browser.screenshot 都绑定同一个 tabId；不要为了“当前页提取/截图”重复调用带 url 的 browser.playwright。')
+      lines.push('重要：点击或搜索后如果工具结果显示 activePageChanged/newTabs，说明页面已跳转或新标签已打开，不要误判“没反应”；继续使用返回的 tabId/活动页操作。')
+      lines.push('重要：单页目标任务完成并确认目标页已打开后，可用 browser.close_tabs 关闭非活动旧标签，避免 persistent profile 下历史标签反复恢复。')
+      lines.push('重要：需要理解截图/图片内容时，优先使用 image.inspect 读取应用生成图片；不要为了看图要求 filesystem MCP。')
+      lines.push('重要：这里的“当前页”仅指桌宠内置 Playwright profile 的活动标签页，不等于系统浏览器前台页；若返回 about:blank，先用 browser.tabs 确认实际 tabId。')
+      lines.push('重要：Windows 下执行带空格/引号/管道的命令时，优先用 cmd+args 形式调用 powershell -NoProfile -Command；运行 .py 必须写 python "脚本.py"，不要用 & "脚本.py" 直接执行；不要用 cmd.exe line 字符串拼接复杂路径。修改 UTF-8 文件时优先用 file.write 或 PowerShell 明确 -Encoding UTF8，不要用 sed 盲替换。')
+      lines.push('重要：如果用户点名“用 grok 搜索/查”，先用 skill.read 读取 grok-x-search-skill 并按技能运行脚本；不要先用 browser.fetch/mcp.fetch.fetch 抓搜索引擎页面。')
+      lines.push('重要：抓取网页文本用 browser.fetch；不要使用 mcp.fetch.fetch、fetch.fetch 这类其他框架里的工具名。读取技能步骤用 skill.read。')
       lines.push('')
       lines.push('格式（必须严格匹配，不要放在代码块里）：')
       lines.push(TOOL_REQUEST_START)
@@ -2009,9 +2272,19 @@ export class TaskService {
       toolNameRaw: string,
       input: ToolInput,
     ): Promise<{ output: string; images: Array<{ mimeType: string; data: string }>; imagePaths: string[] }> => {
-      const needle = (toolNameRaw ?? '').trim()
-      const def = toolByName.get(needle) ?? resolveToolDefByCallName(needle)
-      if (!def) throw new Error(`未知工具：${toolNameRaw}`)
+      const resolvedTool = resolveTextToolName(toolNameRaw)
+      const def = resolvedTool.def
+      if (!def) {
+        const suggestions = suggestToolNames(resolvedTool.cleanedName || toolNameRaw)
+        const suffix = suggestions.length ? `；相近可用工具：${suggestions.join('、')}` : ''
+        const cleaned = resolvedTool.cleanedName && resolvedTool.cleanedName !== toolNameRaw ? `（清洗后：${resolvedTool.cleanedName}）` : ''
+        throw new Error(`未知工具：${toolNameRaw}${cleaned}${suffix}`)
+      }
+
+      if (resolvedTool.requestedName !== def.name || resolvedTool.aliasApplied) {
+        const via = resolvedTool.aliasApplied ? ' alias' : ''
+        pushLog(`[Tool] normalize${via}: ${resolvedTool.requestedName || toolNameRaw} -> ${def.name}`, true)
+      }
 
       const key = makeCallKey(def.name, input)
       const cached = executedCalls.get(key)
@@ -2081,6 +2354,8 @@ export class TaskService {
       return parts.join('\n\n')
     }
 
+    const hasAnyFinishedToolRun = (): boolean => Array.isArray(toolRuns) && toolRuns.some((r) => r.status === 'done' || r.status === 'error')
+
     const normalizeUrl = (raw: string): string => {
       const u = (raw ?? '').trim()
       if (!u) return ''
@@ -2103,6 +2378,10 @@ export class TaskService {
 
       const internalNameHit = /\b(?:mcp|cli|browser|file|llm|delay)\.[A-Za-z0-9_:\-./]+/g.test(text)
       if (internalNameHit) return { ok: false, reason: '最终回复包含工具内部名（如 cli.exec/browser.open/mcp.*）' }
+
+      if (!hasAnyFinishedToolRun() && finalTextClaimsToolAction(text)) {
+        return { ok: false, reason: '最终回复声称已调用/执行工具，但本轮没有任何工具执行记录' }
+      }
 
       const urls = extractUrls(text)
       if (!urls.length) return { ok: true }
@@ -2182,6 +2461,7 @@ export class TaskService {
 
         const { contentText, toolCalls, assistantMsgRaw } = await callLlmNative(0, {
           onDelta: (delta) => {
+            if (rt.canceled) throw new Error('canceled')
             turnRaw += delta
             applyTurnDraft(turnRaw)
           },
@@ -2190,6 +2470,9 @@ export class TaskService {
         applyTurnDraft(contentText, true)
 
         if (!toolCalls.length) {
+          if (hasToolRequestMarker(contentText)) {
+            throw new Error('native response used text TOOL_REQUEST protocol without tool_calls')
+          }
           pushLog('[Agent] done', true)
           const fin = tryFinalizeOrContinue(contentText, turn)
           if (fin.done) return fin.text
@@ -2322,6 +2605,7 @@ export class TaskService {
         const { contentText, assistantMsgRaw, usage } = await callLlmText(0, {
           stopOnToolRequest: true,
           onDelta: (delta) => {
+            if (rt.canceled) throw new Error('canceled')
             turnRaw += delta
             applyTurnDraft(turnRaw)
           },
@@ -2436,6 +2720,9 @@ export class TaskService {
       return await runNative()
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
+        throw err
+      }
       // 自适应：auto 模式下若检测到 thought_signature/thoughtSignature 兼容错误，则本次回退到 text（不修改用户设置）
       if (modeRaw === 'auto' && /thought[_ ]?signature/i.test(msg)) {
         pushLog('[Agent] auto detected native tools incompatibility, fallback to text', true)
@@ -2455,7 +2742,7 @@ export class TaskService {
       messages.push({
         role: 'system',
         content:
-          '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。',
+          '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
       })
       if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 

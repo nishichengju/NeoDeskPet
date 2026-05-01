@@ -24,14 +24,20 @@ const ORB_BALL_SIZE = 40
 const ORB_BAR_WIDTH = 480
 const ORB_BAR_HEIGHT = 80
 const ORB_ANIMATION_FPS = 60
-const ORB_ANIMATION_OPEN_MS = 460
+const ORB_ANIMATION_OPEN_MS = 380
 const ORB_ANIMATION_MID_MS = 220
 const ORB_ANIMATION_CLOSE_MS = 320
 
 // 仅当 orb 窗口处于“面板态”时才持久化 orbWindowBounds，避免 ball/bar 把展开尺寸覆盖掉
 const ORB_PANEL_PERSIST_MIN_H = 240
 
-function clampBounds(bounds: WindowBounds): WindowBounds {
+type ClampBoundsOptions = {
+  overflowLeftPx?: number
+  overflowRightPx?: number
+  overflowBottomPx?: number
+}
+
+function clampBounds(bounds: WindowBounds, opts?: ClampBoundsOptions): WindowBounds {
   const hasPoint = typeof bounds.x === 'number' && Number.isFinite(bounds.x) && typeof bounds.y === 'number' && Number.isFinite(bounds.y)
   const display = hasPoint ? screen.getDisplayNearestPoint({ x: bounds.x!, y: bounds.y! }) : screen.getPrimaryDisplay()
   const workArea = display.workArea
@@ -40,10 +46,18 @@ function clampBounds(bounds: WindowBounds): WindowBounds {
   const height = Math.min(bounds.height, workArea.height)
 
   const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
-  const minX = workArea.x
+  const rawOverflowLeft =
+    typeof opts?.overflowLeftPx === 'number' && Number.isFinite(opts.overflowLeftPx) ? opts.overflowLeftPx : 0
+  const overflowLeftPx = Math.max(0, Math.min(rawOverflowLeft, Math.max(0, width - 80)))
+  const rawOverflowRight =
+    typeof opts?.overflowRightPx === 'number' && Number.isFinite(opts.overflowRightPx) ? opts.overflowRightPx : 0
+  const overflowRightPx = Math.max(0, Math.min(rawOverflowRight, Math.max(0, width - 80)))
+  const minX = workArea.x - overflowLeftPx
   const minY = workArea.y
-  const maxX = workArea.x + workArea.width - width
-  const maxY = workArea.y + workArea.height - height
+  const maxX = workArea.x + workArea.width - width + overflowRightPx
+  const rawOverflowBottom = typeof opts?.overflowBottomPx === 'number' && Number.isFinite(opts.overflowBottomPx) ? opts.overflowBottomPx : 0
+  const overflowBottomPx = Math.max(0, Math.min(rawOverflowBottom, Math.max(0, height - 80)))
+  const maxY = workArea.y + workArea.height - height + overflowBottomPx
 
   const defaultX = Math.round(workArea.x + (workArea.width - width) / 2)
   const defaultY = Math.round(workArea.y + (workArea.height - height) / 2)
@@ -53,9 +67,38 @@ function clampBounds(bounds: WindowBounds): WindowBounds {
   return { x, y, width, height }
 }
 
+function clampPetBounds(bounds: WindowBounds): WindowBounds {
+  const w = typeof bounds.width === 'number' && Number.isFinite(bounds.width) ? Math.max(1, Math.trunc(bounds.width)) : 350
+  const h = typeof bounds.height === 'number' && Number.isFinite(bounds.height) ? Math.max(1, Math.trunc(bounds.height)) : 450
+  // 允许桌宠底部大量越过屏幕边界（例如把腿部完全放到屏幕外）。
+  // 仅要求保留一小段可见区域，避免下次无法拖拽找回。
+  const minVisibleWidth = Math.max(100, Math.min(180, Math.round(w * 0.22)))
+  const minVisibleHeight = Math.max(100, Math.min(180, Math.round(h * 0.16)))
+  const overflowSidePx = Math.max(0, w - minVisibleWidth)
+  const overflowBottomPx = Math.max(0, h - minVisibleHeight)
+  return clampBounds(bounds, { overflowLeftPx: overflowSidePx, overflowRightPx: overflowSidePx, overflowBottomPx })
+}
+
+function applyWindowAlwaysOnTop(win: BrowserWindow, value: boolean): void {
+  try {
+    if (!value) {
+      win.setAlwaysOnTop(false)
+      return
+    }
+    // 使用较低层级的 always-on-top，避免遮挡 Windows 任务栏（taskbar 通常维持更高顶层）。
+    win.setAlwaysOnTop(true, 'floating')
+  } catch {
+    try {
+      win.setAlwaysOnTop(value)
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function getBounds(type: WindowType): WindowBounds {
   const settings = getSettings()
-  if (type === 'pet') return clampBounds(settings.petWindowBounds)
+  if (type === 'pet') return clampPetBounds(settings.petWindowBounds)
   if (type === 'chat') return clampBounds(settings.chatWindowBounds)
   if (type === 'settings') return clampBounds(settings.settingsWindowBounds)
   if (type === 'orb') return clampBounds(settings.orbWindowBounds)
@@ -66,12 +109,13 @@ function persistBounds(type: WindowType, bounds: Electron.Rectangle): void {
   // orb：仅记录展开态（panel）；折叠态（ball/bar）由 WindowManager 常量控制
   if (type === 'orb' && bounds.height < ORB_PANEL_PERSIST_MIN_H) return
 
-  const nextBounds: WindowBounds = {
+  const rawBounds: WindowBounds = {
     x: bounds.x,
     y: bounds.y,
     width: bounds.width,
     height: bounds.height,
   }
+  const nextBounds = type === 'pet' ? clampPetBounds(rawBounds) : clampBounds(rawBounds)
 
   if (type === 'pet') setSettings({ petWindowBounds: nextBounds })
   else if (type === 'chat') setSettings({ chatWindowBounds: nextBounds })
@@ -107,6 +151,9 @@ export class WindowManager {
   // 记住 ball 状态时的位置，以便从 bar/panel 返回时恢复到原位
   private orbBallBounds: Electron.Rectangle | null = null
   private orbUiState: OrbUiState = 'ball'
+  private orbSurfacePrewarmed = false
+  private orbFirstVisibleExpandDone = false
+  private orbRevealTimer: NodeJS.Timeout | null = null
   private orbAnimating = false
   private orbAnimationTimer: NodeJS.Timeout | null = null
   private orbAnimationToken = 0
@@ -177,6 +224,10 @@ export class WindowManager {
     this.attachPersistHandlers(win, 'pet')
     this.loadWindow(win, 'pet')
     this.petWindow = win
+    applyWindowAlwaysOnTop(win, settings.alwaysOnTop)
+    setTimeout(() => {
+      if (!win.isDestroyed()) applyWindowAlwaysOnTop(win, getSettings().alwaysOnTop)
+    }, 400)
 
     // 启动时确保窗口尺寸与 petScale 一致，避免“重新构建/重启后模型看起来变大”
     // 以 petScale 作为权威来源（base=350x450）
@@ -363,20 +414,49 @@ export class WindowManager {
       maximizable: false,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        backgroundThrottling: false,
       },
     })
+
+    try {
+      win.webContents.setBackgroundThrottling(false)
+    } catch {
+      // ignore
+    }
 
     this.attachPersistHandlers(win, 'orb')
     this.loadWindow(win, 'orb')
     this.orbWindow = win
     // 记住初始 ball 位置，确保从 bar/panel 返回时能回到这个贴边位置
     this.orbBallBounds = { ...bounds }
+    this.orbSurfacePrewarmed = false
+    this.orbFirstVisibleExpandDone = false
+
+    win.webContents.once('did-finish-load', () => {
+      if (win.isDestroyed()) return
+      if (this.orbSurfacePrewarmed) return
+      this.orbSurfacePrewarmed = true
+      try {
+        const currentBounds = win.getBounds()
+        const warmTarget = this.computeOrbTarget('panel', currentBounds)
+        win.setBounds(warmTarget, false)
+        win.setBounds(currentBounds, false)
+      } catch {
+        // ignore
+      }
+    })
 
     win.on('closed', () => {
       this.clearOrbAnimation()
+      if (this.orbRevealTimer) {
+        clearTimeout(this.orbRevealTimer)
+        this.orbRevealTimer = null
+      }
       this.orbWindow = null
       this.orbOverlayBaseBounds = null
       this.orbUiState = 'ball'
+      this.orbSurfacePrewarmed = false
+      this.orbFirstVisibleExpandDone = false
     })
 
     return win
@@ -535,6 +615,7 @@ export class WindowManager {
     const sameBounds = (a: Electron.Rectangle, b: Electron.Rectangle) =>
       a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
     const lerp = (a: number, b: number, p: number) => Math.round(a + (b - a) * p)
+    const edgeDistance = (a: number, b: number) => Math.abs(a - b)
 
     const normalizedSegments: Array<{
       from: Electron.Rectangle
@@ -593,12 +674,33 @@ export class WindowManager {
 
         const progress = Math.min(1, (now - segStartedAt) / seg.durationMs)
         const eased = this.easeInOutCubic(progress)
+        const width = lerp(seg.from.width, seg.to.width, eased)
+        const height = lerp(seg.from.height, seg.to.height, eased)
+        const fromRight = seg.from.x + seg.from.width
+        const toRight = seg.to.x + seg.to.width
+        const fromBottom = seg.from.y + seg.from.height
+        const toBottom = seg.to.y + seg.to.height
+
+        const x =
+          edgeDistance(seg.from.x, seg.to.x) <= 1
+            ? seg.from.x
+            : edgeDistance(fromRight, toRight) <= 1
+              ? fromRight - width
+              : lerp(seg.from.x, seg.to.x, eased)
+
+        const y =
+          edgeDistance(seg.from.y, seg.to.y) <= 1
+            ? seg.from.y
+            : edgeDistance(fromBottom, toBottom) <= 1
+              ? fromBottom - height
+              : lerp(seg.from.y, seg.to.y, eased)
+
         win.setBounds(
           {
-            x: lerp(seg.from.x, seg.to.x, eased),
-            y: lerp(seg.from.y, seg.to.y, eased),
-            width: lerp(seg.from.width, seg.to.width, eased),
-            height: lerp(seg.from.height, seg.to.height, eased),
+            x,
+            y,
+            width,
+            height,
           },
           false,
         )
@@ -675,11 +777,24 @@ export class WindowManager {
     return this.toOrbRect(clampBounds({ x: nextX, y: nextY, width: size.width, height: size.height }))
   }
 
-  setOrbUiState(state: OrbUiState, opts?: { focus?: boolean }): void {
+  setOrbUiState(state: OrbUiState, opts?: { focus?: boolean; animate?: boolean }): void {
     const win = this.ensureOrbWindow()
     const prevState = this.orbUiState
     this.orbUiState = state
     this.orbOverlayBaseBounds = null
+
+    if (this.orbRevealTimer) {
+      clearTimeout(this.orbRevealTimer)
+      this.orbRevealTimer = null
+    }
+
+    if (state === 'ball') {
+      try {
+        win.setOpacity(1)
+      } catch {
+        // ignore
+      }
+    }
 
     const current = win.getBounds()
     const isBallSize = current.width <= ORB_BALL_SIZE + 4 && current.height <= ORB_BALL_SIZE + 4
@@ -693,19 +808,10 @@ export class WindowManager {
     if (state === 'ball') this.persistOrbBallAnchor(target)
     const segments: Array<{ target: Electron.Rectangle; durationMs: number }> = []
 
-    if (prevState === state) {
+    if (prevState === state || opts?.animate === false) {
       segments.push({ target, durationMs: 0 })
     } else if (prevState === 'ball' && state === 'panel') {
-      const barTarget = this.computeOrbTarget('bar', current)
-      // If panel is narrower than bar, skip bar midpoint to avoid visual rebound
-      // (expand left first, then shrink right) after users resize the panel.
-      if (target.width < barTarget.width) {
-        segments.push({ target, durationMs: ORB_ANIMATION_OPEN_MS })
-      } else {
-        const first = Math.max(0, Math.round(ORB_ANIMATION_OPEN_MS * 0.55))
-        segments.push({ target: barTarget, durationMs: first })
-        segments.push({ target, durationMs: Math.max(0, ORB_ANIMATION_OPEN_MS - first) })
-      }
+      segments.push({ target, durationMs: ORB_ANIMATION_OPEN_MS })
     } else if (prevState === 'panel' && state === 'ball') {
       segments.push({ target, durationMs: ORB_ANIMATION_CLOSE_MS })
     } else {
@@ -714,6 +820,15 @@ export class WindowManager {
 
     win.setResizable(state === 'panel')
 
+    const maskFirstVisibleExpand = prevState === 'ball' && state !== 'ball' && !this.orbFirstVisibleExpandDone
+    if (maskFirstVisibleExpand) {
+      try {
+        win.setOpacity(0)
+      } catch {
+        // ignore
+      }
+    }
+
     if (opts?.focus) {
       win.show()
       win.focus()
@@ -721,6 +836,20 @@ export class WindowManager {
       win.show()
     }
     this.animateOrbSegments(win, segments)
+
+    if (maskFirstVisibleExpand) {
+      this.orbFirstVisibleExpandDone = true
+      this.orbRevealTimer = setTimeout(() => {
+        this.orbRevealTimer = null
+        if (win.isDestroyed()) return
+        if (this.orbUiState === 'ball') return
+        try {
+          win.setOpacity(1)
+        } catch {
+          // ignore
+        }
+      }, 90)
+    }
   }
 
   // 更新保存的 ball 位置（用于拖动后同步）
@@ -791,9 +920,9 @@ export class WindowManager {
     const pet = this.getPetWindow()
     const orb = this.getOrbWindow()
     const orbMenu = this.orbMenuWindow && !this.orbMenuWindow.isDestroyed() ? this.orbMenuWindow : null
-    if (pet) pet.setAlwaysOnTop(value)
-    if (orb) orb.setAlwaysOnTop(value)
-    if (orbMenu) orbMenu.setAlwaysOnTop(value)
+    if (pet) applyWindowAlwaysOnTop(pet, value)
+    if (orb) applyWindowAlwaysOnTop(orb, value)
+    if (orbMenu) applyWindowAlwaysOnTop(orbMenu, value)
   }
 
   setClickThrough(value: boolean): void {
@@ -852,6 +981,16 @@ export class WindowManager {
       this.petTaskPanelHitRect = null
     }
     this.updatePetIgnoreMouseEvents()
+  }
+
+  persistPetBoundsNow(): void {
+    const pet = this.getPetWindow()
+    if (!pet || pet.isDestroyed()) return
+    try {
+      persistBounds('pet', pet.getBounds())
+    } catch {
+      // ignore
+    }
   }
 
   private applyPetClickThrough(enabled: boolean): void {
@@ -1007,10 +1146,25 @@ export class WindowManager {
       if (timer) clearTimeout(timer)
       timer = setTimeout(persist, 200)
     }
+    const flushPersist = () => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      if (win.isDestroyed()) return
+      persist()
+    }
 
     win.on('move', schedulePersist)
     win.on('resize', schedulePersist)
-    win.on('closed', persist)
+    // `closed` 阶段窗口通常已销毁，取不到最后 bounds；改为 `close` 前落盘，避免“拖完马上退出”丢位置。
+    win.on('close', flushPersist)
+    win.on('closed', () => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+    })
   }
 
   private loadWindow(win: BrowserWindow, type: WindowType): void {

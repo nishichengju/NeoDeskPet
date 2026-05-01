@@ -114,6 +114,8 @@ export function ContextUsageOrb(props: {
     return reserve > 0 ? `${formatK(remaining)}（其中输出预留 ${formatK(reserve)}）` : formatK(remaining)
   }, [usage?.maxContextTokens, usage?.outputReserveTokens, usage?.usedTokens])
 
+  const usageSourceText = usage?.isRealUsage ? '口径：真实 API（上次请求）' : '口径：本地估算（当前会话）'
+
   if (!enabled) return null
 
   const tooltipX: 'left' | 'right' = localPos.x >= 72 ? 'left' : 'right'
@@ -235,6 +237,7 @@ export function ContextUsageOrb(props: {
           <div className="ndp-context-orb-tooltip-line">
             <span className="ndp-context-orb-tooltip-strong">{pct}%</span> 已使用
           </div>
+          <div className="ndp-context-orb-tooltip-line">{usageSourceText}</div>
           <div className="ndp-context-orb-tooltip-line">用量：{usedText}</div>
           <div className="ndp-context-orb-tooltip-line">剩余：{remainingText}</div>
         </div>

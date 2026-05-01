@@ -206,6 +206,7 @@
 .ndp-setting-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
 }
@@ -241,6 +242,25 @@
 
 .ndp-btn:hover {
   background: rgba(0, 0, 0, 0.35);
+}
+
+.ndp-btn-primary {
+  border-color: rgba(102, 126, 234, 0.62);
+  background: rgba(102, 126, 234, 0.28);
+  color: #fff;
+}
+
+.ndp-btn-primary:hover {
+  background: rgba(102, 126, 234, 0.38);
+}
+
+.ndp-btn-danger {
+  border-color: rgba(248, 113, 113, 0.38);
+  color: rgba(255, 168, 168, 0.96);
+}
+
+.ndp-btn-danger:hover {
+  background: rgba(248, 113, 113, 0.14);
 }
 
 .ndp-pet-stage {
@@ -494,6 +514,16 @@
   color: rgba(255, 255, 255, 0.92);
 }
 
+.ndp-btn-stop {
+  border-color: rgba(255, 105, 105, 0.55);
+  background: rgba(255, 70, 70, 0.18);
+  color: rgba(255, 235, 235, 0.96);
+}
+
+.ndp-btn-stop:hover {
+  background: rgba(255, 70, 70, 0.28);
+}
+
 .ndp-input-previews {
   display: flex;
   flex-direction: column;
@@ -663,6 +693,18 @@
 
 .ndp-md :where(p, ul, ol, pre, blockquote, table):last-child {
   margin-bottom: 0;
+}
+
+.ndp-md .ndp-md-image {
+  display: block;
+  width: auto;
+  max-width: min(100%, 420px);
+  max-height: min(52vh, 520px);
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  object-fit: contain;
 }
 
 .ndp-msg-attachments .ndp-msg-image,

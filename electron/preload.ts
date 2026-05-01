@@ -47,6 +47,7 @@ import type {
   PersonaSummary,
   DisplayMode,
   OrbUiState,
+  WorldBookSettings,
 } from './types'
 import type { TtsOptions } from './ttsOptions'
 
@@ -55,6 +56,8 @@ export type Live2DExpressionListener = (expressionName: string) => void
 export type Live2DMotionListener = (motionGroup: string, index: number) => void
 export type Live2DMouseTargetListener = (payload: { x: number; y: number; t?: number }) => void
 export type BubbleMessageListener = (message: string) => void
+export type BubblePreviewPayload = { text?: string; clear?: boolean; placeholder?: boolean; autoHideDelay?: number; pinPrevious?: boolean }
+export type BubblePreviewListener = (payload: BubblePreviewPayload) => void
 
 export type TtsEnqueuePayload = { utteranceId: string; mode: 'replace' | 'append'; segments: string[]; fullText?: string }
 export type TtsSegmentStartedPayload = { utteranceId: string; segmentIndex: number; text: string }
@@ -143,6 +146,8 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   // Chat UI appearance
   setChatUiSettings: (chatUi: Partial<ChatUiSettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setChatUiSettings', chatUi),
+  setWorldBookSettings: (worldBook: Partial<WorldBookSettings>): Promise<AppSettings> =>
+    ipcRenderer.invoke('settings:setWorldBookSettings', worldBook),
 
   // TTS settings
   setTtsSettings: (tts: Partial<TtsSettings>): Promise<AppSettings> => ipcRenderer.invoke('settings:setTtsSettings', tts),
@@ -175,12 +180,18 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     return () => ipcRenderer.off('asr:hotkeyToggle', handler)
   },
   reportAsrTranscript: (text: string): void => ipcRenderer.send('asr:reportTranscript', text),
+  syncAsrComposePreview: (payload: { baseText: string; clearFinals?: boolean }): void => ipcRenderer.send('asr:composePreviewSync', payload),
   notifyAsrTranscriptReady: (): void => ipcRenderer.send('asr:transcriptReady'),
   takeAsrTranscript: (): Promise<string> => ipcRenderer.invoke('asr:takeTranscript'),
   onAsrTranscript: (listener: (text: string) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, text: string) => listener(text)
     ipcRenderer.on('asr:transcript', handler)
     return () => ipcRenderer.off('asr:transcript', handler)
+  },
+  onAsrComposePreview: (listener: (payload: { baseText: string; clearFinals?: boolean }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { baseText: string; clearFinals?: boolean }) => listener(payload)
+    ipcRenderer.on('asr:composePreviewSync', handler)
+    return () => ipcRenderer.off('asr:composePreviewSync', handler)
   },
 
   // Model scanner - scan live2d directory for available models
@@ -327,7 +338,7 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
 
   getOrbUiState: (): Promise<{ state: OrbUiState }> => ipcRenderer.invoke('orb:getUiState'),
-  setOrbUiState: (state: OrbUiState, opts?: { focus?: boolean }): Promise<{ state: OrbUiState }> =>
+  setOrbUiState: (state: OrbUiState, opts?: { focus?: boolean; animate?: boolean }): Promise<{ state: OrbUiState }> =>
     ipcRenderer.invoke('orb:setUiState', state, opts),
   toggleOrbUiState: (): Promise<{ state: OrbUiState }> => ipcRenderer.invoke('orb:toggleUiState'),
   setOrbOverlayBounds: (payload: { width: number; height: number; focus?: boolean }): Promise<{ ok: true }> =>
@@ -375,9 +386,15 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     ipcRenderer.on('bubble:message', handler)
     return () => ipcRenderer.off('bubble:message', handler)
   },
+  onBubblePreview: (listener: BubblePreviewListener): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: BubblePreviewPayload) => listener(payload)
+    ipcRenderer.on('bubble:preview', handler)
+    return () => ipcRenderer.off('bubble:preview', handler)
+  },
 
   // Send bubble message (from chat window to pet window)
   sendBubbleMessage: (message: string): void => ipcRenderer.send('bubble:sendMessage', message),
+  sendBubblePreview: (payload: BubblePreviewPayload): void => ipcRenderer.send('bubble:preview', payload),
 
   // TTS segmented sync (chat -> pet)
   enqueueTtsUtterance: (payload: TtsEnqueuePayload): void => ipcRenderer.send('tts:enqueue', payload),

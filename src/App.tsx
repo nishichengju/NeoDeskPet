@@ -1,28 +1,21 @@
 import './App.css'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { flushSync } from 'react-dom'
 import type {
-  AIReasoningProvider,
   AppSettings,
-  BubbleStyle,
   ChatMessageBlock,
   ChatMessageRecord,
   ChatSessionSummary,
-  ClaudeThinkingEffort,
   ContextUsageSnapshot,
-  GeminiThinkingEffort,
   McpStateSnapshot,
-  McpServerConfig,
   MemoryRetrieveResult,
-  OpenAIReasoningEffort,
   Persona,
-  PersonaSummary,
   TaskCreateArgs,
   TaskRecord,
   TaskStepRecord,
-  TailDirection,
+  WorldBookEntry,
 } from '../electron/types'
-import { getBuiltinToolDefinitions, getToolGroupId, isToolEnabled } from '../electron/toolRegistry'
-import { resolveReasoningUiState, toLegacyThinkingEffortFromProviderLevel } from '../electron/reasoningConfig'
+import { getBuiltinToolDefinitions, isToolEnabled } from '../electron/toolRegistry'
 import { getApi } from './neoDeskPetApi'
 import { getWindowType } from './windowType'
 import { MemoryConsoleWindow } from './windows/MemoryConsoleWindow'
@@ -42,6 +35,205 @@ import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type C
 import { TtsPlayer } from './services/ttsService'
 import { splitTextIntoTtsSegments } from './services/textSegmentation'
 import { stripToolProtocolDisplayArtifacts } from './utils/toolProtocolDisplay'
+import {
+  isOpenTypelessAsrWsUrl,
+  clampIntValue,
+} from './utils/settingsHelpers'
+import { TaskPanelSettingsTab } from './windows/settings/TaskPanelTab'
+import { Live2DSettingsTab } from './windows/settings/Live2DTab'
+import { BubbleSettingsTab } from './windows/settings/BubbleTab'
+import { ChatUiSettingsTab } from './windows/settings/ChatUiTab'
+import { TtsSettingsTab } from './windows/settings/TtsTab'
+import { AsrSettingsTab } from './windows/settings/AsrTab'
+import { AISettingsTab } from './windows/settings/AiTab'
+import { ToolsSettingsTab } from './windows/settings/ToolsTab'
+import { PersonaSettingsTab } from './windows/settings/PersonaTab'
+import { WorldBookSettingsTab } from './windows/settings/WorldBookTab'
+
+const BUBBLE_PREVIEW_FALLBACK_PREFIX = '__NDP_BUBBLE_PREVIEW__:'
+
+function clampPcmFloat(v: number): number {
+  return Math.max(-1, Math.min(1, Number.isFinite(v) ? v : 0))
+}
+
+function floatToPcm16(v: number): number {
+  const s = clampPcmFloat(v)
+  return s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff)
+}
+
+function concatFloat32(a: Float32Array, b: Float32Array): Float32Array {
+  if (a.length <= 0) return b
+  if (b.length <= 0) return a
+  const out = new Float32Array(a.length + b.length)
+  out.set(a, 0)
+  out.set(b, a.length)
+  return out
+}
+
+function createOpenTypelessPcmSender(ws: WebSocket, inputSampleRate: number): (pcm: Float32Array) => void {
+  const targetSampleRate = 16000
+  let carry = new Float32Array(0)
+
+  const sendInt16 = (source: Float32Array) => {
+    if (!source.length) return
+    const out = new Int16Array(source.length)
+    for (let i = 0; i < source.length; i++) out[i] = floatToPcm16(source[i])
+    ws.send(out.buffer)
+  }
+
+  return (pcm: Float32Array) => {
+    if (ws.readyState !== WebSocket.OPEN) return
+    if (!(pcm instanceof Float32Array) || pcm.length <= 0) return
+
+    const merged = carry.length ? concatFloat32(carry, pcm) : pcm
+
+    // OpenTypeless demo ws 默认按 16kHz / int16 PCM 读取；优先用 16k AudioContext，必要时在前端降采样兜底。
+    if (!Number.isFinite(inputSampleRate) || inputSampleRate <= 0 || Math.abs(inputSampleRate - targetSampleRate) < 1) {
+      carry = new Float32Array(0)
+      sendInt16(merged)
+      return
+    }
+
+    if (inputSampleRate < targetSampleRate) {
+      carry = new Float32Array(0)
+      sendInt16(merged)
+      return
+    }
+
+    const ratio = inputSampleRate / targetSampleRate
+    const outLen = Math.floor(merged.length / ratio)
+    if (outLen <= 0) {
+      carry = merged.slice()
+      return
+    }
+
+    const out = new Int16Array(outLen)
+    let sourceIndex = 0
+    for (let i = 0; i < outLen; i++) {
+      const nextSourceIndex = Math.min(merged.length, Math.max(sourceIndex + 1, Math.floor((i + 1) * ratio)))
+      let sum = 0
+      let count = 0
+      while (sourceIndex < nextSourceIndex) {
+        sum += merged[sourceIndex]
+        sourceIndex += 1
+        count += 1
+      }
+      out[i] = floatToPcm16(count > 0 ? sum / count : 0)
+    }
+    carry = sourceIndex < merged.length ? merged.slice(sourceIndex) : new Float32Array(0)
+    ws.send(out.buffer)
+  }
+}
+
+function escapeRegExp(input: string): string {
+  return String(input ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function parseAsrReplacementRules(raw: string): Array<[string, string]> {
+  return String(raw ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const m = line.match(/^(.*?)\s*(?:=>|->|=)\s*(.*?)$/)
+      if (!m) return null
+      const from = String(m[1] ?? '').trim()
+      const to = String(m[2] ?? '').trim()
+      if (!from || !to) return null
+      return [from, to] as [string, string]
+    })
+    .filter((x): x is [string, string] => Boolean(x))
+    .sort((a, b) => b[0].length - a[0].length)
+}
+
+function parseAsrWordList(raw: string): string[] {
+  return Array.from(
+    new Set(
+      String(raw ?? '')
+        .split(/[\n,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+  ).sort((a, b) => b.length - a.length)
+}
+
+function normalizeAsrDisplayText(text: string): string {
+  return String(text ?? '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*([，。！？；：、,.!?;:])\s*/g, '$1')
+    .replace(/([，。！？；：、,.!?;:]){2,}/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function applyAsrLocalRules(
+  text: string,
+  asr: AppSettings['asr'] | undefined,
+  opts?: { forInterim?: boolean },
+): string {
+  const raw = String(text ?? '')
+  if (!raw) return ''
+  if (!asr) return normalizeAsrDisplayText(raw)
+
+  const replacements = parseAsrReplacementRules(asr.replaceRules ?? '')
+  const fillerWords = parseAsrWordList(asr.fillerWords ?? '')
+  const stripFillers = asr.stripFillers ?? true
+  const ignoreCaseReplace = asr.ignoreCaseReplace ?? true
+  const processInterim = asr.processInterim ?? false
+  const forInterim = opts?.forInterim === true
+
+  let out = raw
+  for (const [from, to] of replacements) {
+    const flags = ignoreCaseReplace ? 'gi' : 'g'
+    out = out.replace(new RegExp(escapeRegExp(from), flags), to)
+  }
+
+  if (stripFillers && (!forInterim || processInterim)) {
+    for (const word of fillerWords) {
+      out = out.replace(new RegExp(escapeRegExp(word), 'g'), '')
+    }
+  }
+
+  return normalizeAsrDisplayText(out)
+}
+
+function getOpenTypelessHealthUrlFromWs(rawUrl: string): string | null {
+  try {
+    const u = new URL(String(rawUrl ?? '').trim())
+    if ((u.protocol !== 'ws:' && u.protocol !== 'wss:') || !/^\/demo\/ws\/realtime\/?$/.test(u.pathname)) return null
+    u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:'
+    u.pathname = '/health'
+    u.search = ''
+    u.hash = ''
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
+async function waitForOpenTypelessAsrReady(rawWsUrl: string, opts?: { timeoutMs?: number }): Promise<boolean> {
+  const healthUrl = getOpenTypelessHealthUrlFromWs(rawWsUrl)
+  if (!healthUrl) return true
+
+  const timeoutMs = Math.max(500, Math.trunc(opts?.timeoutMs ?? 25_000))
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    const ac = new AbortController()
+    const timer = window.setTimeout(() => ac.abort(), 1200)
+    try {
+      const res = await fetch(healthUrl, { method: 'GET', cache: 'no-store', signal: ac.signal })
+      if (res.ok) return true
+    } catch {
+      /* ignore */
+    } finally {
+      window.clearTimeout(timer)
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 250))
+  }
+
+  return false
+}
 
 function App() {
   const windowType = getWindowType()
@@ -187,11 +379,6 @@ function LocalVideo(props: {
   return <video className={className} src={src} controls={controls} muted={muted} playsInline={playsInline} preload={preload} />
 }
 
-function clampIntValue(v: unknown, fallback: number, min: number, max: number): number {
-  const n = typeof v === 'number' ? v : Number(v)
-  if (!Number.isFinite(n)) return fallback
-  return Math.max(min, Math.min(max, Math.trunc(n)))
-}
 
 function normalizeAssistantDisplayText(text: string, opts?: { trim?: boolean }): string {
   const cleaned = stripToolProtocolDisplayArtifacts(String(text ?? ''))
@@ -203,6 +390,38 @@ function normalizeAssistantDisplayText(text: string, opts?: { trim?: boolean }):
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
   return opts?.trim ? cleaned.trim() : cleaned
+}
+
+function buildInterruptedStreamContent(partialText: string, errorText: string): string {
+  const partial = normalizeAssistantDisplayText(partialText, { trim: true })
+  const err = String(errorText ?? '').trim()
+  if (!partial) return `[错误] ${err || '未知错误'}`
+  return err ? `${partial}\n\n[中断] ${err}` : `${partial}\n\n[中断]`
+}
+
+function toPlainTextFromChatContent(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => {
+      if (!part || typeof part !== 'object') return ''
+      if (part.type === 'text') return typeof part.text === 'string' ? part.text : ''
+      if (part.type === 'image_url') return '[图片]'
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+function buildContextCompressionSummaryPrompt(messages: ChatMessage[]): string {
+  const lines: string[] = []
+  for (const msg of messages) {
+    const role = msg.role === 'user' ? '用户' : msg.role === 'assistant' ? '助手' : '系统'
+    const text = toPlainTextFromChatContent(msg.content).trim()
+    if (!text) continue
+    lines.push(`${role}：${text}`)
+  }
+  return lines.join('\n\n').trim()
 }
 
 function extractLive2DTags(text: string): { displayText: string; expression?: string; motion?: string } {
@@ -406,10 +625,165 @@ function buildToolResultSystemAddon(task: TaskRecord): string {
   return lines.join('\n')
 }
 
+function buildWorldBookAddon(settings: AppSettings | null | undefined, activePersonaId: string): string {
+  const worldBook = settings?.worldBook
+  if (!worldBook || worldBook.enabled === false) return ''
+
+  const activeTagKeys = new Set(
+    (Array.isArray(worldBook.activeTagIds) ? worldBook.activeTagIds : [])
+      .map((tag) => String(tag ?? '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  const personaId = String(activePersonaId ?? '').trim() || 'default'
+  const entriesRaw = Array.isArray(worldBook.entries) ? worldBook.entries : []
+  const entries = entriesRaw
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => {
+      if (!entry || entry.enabled === false) return false
+      const content = String(entry.content ?? '').trim()
+      if (!content) return false
+      if (entry.scope === 'persona') {
+        const entryPersonaId = String(entry.personaId ?? '').trim()
+        if (entryPersonaId && entryPersonaId !== personaId) return false
+      }
+      const tags = Array.isArray(entry.tags) ? entry.tags.map((tag) => String(tag ?? '').trim()).filter(Boolean) : []
+      if (tags.length === 0) return true
+      return tags.some((tag) => activeTagKeys.has(tag.toLowerCase()))
+    })
+    .sort((a, b) => {
+      const priorityA = Number.isFinite(a.entry.priority) ? a.entry.priority : 100
+      const priorityB = Number.isFinite(b.entry.priority) ? b.entry.priority : 100
+      if (priorityA !== priorityB) return priorityA - priorityB
+      const updatedA = Number.isFinite(a.entry.updatedAt) ? a.entry.updatedAt : 0
+      const updatedB = Number.isFinite(b.entry.updatedAt) ? b.entry.updatedAt : 0
+      if (updatedA !== updatedB) return updatedB - updatedA
+      return a.index - b.index
+    })
+
+  if (entries.length === 0) return ''
+
+  const maxCharsRaw = Number.isFinite(worldBook.maxChars) ? Math.trunc(worldBook.maxChars) : 6000
+  const maxChars = Math.max(500, Math.min(30000, maxCharsRaw))
+  const lines: string[] = [
+    '【设定库（世界书，当前启用）】',
+    '规则：以下为用户手写的长期设定上下文；与更高优先级系统规则冲突时服从系统规则。',
+  ]
+  let current = lines.join('\n')
+
+  const appendChunk = (chunk: string): boolean => {
+    const sep = current ? '\n\n' : ''
+    const next = `${current}${sep}${chunk}`
+    if (next.length <= maxChars) {
+      current = next
+      return true
+    }
+
+    const suffix = '\n...（设定库已按最大字符数截断）'
+    const remaining = maxChars - current.length - sep.length - suffix.length
+    if (remaining > 80) {
+      current = `${current}${sep}${chunk.slice(0, remaining).trimEnd()}${suffix}`
+    } else if (!current.includes('设定库已按最大字符数截断')) {
+      current = `${current.slice(0, Math.max(0, maxChars - suffix.length)).trimEnd()}${suffix}`
+    }
+    return false
+  }
+
+  for (const { entry } of entries) {
+    const e = entry as WorldBookEntry
+    const title = String(e.title ?? '').trim() || '未命名设定'
+    const tags = Array.isArray(e.tags) ? e.tags.map((tag) => String(tag ?? '').trim()).filter(Boolean) : []
+    const content = String(e.content ?? '').trim()
+    const chunkLines = [`[${title}]`]
+    if (tags.length > 0) chunkLines.push(`标签：${tags.join('、')}`)
+    if (e.scope === 'persona') chunkLines.push(`作用域：当前角色（${String(e.personaId ?? personaId).trim() || personaId}）`)
+    chunkLines.push(`内容：${content}`)
+    if (!appendChunk(chunkLines.join('\n'))) break
+  }
+
+  return current.trim()
+}
+
 function trimTrailingCommaForSegment(text: string): string {
   const raw = String(text ?? '')
   const trimmed = raw.replace(/[，,]\s*$/u, '').trimEnd()
   return trimmed || raw
+}
+
+function extractQuotedTtsParts(text: string): string[] {
+  const raw = String(text ?? '')
+  if (!raw.trim()) return []
+
+  const patterns: RegExp[] = [/“([^”]+)”/gu, /"([^"\n]+)"/gu, /「([^」]+)」/gu, /『([^』]+)』/gu, /《([^》]+)》/gu]
+  const out: string[] = []
+  const seen = new Set<string>()
+
+  for (const re of patterns) {
+    for (const m of raw.matchAll(re)) {
+      const content = String(m[1] ?? '').trim()
+      if (!content) continue
+      if (seen.has(content)) continue
+      seen.add(content)
+      out.push(content)
+      if (out.length >= 80) return out
+    }
+  }
+  return out
+}
+
+function normalizeTtsRegexFlags(rawFlags: string): string {
+  const seen = new Set<string>()
+  let out = ''
+  for (const ch of String(rawFlags ?? '')) {
+    if (!/[dgimsuvy]/.test(ch)) continue
+    if (seen.has(ch)) continue
+    seen.add(ch)
+    out += ch
+    if (out.length >= 12) break
+  }
+  return out
+}
+
+function resolveTtsPlaybackText(rawText: string, tts: AppSettings['tts'] | null | undefined): string {
+  const source = String(rawText ?? '').trim()
+  if (!source) return ''
+
+  const mode = String(tts?.playbackTextMode ?? 'full').trim()
+  if (mode === 'quoted') {
+    return extractQuotedTtsParts(source).join('\n').trim()
+  }
+
+  if (mode === 'regex') {
+    const pattern = String(tts?.playbackRegex ?? '').trim()
+    if (!pattern) return source
+    const flags = normalizeTtsRegexFlags(String(tts?.playbackRegexFlags ?? ''))
+
+    try {
+      const re = new RegExp(pattern, flags)
+      const out: string[] = []
+      if (re.global) {
+        for (const m of source.matchAll(re)) {
+          const captured = m.length > 1 ? String(m[1] ?? '') : String(m[0] ?? '')
+          const text = captured.trim()
+          if (!text) continue
+          out.push(text)
+          if (out.length >= 80) break
+        }
+      } else {
+        const m = re.exec(source)
+        if (m) {
+          const captured = m.length > 1 ? String(m[1] ?? '') : String(m[0] ?? '')
+          const text = captured.trim()
+          if (text) out.push(text)
+        }
+      }
+      return out.join('\n').trim()
+    } catch {
+      // 自定义正则非法时回退全文，避免误配置导致完全无声。
+      return source
+    }
+  }
+
+  return source
 }
 
 function isLikelyTtsSentenceBoundary(text: string): boolean {
@@ -519,6 +893,25 @@ function parsePlannerDecision(text: string): PlannerDecision | null {
   return null
 }
 
+function isToolCapabilityQuestion(text: string): boolean {
+  const raw = String(text ?? '').trim()
+  if (!raw) return false
+  return /(?:你|桌宠|明澈).{0,8}(?:能做什么|会做什么|有什么能力|有哪些工具|工具列表|怎么用工具|支持哪些工具)/u.test(raw)
+}
+
+function requestLikelyNeedsToolAction(text: string): boolean {
+  const raw = String(text ?? '').trim()
+  if (!raw || isToolCapabilityQuestion(raw)) return false
+
+  const actionPatterns = [
+    /(?:截图|截屏|当前画面|当前页面|当前视频|播放.{0,8}内容|看剧|识图|看图|分析.{0,8}(?:图片|截图|画面|视频))/u,
+    /(?:搜索|搜一下|帮我搜|查一下|查询|查找|检索|最新|实时|新闻|官网|价格|定价|来源|链接)/u,
+    /(?:打开|进入|点击|填写|提交|登录|下载|安装|运行|执行|调用|读取|读一下|写入|保存|创建|生成文件|修改|修复|复制|移动|压缩|解压)/u,
+    /(?:调用工具|用工具|别只说|不要只说|实际操作|帮我弄|处理一下)/u,
+  ]
+  return actionPatterns.some((re) => re.test(raw))
+}
+
 function buildPlannerSystemPrompt(opts?: {
   systemPrompt?: string
   toolNames?: string[]
@@ -587,13 +980,16 @@ function buildPlannerSystemPrompt(opts?: {
   lines.push('- file.write：{"path":"task-output/xxx.txt"} 或 {"filename":"xxx.txt","content":"...","append":false,"encoding":"utf8"}')
   lines.push('- cli.exec："dir"（字符串命令）或 {"cmd":"powershell","args":["-NoProfile","-Command","..."]}')
   lines.push('- llm.summarize / llm.chat：{"prompt":"...","system":"(可选)","maxTokens":1200}')
+  lines.push('- image.inspect：{"path":"task-output/xxx.png","prompt":"描述图片内容","maxTokens":600}（截图后看图/识图用这个，不需要 filesystem MCP）')
   lines.push('- delay.sleep：{"ms":200}')
   lines.push('')
   lines.push('策略：')
   lines.push('- 能直接执行就 create_task；缺信息就 need_info；都不是就 chat。')
+  lines.push('- 行动请求：用户明确要求截图、识图、搜索/查询最新信息、打开并操作网页、读取/写入/修改文件、运行命令、下载/安装/执行程序时，优先输出 create_task；但普通聊天、解释、角色互动、情绪交流或不需要真实工具结果的请求应输出 chat。')
   lines.push('- 如果用户是在询问“你能做什么/有哪些工具/工具列表/能力说明”，一律输出 chat：列出可用工具与典型用法示例，不要创建任务、更不要实际执行。')
   lines.push('- 抓取/总结网页：优先 browser.fetch（更快）；遇到动态/需要登录/需要点击交互，才用 browser.playwright。')
-  lines.push('- 仅“打开某网站”：优先 browser.open；需要截图/交互/登录才用 browser.playwright（默认不做 extract）。')
+  lines.push('- 仅“打开某网站”且不需要后续操作时才用 browser.open；需要搜索/点击/截图/登录/读取页面状态时用 browser.playwright。')
+  lines.push('- 用户要求“看截图/识图/分析画面”时，使用 image.inspect 读取应用生成图片路径。')
   lines.push('- assistantReply 用中文，简短说明你要做什么/需要什么，并尽量点出将使用的 tool。语气/人设只允许来自“桌宠人设”。')
   return lines.join('\n')
 }
@@ -622,10 +1018,23 @@ function PetWindow() {
   const ttsQueueRunningRef = useRef(false)
   const ttsActiveUtteranceRef = useRef<string | null>(null)
   const [mouthOpen, setMouthOpen] = useState(0)
-  const [bubblePayload, setBubblePayload] = useState<
-    | { text: string; startAt: number | null; mode: 'typing' | 'append'; autoHideDelay?: number }
-    | null
-  >(null)
+  type BubbleUiPayload = {
+    text: string
+    startAt: number | null
+    mode: 'typing' | 'append'
+    autoHideDelay?: number
+    animateAppend?: boolean
+    resetAppendFromEmpty?: boolean
+  }
+  const [bubblePayload, setBubblePayload] = useState<BubbleUiPayload | null>(null)
+  const [bubblePinnedPayload, setBubblePinnedPayload] = useState<(BubbleUiPayload & { id: number }) | null>(null)
+  const bubblePayloadRef = useRef<BubbleUiPayload | null>(null)
+  const bubblePinnedPayloadRef = useRef<(BubbleUiPayload & { id: number }) | null>(null)
+  const bubblePinnedSeqRef = useRef(0)
+  const bubblePreviewActiveRef = useRef(false)
+  const bubblePreviewStartAtRef = useRef<number | null>(null)
+  const bubblePreviewTextRef = useRef('')
+  const bubblePreviewDebugAtRef = useRef(0)
   const [tasks, setTasks] = useState<TaskRecord[]>([])
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot | null>(null)
   const toolAnimRef = useRef<{ motionGroups: string[]; expressions: string[] }>({ motionGroups: [], expressions: [] })
@@ -641,6 +1050,7 @@ function PetWindow() {
 
   const asrClientRef = useRef<{
     ws: WebSocket
+    protocol: 'legacy' | 'opentypeless'
     mediaStream: MediaStream
     audioContext: AudioContext
     node: AudioNode
@@ -652,12 +1062,27 @@ function PetWindow() {
   const asrStartKindRef = useRef<'continuous' | 'hotkey' | null>(null)
   const asrFinalSegmentsRef = useRef<string[]>([])
   const asrPartialRef = useRef<string>('')
+  const asrComposeBaseTextRef = useRef<string>('')
+  const asrComposeBaseControlledRef = useRef(false)
 
   const clearAsrSubtitleTimer = useCallback(() => {
     if (asrSubtitleHideTimerRef.current) {
       window.clearTimeout(asrSubtitleHideTimerRef.current)
       asrSubtitleHideTimerRef.current = null
     }
+  }, [])
+
+  const buildAsrCompositeSubtitle = useCallback(() => {
+    const hasExternalBaseControl = asrComposeBaseControlledRef.current
+    const externalBase = hasExternalBaseControl ? asrComposeBaseTextRef.current.trim() : ''
+    const finals = asrFinalSegmentsRef.current.map((s) => s.trim()).filter(Boolean)
+    const partial = asrPartialRef.current.trim()
+    // 只要聊天窗口已接管“累计基线”，即使基线被清空为 ''，也不能回退到本地 finals，
+    // 否则会出现“输入框清空了但字幕还显示旧累计”的错位。
+    if (hasExternalBaseControl) return partial ? `${externalBase} ${partial}`.trim() : externalBase
+    if (finals.length > 0 && partial) return `${finals.join(' ')} ${partial}`.trim()
+    if (finals.length > 0) return finals.join(' ').trim()
+    return partial
   }, [])
 
   const showAsrSubtitle = useCallback(
@@ -679,9 +1104,21 @@ function PetWindow() {
     [clearAsrSubtitleTimer],
   )
 
+  const syncAsrCompositeSubtitle = useCallback(
+    (options?: { autoHideMs?: number }) => {
+      showAsrSubtitle(buildAsrCompositeSubtitle(), options)
+    },
+    [buildAsrCompositeSubtitle, showAsrSubtitle],
+  )
+
   const stopAsr = useCallback(() => {
     const client = asrClientRef.current
-    if (!client) return
+    if (!client) {
+      asrStartingRef.current = false
+      asrStartKindRef.current = null
+      setAsrRecording(false)
+      return
+    }
     asrClientRef.current = null
     asrStartingRef.current = false
     asrStartKindRef.current = null
@@ -718,7 +1155,18 @@ function PetWindow() {
     }
 
     try {
-      client.ws.close()
+      if (client.protocol === 'opentypeless' && client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send('stop')
+        window.setTimeout(() => {
+          try {
+            client.ws.close()
+          } catch (_) {
+            /* ignore */
+          }
+        }, 120)
+      } else {
+        client.ws.close()
+      }
     } catch (_) {
       /* ignore */
     }
@@ -731,6 +1179,7 @@ function PetWindow() {
 
     const asr = settingsRef.current?.asr
     if (!asr) return
+    if (isOpenTypelessAsrWsUrl(asr.wsUrl)) return
 
     client.ws.send(
       JSON.stringify({
@@ -761,46 +1210,87 @@ function PetWindow() {
         return
       }
 
-      const msg = payload as { type?: string; text?: string; message?: string }
-      const msgType = String(msg.type ?? '').trim()
+      const msg = payload as { type?: string; text?: string; message?: string; error?: string }
+      const msgTypeRaw = String(msg.type ?? '').trim()
+      const msgType = msgTypeRaw.toLowerCase()
+      const msgTypeNorm = msgType.replace(/[^a-z]/g, '')
       const text = String(msg.text ?? '').trim()
 
-      if (msgType === 'partial') {
-        asrPartialRef.current = text
-        if (text) showAsrSubtitle(text)
+      if (
+        msgTypeNorm === 'partial' ||
+        msgTypeNorm === 'partialresult' ||
+        msgTypeNorm === 'interim' ||
+        msgTypeNorm === 'interimresult' ||
+        msgTypeNorm === 'midresult' ||
+        msgTypeNorm === 'intermediateresult' ||
+        (msgTypeNorm.includes('partial') && msgTypeNorm.includes('result'))
+      ) {
+        const asr = settingsRef.current?.asr
+        const interimText = applyAsrLocalRules(text, asr, { forInterim: true })
+        asrPartialRef.current = interimText
+        syncAsrCompositeSubtitle()
         return
       }
 
-      if (msgType === 'result') {
+      if (
+        msgTypeNorm === 'result' ||
+        msgTypeNorm === 'final' ||
+        msgTypeNorm === 'finalresult' ||
+        (msgTypeNorm.includes('final') && msgTypeNorm.includes('result'))
+      ) {
         asrPartialRef.current = ''
         if (!text) return
 
         const asr = settingsRef.current?.asr
+        const finalText = applyAsrLocalRules(text, asr, { forInterim: false })
+        if (!finalText) return
         const mode = asr?.mode ?? 'continuous'
         if (mode === 'hotkey') {
-          asrFinalSegmentsRef.current.push(text)
-          showAsrSubtitle(asrFinalSegmentsRef.current.join(' '))
+          asrFinalSegmentsRef.current.push(finalText)
+          syncAsrCompositeSubtitle()
           return
         }
 
-        // continuous: one result == one utterance
-        showAsrSubtitle(text, { autoHideMs: 6000 })
+        const autoSend = Boolean(asr?.autoSend)
+        if (!autoSend) {
+          asrFinalSegmentsRef.current.push(finalText)
+        }
+
+        // continuous: 保持“最终结果 + 当前中间结果”连续显示，避免新一段中间结果覆盖已确认文本。
+        syncAsrCompositeSubtitle({ autoHideMs: 6000 })
         try {
-          api?.reportAsrTranscript(text)
+          api?.reportAsrTranscript(finalText)
         } catch (_) {
           /* ignore */
+        }
+        if (autoSend) {
+          asrFinalSegmentsRef.current = []
+          syncAsrCompositeSubtitle({ autoHideMs: 0 })
         }
         return
       }
 
-      if (msgType === 'debug') {
-        const hint = String(msg.message ?? '').trim()
+      if (msgTypeNorm === 'error') {
+        const errText = String(msg.error ?? msg.message ?? msg.text ?? '').trim()
+        if (errText) showAsrSubtitle(`ASR 错误：${errText}`, { autoHideMs: 5000 })
+        return
+      }
+
+      if (msgTypeNorm === 'ready') {
+        if (settingsRef.current?.asr?.debug ?? false) {
+          console.debug('[ASR] ready', payload)
+        }
+        return
+      }
+
+      if (msgTypeNorm === 'debug' || msgTypeNorm === 'log') {
+        const hint = String(msg.message ?? msg.error ?? '').trim()
         if (hint && (settingsRef.current?.asr?.debug ?? false)) {
           console.debug('[ASR]', hint)
         }
       }
     },
-    [api, showAsrSubtitle],
+    [api, showAsrSubtitle, syncAsrCompositeSubtitle],
   )
 
   const startAsr = useCallback(async () => {
@@ -811,9 +1301,23 @@ function PetWindow() {
     asrStartingRef.current = true
 
     try {
-      if (!asr.wsUrl.trim()) {
+      const wsUrl = asr.wsUrl.trim()
+      if (!wsUrl) {
         showAsrSubtitle('ASR WebSocket 地址为空', { autoHideMs: 4000 })
         return
+      }
+      const useOpenTypelessWs = isOpenTypelessAsrWsUrl(wsUrl)
+      asrFinalSegmentsRef.current = []
+      asrPartialRef.current = ''
+
+      if (useOpenTypelessWs) {
+        showAsrSubtitle('ASR API 启动中…')
+        const ready = await waitForOpenTypelessAsrReady(wsUrl, { timeoutMs: 30_000 })
+        if (!ready) {
+          showAsrSubtitle('ASR API 启动超时', { autoHideMs: 5000 })
+          return
+        }
+        if (!(settingsRef.current?.asr?.enabled ?? false)) return
       }
 
       const pickStream = async () => {
@@ -842,8 +1346,13 @@ function PetWindow() {
 
       const mediaStream = await pickStream()
 
-      // 使用系统默认采样率：音质更稳定；服务端会按 VAD 分块自行重采样
-      const audioContext = new AudioContext()
+      // OpenTypeless 实时 ws 默认使用 16kHz PCM16，优先直接请求 16k 采样率以减少前端重采样开销。
+      let audioContext: AudioContext
+      try {
+        audioContext = useOpenTypelessWs ? new AudioContext({ sampleRate: 16000 }) : new AudioContext()
+      } catch {
+        audioContext = new AudioContext()
+      }
       const sampleRate = audioContext.sampleRate || 48000
 
       const source = audioContext.createMediaStreamSource(mediaStream)
@@ -853,17 +1362,19 @@ function PetWindow() {
       sink.gain.value = 0
       sink.connect(audioContext.destination)
 
-      const ws = new WebSocket(asr.wsUrl)
+      const ws = new WebSocket(wsUrl)
       ws.binaryType = 'arraybuffer'
 
       const bufferSize = 4096
 
-      const sendPcm = (pcm: Float32Array) => {
-        if (ws.readyState !== WebSocket.OPEN) return
-        const copy = new Float32Array(pcm.length)
-        copy.set(pcm)
-        ws.send(copy.buffer)
-      }
+      const sendPcm = useOpenTypelessWs
+        ? createOpenTypelessPcmSender(ws, sampleRate)
+        : (pcm: Float32Array) => {
+            if (ws.readyState !== WebSocket.OPEN) return
+            const copy = new Float32Array(pcm.length)
+            copy.set(pcm)
+            ws.send(copy.buffer)
+          }
 
       let node: AudioNode
       let stopFeeder: () => void
@@ -992,6 +1503,8 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
 
       ws.addEventListener('open', () => {
         sendAsrConfig()
+        setAsrRecording(true)
+        showAsrSubtitle('录音中…')
       })
       ws.addEventListener('message', (ev) => {
         if (typeof ev.data === 'string') {
@@ -1017,9 +1530,17 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
         }
       })
 
-      asrClientRef.current = { ws, mediaStream, audioContext, node, sink, stopFeeder, sampleRate }
-      setAsrRecording(true)
-      showAsrSubtitle('录音中…')
+      asrClientRef.current = {
+        ws,
+        protocol: useOpenTypelessWs ? 'opentypeless' : 'legacy',
+        mediaStream,
+        audioContext,
+        node,
+        sink,
+        stopFeeder,
+        sampleRate,
+      }
+      showAsrSubtitle('ASR 连接中…')
     } finally {
       asrStartingRef.current = false
     }
@@ -1130,6 +1651,14 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
     settingsRef.current = settings
   }, [settings])
 
+  useEffect(() => {
+    bubblePayloadRef.current = bubblePayload
+  }, [bubblePayload])
+
+  useEffect(() => {
+    bubblePinnedPayloadRef.current = bubblePinnedPayload
+  }, [bubblePinnedPayload])
+
   const asrEnabled = settings?.asr?.enabled ?? false
   const asrMode = settings?.asr?.mode ?? 'continuous'
   const asrWsUrl = settings?.asr?.wsUrl ?? ''
@@ -1142,6 +1671,19 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       clearAsrSubtitleTimer()
     }
   }, [asrShowSubtitle, clearAsrSubtitleTimer])
+
+  useEffect(() => {
+    if (!api) return
+    return api.onAsrComposePreview((payload) => {
+      const baseText = typeof payload?.baseText === 'string' ? payload.baseText : ''
+      asrComposeBaseControlledRef.current = true
+      asrComposeBaseTextRef.current = baseText
+      if (payload?.clearFinals) {
+        asrFinalSegmentsRef.current = []
+      }
+      syncAsrCompositeSubtitle()
+    })
+  }, [api, syncAsrCompositeSubtitle])
 
   // hotkey toggle: press once to start, press again to stop (only when mode=hotkey)
   useEffect(() => {
@@ -1244,20 +1786,170 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
     }
   }, [clearAsrSubtitleTimer, stopAsr])
 
+  const applyBubblePreviewPayload = useCallback(
+    (payload: { text?: string; clear?: boolean; placeholder?: boolean; autoHideDelay?: number; pinPrevious?: boolean }) => {
+      const s = settingsRef.current
+      if (!s) return
+      const showBubble = s.bubble?.showOnChat ?? false
+      const nowTs = Date.now()
+      const debugPreview = (phase: string, data?: Record<string, unknown>) => {
+        if (!api) return
+        if (nowTs - bubblePreviewDebugAtRef.current < 180) return
+        bubblePreviewDebugAtRef.current = nowTs
+        try {
+          api.appendDebugLog('pet:bubble.preview', { phase, ...(data ?? {}) })
+        } catch {
+          /* ignore */
+        }
+      }
+      const commitBubblePayload = (next: BubbleUiPayload | null) => {
+        try {
+          flushSync(() => setBubblePayload(next))
+        } catch {
+          setBubblePayload(next)
+        }
+      }
+      const commitPinnedBubblePayload = (next: (BubbleUiPayload & { id: number }) | null) => {
+        try {
+          flushSync(() => setBubblePinnedPayload(next))
+        } catch {
+          setBubblePinnedPayload(next)
+        }
+      }
+
+      if (payload?.clear) {
+        if (bubblePreviewActiveRef.current && showBubble) {
+          commitBubblePayload(null)
+        }
+        commitPinnedBubblePayload(null)
+        bubblePreviewActiveRef.current = false
+        bubblePreviewStartAtRef.current = null
+        bubblePreviewTextRef.current = ''
+        debugPreview('clear', { showBubble })
+        return
+      }
+
+      const rawText = typeof payload?.text === 'string' ? payload.text : ''
+      const placeholder = payload?.placeholder === true
+      const pinPrevious = payload?.pinPrevious === true
+      const autoHideDelay =
+        typeof payload?.autoHideDelay === 'number' && Number.isFinite(payload.autoHideDelay) ? payload.autoHideDelay : undefined
+
+      if (pinPrevious && !bubblePreviewActiveRef.current) {
+        const current = bubblePayloadRef.current
+        const currentText = String(current?.text ?? '').trim()
+        if (current && currentText) {
+          const nextId = bubblePinnedSeqRef.current + 1
+          bubblePinnedSeqRef.current = nextId
+          const pinDelay = Math.max(2500, Math.min(15000, Math.floor(s.bubble?.autoHideDelay ?? 5000)))
+          commitPinnedBubblePayload({
+            id: nextId,
+            text: current.text,
+            startAt: Date.now(),
+            mode: 'append',
+            autoHideDelay: pinDelay,
+          })
+        }
+      }
+
+      if (placeholder) {
+        bubblePreviewActiveRef.current = true
+        bubblePreviewStartAtRef.current = null
+        bubblePreviewTextRef.current = rawText.trim() || '思考中…'
+        if (!showBubble) return
+        commitBubblePayload({
+          text: bubblePreviewTextRef.current,
+          startAt: Date.now(),
+          mode: 'typing',
+          autoHideDelay: typeof autoHideDelay === 'number' ? autoHideDelay : 0,
+          animateAppend: false,
+          resetAppendFromEmpty: false,
+        })
+        debugPreview('placeholder', { len: bubblePreviewTextRef.current.length, text: bubblePreviewTextRef.current.slice(0, 32) })
+        return
+      }
+
+      const firstContentAfterPlaceholder =
+        bubblePreviewActiveRef.current && bubblePreviewTextRef.current.trim() === '思考中…' && rawText.trim() !== ''
+      if (!rawText.trim()) return
+      let startAt = bubblePreviewStartAtRef.current
+      if (startAt == null) {
+        startAt = Date.now()
+        bubblePreviewStartAtRef.current = startAt
+      }
+      bubblePreviewActiveRef.current = true
+      bubblePreviewTextRef.current = rawText
+      if (!showBubble) return
+      commitBubblePayload({
+        text: rawText,
+        startAt,
+        mode: 'append',
+        animateAppend: true,
+        resetAppendFromEmpty: firstContentAfterPlaceholder,
+        ...(typeof autoHideDelay === 'number' ? { autoHideDelay } : {}),
+      })
+      debugPreview('text', { len: rawText.length, head: rawText.slice(0, 32), tail: rawText.slice(-24) })
+    },
+    [api],
+  )
+
   // Listen for bubble messages from chat window
   useEffect(() => {
     if (!api) return
+    return api.onBubblePreview((payload) => applyBubblePreviewPayload(payload ?? {}))
+  }, [api, applyBubblePreviewPayload])
+
+  useEffect(() => {
+    if (!api) return
     return api.onBubbleMessage((message) => {
+      const rawMessage = String(message ?? '')
+      if (rawMessage.startsWith(BUBBLE_PREVIEW_FALLBACK_PREFIX)) {
+        try {
+          const payload = JSON.parse(rawMessage.slice(BUBBLE_PREVIEW_FALLBACK_PREFIX.length)) as {
+            text?: string
+            clear?: boolean
+            placeholder?: boolean
+            autoHideDelay?: number
+            pinPrevious?: boolean
+          }
+          applyBubblePreviewPayload(payload ?? {})
+          return
+        } catch {
+          // 兼容前缀解析失败时按普通消息继续处理
+        }
+      }
+
       const s = settingsRef.current
       if (!s) return
 
       const showBubble = s.bubble?.showOnChat ?? false
+      const bubbleDelay = s.bubble?.autoHideDelay ?? 5000
+      const normalizedMessage = String(message ?? '').trim()
+      const canAdoptPreview =
+        normalizedMessage.length > 0 &&
+        bubblePreviewActiveRef.current &&
+        bubblePreviewTextRef.current.trim() === normalizedMessage
+      const previewStartAt = bubblePreviewStartAtRef.current
+      const showBubbleTypingOrAdopt = (text: string, startNow: boolean) => {
+        if (!showBubble) return
+        if (canAdoptPreview) {
+          const adoptedStart = previewStartAt ?? Date.now()
+          bubblePreviewStartAtRef.current = adoptedStart
+          setBubblePayload({ text, startAt: adoptedStart, mode: 'append', autoHideDelay: bubbleDelay })
+          return
+        }
+        setBubblePayload({ text, startAt: startNow ? Date.now() : null, mode: 'typing' })
+      }
+      const finishPreviewSession = () => {
+        bubblePreviewActiveRef.current = false
+        bubblePreviewStartAtRef.current = null
+        bubblePreviewTextRef.current = ''
+      }
       const tts = s.tts ? { ...s.tts, segmented: false } : s.tts
       const useQueue = Boolean(tts?.enabled) && !(s.tts?.segmented ?? false)
 
       const startTypingNow = (text: string) => {
-        if (!showBubble) return
-        setBubblePayload({ text, startAt: Date.now(), mode: 'typing' })
+        showBubbleTypingOrAdopt(text, true)
       }
 
       if (tts?.enabled) {
@@ -1276,17 +1968,23 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
                 const next = bubbleTtsQueueRef.current.shift()
                 const text = typeof next === 'string' ? next : ''
                 if (!text.trim()) continue
+                const speechText = resolveTtsPlaybackText(text, tts)
+                if (!speechText) {
+                  startTypingNow(text)
+                  setMouthOpen(0)
+                  continue
+                }
 
-                if (showBubble) setBubblePayload({ text, startAt: null, mode: 'typing' })
+                showBubbleTypingOrAdopt(text, false)
                 if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
                 const player = ttsPlayerRef.current
                 if (!player) continue
 
                 await new Promise<void>((resolve) => {
                   void player
-                    .speak(text, tts, {
+                    .speak(speechText, tts, {
                       onFirstPlay: () => {
-                        if (showBubble) setBubblePayload({ text, startAt: Date.now(), mode: 'typing' })
+                        showBubbleTypingOrAdopt(text, true)
                       },
                       onEnded: () => {
                         setMouthOpen(0)
@@ -1301,32 +1999,46 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
                 })
               }
             } finally {
+              finishPreviewSession()
               bubbleTtsRunningRef.current = false
             }
           })()
           return
         }
 
-        if (showBubble) setBubblePayload({ text: message, startAt: null, mode: 'typing' })
+        const speechText = resolveTtsPlaybackText(message, tts)
+        if (!speechText) {
+          finishPreviewSession()
+          startTypingNow(message)
+          setMouthOpen(0)
+          return
+        }
+
+        showBubbleTypingOrAdopt(message, false)
         if (!ttsPlayerRef.current) ttsPlayerRef.current = new TtsPlayer()
 
         void ttsPlayerRef.current
-          .speak(message, tts, {
+          .speak(speechText, tts, {
             onFirstPlay: () => {
-              if (showBubble) setBubblePayload({ text: message, startAt: Date.now(), mode: 'typing' })
+              showBubbleTypingOrAdopt(message, true)
             },
-            onEnded: () => setMouthOpen(0),
+            onEnded: () => {
+              setMouthOpen(0)
+              finishPreviewSession()
+            },
           })
           .catch(() => {
             // TTS 失败时也要能正常显示气泡
             startTypingNow(message)
+            finishPreviewSession()
           })
         return
       }
 
+      finishPreviewSession()
       startTypingNow(message)
     })
-  }, [api])
+  }, [api, applyBubblePreviewPayload])
 
   // Listen for segmented TTS utterances from chat window
   useEffect(() => {
@@ -1385,6 +2097,7 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
           const bubbleDelay = s.bubble?.autoHideDelay ?? 5000
           const ttsSettings = { ...s.tts, streaming: true, segmented: false }
           const pauseMs = Math.max(0, Math.min(60000, Math.floor(s.tts.pauseMs ?? 0)))
+          const speechText = resolveTtsPlaybackText(segText, s.tts)
 
           if (showBubble) setBubblePayload({ text: segText, startAt: null, mode: 'append', autoHideDelay: bubbleDelay })
 
@@ -1405,9 +2118,16 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
             }
           }
 
+          if (!speechText) {
+            reportVoiceStart()
+            setMouthOpen(0)
+            if (pauseMs > 0) await sleep(Math.min(pauseMs, 200))
+            continue
+          }
+
           await new Promise<void>((resolve) => {
             void player
-              .speak(segText, ttsSettings, {
+              .speak(speechText, ttsSettings, {
                 onFirstPlay: () => {
                   const startedAt = Date.now()
                   const threshold = 0.006
@@ -1621,12 +2341,28 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
   // 解析当前 Live2D 模型的可用表情/动作名，用于工具调用时做更通用的触发（尽量不硬编码具体名字）
   useEffect(() => {
     let cancelled = false
+    let watermarkTimer: number | null = null
     parseModelMetadata(modelJsonUrl)
       .then((metadata) => {
         if (cancelled) return
         const expressions = metadata.expressions?.map((e) => e.name).filter(Boolean) ?? []
         const motions = metadata.motionGroups?.map((g) => g.name).filter(Boolean) ?? []
         toolAnimRef.current = { motionGroups: motions, expressions }
+
+        // 仅当当前模型声明了“关闭水印”表达式时，启动阶段自动触发几次，避免模型初始化时丢触发。
+        const watermarkExpression = expressions.find((name) => name.trim() === '关闭水印') ?? null
+        if (watermarkExpression && api) {
+          let attempts = 0
+          const triggerWatermarkExpression = () => {
+            if (cancelled) return
+            attempts += 1
+            api.triggerExpression(watermarkExpression)
+            if (attempts < 6) {
+              watermarkTimer = window.setTimeout(triggerWatermarkExpression, 260)
+            }
+          }
+          triggerWatermarkExpression()
+        }
       })
       .catch(() => {
         if (cancelled) return
@@ -1634,8 +2370,12 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       })
     return () => {
       cancelled = true
+      if (watermarkTimer) {
+        window.clearTimeout(watermarkTimer)
+        watermarkTimer = null
+      }
     }
-  }, [modelJsonUrl])
+  }, [api, modelJsonUrl])
 
   // 与 Live2DView 内的模型摆放保持一致的近似命中（用于拖拽/右键判断）
   const isPointOverLive2D = (clientX: number, clientY: number) => {
@@ -1776,6 +2516,13 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
 
   const handleBubbleClose = useCallback(() => {
     setBubblePayload(null)
+    bubblePreviewActiveRef.current = false
+    bubblePreviewStartAtRef.current = null
+    bubblePreviewTextRef.current = ''
+  }, [])
+
+  const handlePinnedBubbleClose = useCallback(() => {
+    setBubblePinnedPayload(null)
   }, [])
 
   useEffect(() => {
@@ -1835,12 +2582,33 @@ registerProcessor('ndp-pcm', NdpPcmProcessor);
       {asrShowSubtitle && asrSubtitle.trim() && (
         <div className={`ndp-asr-subtitle${asrRecording ? ' ndp-asr-subtitle-recording' : ''}`}>{asrSubtitle}</div>
       )}
+      {bubblePinnedPayload && (
+        <SpeechBubble
+          key={`pinned-${bubblePinnedPayload.id}`}
+          text={bubblePinnedPayload.text}
+          startAt={bubblePinnedPayload.startAt}
+          mode={bubblePinnedPayload.mode}
+          animateAppend={bubblePinnedPayload.animateAppend}
+          resetAppendFromEmpty={bubblePinnedPayload.resetAppendFromEmpty}
+          style={bubbleSettings?.style ?? 'cute'}
+          positionX={bubbleSettings?.positionX ?? 75}
+          positionY={(() => {
+            const baseY = bubbleSettings?.positionY ?? 10
+            return baseY >= 18 ? baseY - 12 : Math.min(100, baseY + 12)
+          })()}
+          tailDirection={bubbleSettings?.tailDirection ?? 'down'}
+          autoHideDelay={bubblePinnedPayload.autoHideDelay ?? (bubbleSettings?.autoHideDelay ?? 5000)}
+          onClose={handlePinnedBubbleClose}
+        />
+      )}
       {bubblePayload && (
         <SpeechBubble
           key={`${bubblePayload.startAt ?? 'pending'}-${bubblePayload.mode}`}
           text={bubblePayload.text}
           startAt={bubblePayload.startAt}
           mode={bubblePayload.mode}
+          animateAppend={bubblePayload.animateAppend}
+          resetAppendFromEmpty={bubblePayload.resetAppendFromEmpty}
           style={bubbleSettings?.style ?? 'cute'}
           positionX={bubbleSettings?.positionX ?? 75}
           positionY={bubbleSettings?.positionY ?? 10}
@@ -1955,6 +2723,8 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [lastRetrieveDebug, setLastRetrieveDebug] = useState<MemoryRetrieveResult['debug'] | null>(null)
   const [mcpSnapshotForContext, setMcpSnapshotForContext] = useState<McpStateSnapshot | null>(null)
   const settingsRef = useRef<AppSettings | null>(null)
+  const inputRef = useRef('')
+  const messagesRef = useRef<ChatMessageRecord[]>([])
   const toolAnimRef = useRef<{ motionGroups: string[]; expressions: string[] }>({ motionGroups: [], expressions: [] })
   const isLoadingRef = useRef(false)
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
@@ -1993,9 +2763,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     >
   >({})
   const aiAbortRef = useRef<AbortController | null>(null)
+  const chatStopSeqRef = useRef(0)
   const plannerPendingRef = useRef(false)
   const pendingAsrAutoSendRef = useRef<string[]>([])
   const asrAutoSendFlushingRef = useRef(false)
+  const asrComposePreviewLastSigRef = useRef<string>('')
+  const bubblePreviewLastSigRef = useRef<string>('')
+  const bubblePreviewSendDebugAtRef = useRef(0)
   const tasksRef = useRef<TaskRecord[]>([])
   const taskOriginSessionRef = useRef<Map<string, string>>(new Map())
   const taskOriginMessageRef = useRef<Map<string, string>>(new Map())
@@ -2003,6 +2777,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const taskToolUseSplitRef = useRef<Map<string, { runIds: string[]; segments: string[]; lastDisplay: string }>>(new Map())
   const taskUiDebugSigRef = useRef<Map<string, string>>(new Map())
   const taskBubbleTtsProgressRef = useRef<Map<string, { spokenFrozen: number; spokeFinal: boolean }>>(new Map())
+  const taskBubblePreviewProgressRef = useRef<Map<string, { shownFrozen: number; lastShownAt: number; lastTailText: string }>>(new Map())
   const taskFinalizeContextRef = useRef<
     Map<
       string,
@@ -2055,12 +2830,24 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const contextUsageLastSentAtRef = useRef(0)
   const contextUsagePendingRef = useRef<ContextUsageSnapshot | null>(null)
   const contextUsageSendTimerRef = useRef<number | null>(null)
+  const debugLogLastSentAtRef = useRef<Map<string, number>>(new Map())
   const [contextRetrieveAddon, setContextRetrieveAddon] = useState<string>('')
   const contextRetrieveAddonReqIdRef = useRef(0)
 
   const debugLog = useCallback(
     (event: string, data?: unknown) => {
       try {
+        const key = String(event ?? '').trim()
+        if (key === 'chat:task.blocks') {
+          const obj = data && typeof data === 'object' ? (data as Record<string, unknown>) : null
+          const isFinal = obj?.isFinal === true
+          if (!isFinal) {
+            const nowTs = Date.now()
+            const last = debugLogLastSentAtRef.current.get(key) ?? 0
+            if (nowTs - last < 250) return
+            debugLogLastSentAtRef.current.set(key, nowTs)
+          }
+        }
         api?.appendDebugLog(event, data)
       } catch {
         // ignore
@@ -2317,6 +3104,82 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   }, [settings])
 
   useEffect(() => {
+    inputRef.current = input
+  }, [input])
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  const syncAsrComposePreview = useCallback(
+    (baseText: string, opts?: { clearFinals?: boolean; force?: boolean }) => {
+      if (!api) return
+      const normalizedBase = String(baseText ?? '')
+      const clearFinals = opts?.clearFinals === true
+      const sig = `${clearFinals ? '1' : '0'}\n${normalizedBase}`
+      if (!opts?.force && asrComposePreviewLastSigRef.current === sig) return
+      asrComposePreviewLastSigRef.current = sig
+      try {
+        api.syncAsrComposePreview({ baseText: normalizedBase, ...(clearFinals ? { clearFinals: true } : {}) })
+      } catch {
+        /* ignore */
+      }
+    },
+    [api],
+  )
+
+  const sendBubblePreview = useCallback(
+    (
+      payload: { text?: string; clear?: boolean; placeholder?: boolean; autoHideDelay?: number; pinPrevious?: boolean },
+      opts?: { force?: boolean },
+    ) => {
+      if (!api) return
+      const text = typeof payload.text === 'string' ? payload.text : ''
+      const clear = payload.clear === true
+      const placeholder = payload.placeholder === true
+      const pinPrevious = payload.pinPrevious === true
+      const autoHideDelay =
+        typeof payload.autoHideDelay === 'number' && Number.isFinite(payload.autoHideDelay) ? Math.trunc(payload.autoHideDelay) : undefined
+      const normalizedPayload = {
+        ...(text ? { text } : {}),
+        ...(clear ? { clear: true as const } : {}),
+        ...(placeholder ? { placeholder: true as const } : {}),
+        ...(pinPrevious ? { pinPrevious: true as const } : {}),
+        ...(typeof autoHideDelay === 'number' ? { autoHideDelay } : {}),
+      }
+      const sig = `${clear ? '1' : '0'}|${placeholder ? '1' : '0'}|${pinPrevious ? '1' : '0'}|${typeof autoHideDelay === 'number' ? autoHideDelay : ''}|${text}`
+      if (!opts?.force && bubblePreviewLastSigRef.current === sig) return
+      bubblePreviewLastSigRef.current = sig
+      {
+        const nowTs = Date.now()
+        if (nowTs - bubblePreviewSendDebugAtRef.current >= 180) {
+          bubblePreviewSendDebugAtRef.current = nowTs
+          debugLog('chat:bubble.preview.send', {
+            clear,
+            placeholder,
+            pinPrevious,
+            len: text.length,
+            head: text.slice(0, 32),
+            tail: text.slice(-24),
+          })
+        }
+      }
+      try {
+        api.sendBubblePreview(normalizedPayload)
+      } catch {
+        /* ignore */
+      }
+      // 兼容回退：即使主进程/预加载的 preview 通道未生效，也通过既有 bubble:message 通道发送预览事件。
+      try {
+        api.sendBubbleMessage(`${BUBBLE_PREVIEW_FALLBACK_PREFIX}${JSON.stringify(normalizedPayload)}`)
+      } catch {
+        /* ignore */
+      }
+    },
+    [api, debugLog],
+  )
+
+  useEffect(() => {
     isLoadingRef.current = isLoading
   }, [isLoading])
 
@@ -2420,10 +3283,10 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         await api.setCurrentChatSession(nextSessionId)
       }
 
-      setCurrentSessionId(nextSessionId)
-
       const session = await api.getChatSession(nextSessionId ?? undefined)
       if (cancelled) return
+      // 同步设置会话 id 与消息，避免“id 已切换但消息尚未加载”导致首条发送上下文缺失。
+      setCurrentSessionId(nextSessionId)
       setMessages(session.messages)
     })().catch((err) => console.error(err))
 
@@ -2505,6 +3368,34 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     () => sessions.find((s) => s.id === currentSessionId) ?? null,
     [sessions, currentSessionId],
   )
+
+  // 消息列表渲染热点：把 tasks 做成 id 索引，O(n×m) 扫描降为 O(1) 查表
+  const tasksById = useMemo(
+    () => new Map<string, TaskRecord>(tasks.map((t) => [t.id, t])),
+    [tasks],
+  )
+
+  const currentActiveChatTaskIds = useMemo(() => {
+    if (!currentSessionId) return []
+
+    const isActive = (t: TaskRecord | undefined): boolean =>
+      !t || t.status === 'pending' || t.status === 'running' || t.status === 'paused'
+    const ids = new Set<string>()
+    for (const m of messages) {
+      const taskId = typeof m.taskId === 'string' ? m.taskId.trim() : ''
+      if (taskId && tasksById.has(taskId) && isActive(tasksById.get(taskId))) ids.add(taskId)
+    }
+    for (const [taskId, sessionId] of taskOriginSessionRef.current.entries()) {
+      if (sessionId === currentSessionId && isActive(tasksById.get(taskId))) ids.add(taskId)
+    }
+    return [...ids]
+  }, [currentSessionId, messages, tasksById])
+
+  // messages.map 外层预计算的稳定值，避免每条消息每次 render 都重复走 optional chain
+  const chatProfile = settings?.chatProfile
+  const userAvatar = chatProfile?.userAvatar
+  const assistantAvatar = chatProfile?.assistantAvatar
+  const ttsSegmentedUi = (settings?.tts?.enabled ?? false) && (settings?.tts?.segmented ?? false)
 
   useEffect(() => {
     plannerPendingRef.current = false
@@ -2787,8 +3678,22 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         const finalizeCtx = taskFinalizeContextRef.current.get(t.id) ?? null
         if (finalizeCtx) {
           if (!isFinal) continue
+          if (t.status === 'canceled') {
+            taskFinalizeContextRef.current.delete(t.id)
+            taskFinalizingRef.current.delete(t.id)
+            taskOriginSessionRef.current.delete(t.id)
+            taskOriginMessageRef.current.delete(t.id)
+            taskOriginBlocksRef.current.delete(t.id)
+            taskToolUseSplitRef.current.delete(t.id)
+            taskBubblePreviewProgressRef.current.delete(t.id)
+            sendBubblePreview({ clear: true }, { force: true })
+            continue
+          }
           if (taskFinalizingRef.current.has(t.id)) continue
           taskFinalizingRef.current.add(t.id)
+
+          let finalizeAbort: AbortController | null = null
+          let finalizeAbortExposed = false
 
           void (async () => {
             const loadFinalizeBaseBlocks = async (): Promise<ChatMessageBlock[]> => {
@@ -2861,6 +3766,30 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               },
             ]
 
+            finalizeAbort = new AbortController()
+            finalizeAbortExposed = sessionId === currentSessionId
+            const finalizeStopSeq = chatStopSeqRef.current
+            const isFinalizeStopped = () => finalizeAbort?.signal.aborted === true || chatStopSeqRef.current !== finalizeStopSeq
+            if (finalizeAbortExposed) {
+              aiAbortRef.current = finalizeAbort
+              isLoadingRef.current = true
+              setIsLoading(true)
+            }
+
+            const previewProg = taskBubblePreviewProgressRef.current.get(t.id)
+            const elapsedSincePreface = previewProg?.lastShownAt ? Date.now() - previewProg.lastShownAt : Number.POSITIVE_INFINITY
+            const prefaceMinVisibleMs = 220
+            if (elapsedSincePreface < prefaceMinVisibleMs) {
+              await new Promise<void>((resolve) => {
+                window.setTimeout(resolve, prefaceMinVisibleMs - elapsedSincePreface)
+              })
+            }
+            if (isFinalizeStopped()) return
+
+            // 任务完成后的“二段回复”需要开启一个全新的气泡（前置话术气泡先结束，再显示新的思考/流式气泡）。
+            sendBubblePreview({ clear: true }, { force: true })
+            sendBubblePreview({ placeholder: true, text: '思考中…', autoHideDelay: 0 })
+
             const enableChatStreaming = settingsRef.current?.ai?.enableChatStreaming ?? false
 
             if (enableChatStreaming) {
@@ -2891,11 +3820,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               }
 
               const flush = () => {
+                if (isFinalizeStopped()) {
+                  pending = ''
+                  return
+                }
                 if (!pending) return
                 acc += pending
                 pending = ''
 
                 const displayFinal = normalizeInterleavedTextSegment(normalizeAssistantDisplayText(acc))
+                if (displayFinal.trim()) sendBubblePreview({ text: displayFinal, autoHideDelay: 0 })
                 const nextBlocks = buildBlocksWithFinal(displayFinal)
                 const nextContent = joinTextBlocks(nextBlocks)
 
@@ -2928,7 +3862,9 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
               const response = await aiService.chatStream(prompt, {
                 systemAddon: mergedAddon,
+                signal: finalizeAbort.signal,
                 onDelta: (delta) => {
+                  if (isFinalizeStopped()) return
                   pending += delta
                   scheduleFlush()
                 },
@@ -2939,9 +3875,17 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                 raf = 0
               }
               flush()
+              if (isFinalizeStopped()) {
+                sendBubblePreview({ clear: true }, { force: true })
+                return
+              }
 
               if (response.error) {
-                const nextText = response.error === ABORTED_ERROR ? '' : `[错误] ${response.error}`
+                sendBubblePreview({ clear: true }, { force: true })
+                const nextText =
+                  response.error === ABORTED_ERROR
+                    ? normalizeInterleavedTextSegment(normalizeAssistantDisplayText(acc, { trim: true }))
+                    : `[错误] ${response.error}`
                 const nextBlocks = buildBlocksWithFinal(nextText)
                 const nextContent = joinTextBlocks(nextBlocks)
                 if (sessionId === currentSessionId) {
@@ -2954,6 +3898,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               }
 
               const finalText = normalizeInterleavedTextSegment(normalizeAssistantDisplayText(acc, { trim: true }))
+              if (finalText.trim()) sendBubblePreview({ text: finalText, autoHideDelay: 0 })
               enqueueStableTts(finalText, true)
               if (ttsUtteranceId) {
                 api.finalizeTtsUtterance(ttsUtteranceId)
@@ -2981,8 +3926,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               return
             }
 
-            const response = await aiService.chat(prompt, { systemAddon: mergedAddon })
+            const response = await aiService.chat(prompt, { systemAddon: mergedAddon, signal: finalizeAbort.signal })
+            if (isFinalizeStopped()) {
+              sendBubblePreview({ clear: true }, { force: true })
+              return
+            }
             if (response.error) {
+              sendBubblePreview({ clear: true }, { force: true })
               const nextText = response.error === ABORTED_ERROR ? '' : `[错误] ${response.error}`
               const nextBlocks = buildBlocksWithFinal(nextText)
               const nextContent = joinTextBlocks(nextBlocks)
@@ -2996,6 +3946,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             }
 
             const { displayText, expression, motion } = extractLive2DTags(response.content)
+            if (displayText.trim()) sendBubblePreview({ text: displayText, autoHideDelay: 0 })
             const finalBlocks = buildBlocksWithFinal(displayText)
             const finalContent = joinTextBlocks(finalBlocks)
 
@@ -3019,13 +3970,28 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               taskOriginMessageRef.current.delete(t.id)
               taskOriginBlocksRef.current.delete(t.id)
               taskToolUseSplitRef.current.delete(t.id)
+              taskBubblePreviewProgressRef.current.delete(t.id)
+              if (finalizeAbortExposed && aiAbortRef.current === finalizeAbort) {
+                aiAbortRef.current = null
+                isLoadingRef.current = false
+                setIsLoading(false)
+              }
             })
 
           continue
         }
 
         // 兼容旧链路（agent.run 等）：直接使用任务 finalReply/draftReply 回填
-        const rawText = String((isFinal ? (t.finalReply ?? t.draftReply ?? t.lastError) : (t.draftReply ?? t.lastError ?? t.finalReply)) ?? '')
+        const rawText = (() => {
+          const fallback = String((isFinal ? (t.finalReply ?? t.draftReply ?? t.lastError) : (t.draftReply ?? t.lastError ?? t.finalReply)) ?? '')
+          if (t.status !== 'failed') return fallback
+
+          const baseText = String((isFinal ? (t.finalReply ?? t.draftReply) : (t.draftReply ?? t.finalReply)) ?? '').trim()
+          const lastError = String(t.lastError ?? '').trim()
+          if (!lastError) return baseText || fallback
+          if (!baseText) return `[错误] ${lastError}`
+          return baseText.includes(lastError) ? baseText : `${baseText}\n\n[错误] ${lastError}`
+        })()
         const { displayText: displayTextRaw, expression, motion } = extractLive2DTags(rawText)
         const displayText = normalizeInterleavedTextSegment(displayTextRaw)
 
@@ -3039,6 +4005,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         if (hasOrphan) {
           split = { runIds: [], segments: [''], lastDisplay: '' }
           taskBubbleTtsProgressRef.current.delete(t.id)
+          taskBubblePreviewProgressRef.current.delete(t.id)
         } else {
           split = { runIds: [...split.runIds], segments: [...split.segments], lastDisplay: String(split.lastDisplay ?? '') }
         }
@@ -3054,6 +4021,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             lastDisplay: split.lastDisplay,
           }
           taskBubbleTtsProgressRef.current.delete(t.id)
+          taskBubblePreviewProgressRef.current.delete(t.id)
         } else if (runIdsNow.length > prevRunIds.length) {
           for (let i = prevRunIds.length; i < runIdsNow.length; i += 1) {
             split.runIds.push(runIdsNow[i])
@@ -3124,6 +4092,38 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         if (sessionId === currentSessionId) {
           setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content: nextContent, blocks: nextBlocks } : m)))
 
+          const frozenCount = split.runIds.length
+          const previewPrev = taskBubblePreviewProgressRef.current.get(t.id) ?? { shownFrozen: 0, lastShownAt: 0, lastTailText: '' }
+          const previewNext = { ...previewPrev }
+          for (let i = previewNext.shownFrozen; i < frozenCount; i += 1) {
+            const seg = normalizeInterleavedTextSegment(String(segsForBlocks[i] ?? ''))
+            if (!seg.trim()) continue
+            sendBubblePreview({ text: seg, autoHideDelay: 0 })
+            previewNext.lastShownAt = Date.now()
+          }
+          previewNext.shownFrozen = Math.max(previewNext.shownFrozen, frozenCount)
+
+          // agent.run 任务流（尤其“无工具卡”的场景）会持续通过 task.blocks 更新文本；
+          // 这里把当前尾段实时同步到桌宠预览气泡，避免只停留在“思考中…”直到最终完成。
+          if (!isFinal) {
+            const tailIdx = Math.max(0, Math.min(segsForBlocks.length - 1, frozenCount))
+            const tailText = normalizeInterleavedTextSegment(String(segsForBlocks[tailIdx] ?? ''))
+            if (tailText.trim()) {
+              if (tailText !== previewNext.lastTailText) {
+                sendBubblePreview({ text: tailText, autoHideDelay: 0 })
+                previewNext.lastShownAt = Date.now()
+                previewNext.lastTailText = tailText
+              }
+            } else {
+              previewNext.lastTailText = ''
+            }
+          } else {
+            previewNext.lastTailText = ''
+          }
+
+          const previewHadVisibleText = previewNext.shownFrozen > 0 || previewPrev.lastTailText.trim().length > 0
+          taskBubblePreviewProgressRef.current.set(t.id, previewNext)
+
           const tts = settingsRef.current?.tts
           const bubbleTtsEnabled = Boolean(tts?.enabled) && !(tts?.segmented ?? false)
           if (bubbleTtsEnabled) {
@@ -3147,8 +4147,22 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
             taskBubbleTtsProgressRef.current.set(t.id, nextProg)
           } else if (isFinal) {
-            // 未开启普通 TTS（或启用分句模式），保持原行为：仅在最终时把完整自然语言发给气泡
-            if (displayText) api.sendBubbleMessage(displayText)
+            // 未开启普通 TTS（或启用分句模式）时：
+            // - 若已经用预览流式展示过正文，则收尾时沿用“气泡自动隐藏”设置，不再重复打一遍完整气泡；
+            // - 否则回退到旧行为（直接显示最终气泡）。
+            const ttsEnabled = Boolean(tts?.enabled)
+            if (!ttsEnabled && previewHadVisibleText) {
+              const tailIdx = Math.max(0, Math.min(segsForBlocks.length - 1, frozenCount))
+              const finalPreviewText = normalizeInterleavedTextSegment(String(segsForBlocks[tailIdx] ?? '')) || displayText
+              const finalAutoHideDelay = Math.max(0, Math.min(60000, Math.floor(settingsRef.current?.bubble?.autoHideDelay ?? 5000)))
+              if (finalPreviewText.trim()) {
+                sendBubblePreview({ text: finalPreviewText, autoHideDelay: finalAutoHideDelay }, { force: true })
+              } else {
+                sendBubblePreview({ clear: true }, { force: true })
+              }
+            } else if (displayText) {
+              api.sendBubbleMessage(displayText)
+            }
           }
 
           if (isFinal) {
@@ -3174,12 +4188,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           taskOriginBlocksRef.current.delete(t.id)
           taskToolUseSplitRef.current.delete(t.id)
           taskBubbleTtsProgressRef.current.delete(t.id)
+          taskBubblePreviewProgressRef.current.delete(t.id)
         }
       }
     })
 
     return () => off()
-  }, [addSessionToolFacts, api, currentSessionId, debugLog, runAutoExtractIfNeeded])
+  }, [addSessionToolFacts, api, currentSessionId, debugLog, runAutoExtractIfNeeded, sendBubblePreview])
 
   const closeOverlays = useCallback(() => {
     setContextMenu(null)
@@ -3409,10 +4424,15 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     return () => window.clearTimeout(timer)
   }, [api, getActivePersonaId, input, memEnabled, retrieveEnabled])
 
+  const worldBookAddonForUsage = useMemo(() => {
+    const activePersonaId = settings?.activePersonaId?.trim() || 'default'
+    return buildWorldBookAddon(settings, activePersonaId)
+  }, [settings])
+
   const systemAddonForUsage = useMemo(() => {
-    const parts = [contextRetrieveAddon.trim(), toolDirectoryAddon.trim()].filter(Boolean)
+    const parts = [contextRetrieveAddon.trim(), worldBookAddonForUsage.trim(), toolDirectoryAddon.trim()].filter(Boolean)
     return parts.join('\n\n')
-  }, [contextRetrieveAddon, toolDirectoryAddon])
+  }, [contextRetrieveAddon, toolDirectoryAddon, worldBookAddonForUsage])
 
   const trimChatHistoryToMaxContext = useCallback(
     (history: ChatMessage[], systemAddon: string): { history: ChatMessage[]; trimmedCount: number } => {
@@ -3441,6 +4461,189 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       return { history: kept, trimmedCount: Math.max(0, history.length - kept.length) }
     },
     [estimateTokensForChatMessage, estimateTokensFromText],
+  )
+
+  const maybeCompressChatHistoryToMaxContext = useCallback(
+    async (
+      _aiService: AIService,
+      history: ChatMessage[],
+      systemAddon: string,
+      opts?: { signal?: AbortSignal; notify?: boolean; reason?: string },
+    ): Promise<{ history: ChatMessage[]; trimmedCount: number; compressed: boolean }> => {
+      const notify = opts?.notify ?? false
+      const applyTrimOnly = (): { history: ChatMessage[]; trimmedCount: number; compressed: boolean } => {
+        const trimmed = trimChatHistoryToMaxContext(history, systemAddon)
+        if (notify && trimmed.trimmedCount > 0) {
+          setError(`提示：对话上下文过长，已自动截断为最近 ${trimmed.history.length} 条消息（本地仍保存全部）。可右键“一键总结”或清空对话。`)
+        }
+        return { ...trimmed, compressed: false }
+      }
+
+      const settingsSnapshot = settingsRef.current
+      const ai = settingsSnapshot?.ai
+      if (!ai) return applyTrimOnly()
+
+      const compressionEnabled = ai.autoContextCompressionEnabled ?? true
+      if (!compressionEnabled || history.length < 8) return applyTrimOnly()
+
+      const maxContextTokensRaw = ai.maxContextTokens ?? 128000
+      const maxContextTokens = Math.max(2048, Math.trunc(Number.isFinite(maxContextTokensRaw) ? maxContextTokensRaw : 128000))
+
+      const maxTokensRaw = ai.maxTokens ?? 2048
+      const outputReserve = Math.max(512, Math.min(8192, Math.trunc(Number.isFinite(maxTokensRaw) ? maxTokensRaw : 2048)))
+
+      const systemPromptTokens = estimateTokensFromText(ai.systemPrompt ?? '')
+      const addonTokens = estimateTokensFromText(systemAddon ?? '')
+      const historyTokens = history.reduce((sum, msg) => sum + estimateTokensForChatMessage(msg), 0)
+      const estimatedUsed = systemPromptTokens + addonTokens + historyTokens + outputReserve
+
+      const thresholdPctRaw = ai.autoContextCompressionThresholdPct ?? 85
+      const targetPctRaw = ai.autoContextCompressionTargetPct ?? 65
+      const compressionModel = String(ai.autoContextCompressionModel ?? '').trim()
+      const compressionApiSource = ai.autoContextCompressionApiSource === 'profile' ? 'profile' : 'main'
+      const compressionProfileId = String(ai.autoContextCompressionProfileId ?? '').trim()
+      const compressionProfile =
+        compressionApiSource === 'profile'
+          ? (Array.isArray(settingsSnapshot?.aiProfiles)
+              ? settingsSnapshot.aiProfiles.find((p) => p.id === compressionProfileId) ?? null
+              : null)
+          : null
+      const thresholdPct = Math.max(50, Math.min(99, Math.trunc(Number.isFinite(thresholdPctRaw) ? thresholdPctRaw : 85)))
+      const targetPct = Math.max(35, Math.min(thresholdPct - 5, Math.trunc(Number.isFinite(targetPctRaw) ? targetPctRaw : 65)))
+
+      const triggerTokens = Math.floor((maxContextTokens * thresholdPct) / 100)
+      if (estimatedUsed <= triggerTokens) return applyTrimOnly()
+
+      const targetUsedTokens = Math.floor((maxContextTokens * targetPct) / 100)
+      let allowedHistoryTokensAfter = targetUsedTokens - outputReserve - systemPromptTokens - addonTokens
+      if (!Number.isFinite(allowedHistoryTokensAfter) || allowedHistoryTokensAfter < 512) {
+        allowedHistoryTokensAfter = 512
+      }
+
+      let keepRecentCount = Math.max(6, Math.min(12, history.length))
+      while (keepRecentCount > 4) {
+        const recent = history.slice(history.length - keepRecentCount)
+        const recentTokens = recent.reduce((sum, msg) => sum + estimateTokensForChatMessage(msg), 0)
+        if (recentTokens <= Math.max(256, allowedHistoryTokensAfter - 256)) break
+        keepRecentCount -= 2
+      }
+
+      const oldMessages = history.slice(0, Math.max(0, history.length - keepRecentCount))
+      const recentMessages = history.slice(Math.max(0, history.length - keepRecentCount))
+      if (oldMessages.length < 4 || recentMessages.length === 0) return applyTrimOnly()
+
+      const rawCompressionInput = buildContextCompressionSummaryPrompt(oldMessages)
+      const compressionInput = rawCompressionInput.trim()
+      if (!compressionInput) return applyTrimOnly()
+
+      if (notify) {
+        setError('提示：上下文接近阈值，正在自动压缩上下文…')
+      }
+
+        debugLog('chat:context.compress.start', {
+          reason: opts?.reason ?? 'chat',
+          totalMessages: history.length,
+          oldMessages: oldMessages.length,
+          keepRecentMessages: recentMessages.length,
+          compressionApiSource,
+          compressionProfileId: compressionProfile?.id ?? '',
+          compressionModel: compressionModel || ai.model,
+          estimatedUsed,
+          maxContextTokens,
+          thresholdPct,
+        targetPct,
+      })
+
+      try {
+        const compressionMaxTokens = Math.max(512, Math.min(2200, Math.trunc((ai.maxTokens ?? 2048) / 2)))
+        const compressionAiSettings = {
+          ...ai,
+          apiKey: compressionProfile?.apiKey?.trim() || ai.apiKey,
+          baseUrl: compressionProfile?.baseUrl?.trim() || ai.baseUrl,
+          model: compressionModel || compressionProfile?.model?.trim() || ai.model,
+        }
+        const compactor = new AIService({
+          ...compressionAiSettings,
+          maxTokens: compressionMaxTokens,
+          thinkingEffort: 'disabled',
+          openaiReasoningEffort: 'disabled',
+          claudeThinkingEffort: 'disabled',
+          geminiThinkingEffort: 'disabled',
+          enableVision: false,
+          enableChatStreaming: false,
+        })
+        const summaryTargetChars = Math.max(600, Math.min(12000, allowedHistoryTokensAfter * 4))
+        const compressionPrompt = compressionInput.length > 20000 ? `${compressionInput.slice(0, 20000)}\n\n（已截断过长历史）` : compressionInput
+
+        const res = await compactor.chat(
+          [
+            {
+              role: 'system',
+              content:
+                '你是“对话上下文压缩器”。请把更早对话压缩成可供后续回答继续使用的摘要。\n' +
+                '要求：1) 只保留事实、偏好、约束、目标、已完成事项、未完成事项、关键结论；2) 不要编造；3) 用简体中文；4) 输出纯文本，不要 Markdown 标题/代码块；5) 尽量精简。',
+            },
+            {
+              role: 'user',
+              content:
+                `请压缩以下较早对话（目标尽量简洁，约 ${summaryTargetChars} 字以内，不必严格）：\n\n` +
+                compressionPrompt,
+            },
+          ],
+          { signal: opts?.signal },
+        )
+
+        if (res.error) {
+          if (res.error === ABORTED_ERROR) throw new DOMException('Aborted', 'AbortError')
+          throw new Error(res.error)
+        }
+
+        let summaryText = normalizeAssistantDisplayText(res.content, { trim: true })
+        if (!summaryText) throw new Error('压缩结果为空')
+        if (summaryText.length > summaryTargetChars) {
+          summaryText = `${summaryText.slice(0, summaryTargetChars).trim()}\n（摘要已截断）`
+        }
+
+        const summaryMessage: ChatMessage = {
+          role: 'assistant',
+          content: `【自动压缩上下文摘要（系统生成）】\n${summaryText}`,
+        }
+
+        const compressedHistory = [summaryMessage, ...recentMessages]
+        const trimmed = trimChatHistoryToMaxContext(compressedHistory, systemAddon)
+
+        debugLog('chat:context.compress.done', {
+          reason: opts?.reason ?? 'chat',
+          compressed: true,
+          compressionApiSource,
+          compressionProfileId: compressionProfile?.id ?? '',
+          compressionModel: compressionAiSettings.model,
+          oldMessages: oldMessages.length,
+          keepRecentMessages: recentMessages.length,
+          finalMessages: trimmed.history.length,
+          trimmedCount: trimmed.trimmedCount,
+        })
+
+        if (notify) {
+          const extraTrim = trimmed.trimmedCount > 0 ? `；另外又截断 ${trimmed.trimmedCount} 条` : ''
+          setError(`提示：已自动压缩上下文（压缩 ${oldMessages.length} 条，保留最近 ${recentMessages.length} 条原文${extraTrim}）。`)
+        }
+        return { history: trimmed.history, trimmedCount: trimmed.trimmedCount, compressed: true }
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.warn('[ContextCompression] failed:', err)
+          debugLog('chat:context.compress.fail', {
+            reason: opts?.reason ?? 'chat',
+            error: err instanceof Error ? err.message : String(err),
+          })
+          if (notify) {
+            setError('提示：自动压缩上下文失败，已回退为普通截断。')
+          }
+        }
+        return applyTrimOnly()
+      }
+    },
+    [debugLog, estimateTokensForChatMessage, estimateTokensFromText, trimChatHistoryToMaxContext],
   )
 
   const chatContextUsage = useMemo<ContextUsageSnapshot | null>(() => {
@@ -3517,7 +4720,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
     const trimmed = trimChatHistoryToMaxContext(withPending, systemAddonForUsage)
     const historyTokens = trimmed.history.reduce((sum, msg) => sum + estimateTokensForChatMessage(msg), 0)
-
     return {
       usedTokens: systemPromptTokens + addonTokens + historyTokens + outputReserve,
       maxContextTokens,
@@ -3636,6 +4838,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
   const interrupt = useCallback(
     (opts?: { stopTts?: boolean }) => {
+      chatStopSeqRef.current += 1
       try {
         aiAbortRef.current?.abort()
       } catch (_) {
@@ -3651,11 +4854,23 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         }
       }
 
+      sendBubblePreview({ clear: true }, { force: true })
       isLoadingRef.current = false
       setIsLoading(false)
     },
-    [api],
+    [api, sendBubblePreview],
   )
+
+  const isAssistantOutputting = isLoading || currentActiveChatTaskIds.length > 0
+
+  const stopAssistantOutput = useCallback(() => {
+    interrupt()
+    if (!api || currentActiveChatTaskIds.length === 0) return
+
+    for (const taskId of currentActiveChatTaskIds) {
+      void api.cancelTask(taskId).catch((err) => console.error('[ChatStop] cancel task failed:', err))
+    }
+  }, [api, currentActiveChatTaskIds, interrupt])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -3691,7 +4906,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     attachments?: Array<{ kind: 'image' | 'video'; path: string; filename?: string }>
   }) => {
     const source = override?.source ?? 'manual'
-    const text = (override?.text ?? input).trim()
+    const text = (override?.text ?? inputRef.current).trim()
     const attachmentsRaw =
       source === 'manual'
         ? (override?.attachments ??
@@ -3746,16 +4961,45 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       videoPath: firstVideoPath || undefined, // 兼容旧逻辑：保留第一个视频路径
       createdAt: Date.now(),
     }
-    const baseMessages = override?.baseMessages ?? messages
+    let baseMessages = override?.baseMessages ?? messagesRef.current
+    let recoveredBaseFromStore = false
+    if (!override?.baseMessages) {
+      try {
+        const persisted = await api.getChatSession(currentSessionId).catch(() => null)
+        const persistedMessages = Array.isArray(persisted?.messages) ? persisted!.messages : []
+        if (persistedMessages.length > baseMessages.length) {
+          baseMessages = persistedMessages
+          recoveredBaseFromStore = true
+          messagesRef.current = persistedMessages
+          setMessages((prev) => (prev.length >= persistedMessages.length ? prev : persistedMessages))
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    debugLog('chat:send.base', {
+      sessionId: currentSessionId,
+      source,
+      inMemoryCount: (override?.baseMessages ?? messagesRef.current).length,
+      baseCount: baseMessages.length,
+      recoveredBaseFromStore,
+    })
     const nextMessages = [...baseMessages, userMessage]
+    messagesRef.current = nextMessages
     setMessages(nextMessages)
     if (source === 'manual') {
+      inputRef.current = ''
       setInput('')
+      syncAsrComposePreview('', { clearFinals: true })
       setPendingAttachments([])
+    }
+    if (source === 'asr' && (settingsRef.current?.asr?.autoSend ?? false)) {
+      syncAsrComposePreview('', { clearFinals: true })
     }
     setError(null)
     isLoadingRef.current = true
     setIsLoading(true)
+    sendBubblePreview({ placeholder: true, text: '思考中…', autoHideDelay: 0 })
     const abort = new AbortController()
     aiAbortRef.current = abort
 
@@ -3824,6 +5068,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         if (lines.length === 0) return ''
         return ['【本次用户附带本地附件（仅供工具调用，不要在最终回复中暴露这些路径）】', ...lines].join('\n')
       })()
+      const worldBookAddon = buildWorldBookAddon(settingsRef.current, getActivePersonaId())
       const shouldRunToolAgent = plannerEnabledNow && toolCallingEnabledNow && requestForTools.trim().length > 0
       if (shouldRunToolAgent) {
         try {
@@ -3867,15 +5112,19 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           }
 
           const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
-          const toolContext = [memoryAddon, toolFactsAddon, attachmentAddon].filter(Boolean).join('\n\n')
+          const toolContext = [memoryAddon, worldBookAddon, toolFactsAddon, attachmentAddon].filter(Boolean).join('\n\n')
 
           // 使用 token 预算动态截断历史，而非硬编码轮数，充分利用模型的上下文窗口
           const historyForAgent: ChatMessage[] = chatHistory
             .slice(0, -1)
             .map((m) => ({ role: m.role, content: toPlainText(m.content).trim() }))
             .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.length > 0)
-          const trimmedHistory = trimChatHistoryToMaxContext(historyForAgent, toolContext)
-          const history = trimmedHistory.history
+          const preparedHistory = await maybeCompressChatHistoryToMaxContext(aiService, historyForAgent, toolContext, {
+            signal: abort.signal,
+            notify: true,
+            reason: 'tool-agent',
+          })
+          const history = preparedHistory.history
 
           const title = request.length > 40 ? `${request.slice(0, 40)}…` : request
           const visionImagePaths = canUseVision ? attachments.filter((a) => a.kind === 'image').map((a) => a.path).slice(0, 4) : []
@@ -3965,8 +5214,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             role: m.role === 'user' ? 'user' : 'assistant',
             content: typeof m.content === 'string' ? m.content : '',
           }))
-          const plannerTrimmed = trimChatHistoryToMaxContext(plannerHistoryRaw, attachmentAddon ?? '')
-          const plannerHistory = plannerTrimmed.history
+          const plannerContext = [worldBookAddon, attachmentAddon].filter(Boolean).join('\n\n')
+          const plannerPrepared = await maybeCompressChatHistoryToMaxContext(aiService, plannerHistoryRaw, plannerContext, {
+            signal: abort.signal,
+            notify: true,
+            reason: 'planner',
+          })
+          const plannerHistory = plannerPrepared.history
 
           const planRes = await aiService.chat(
             [
@@ -3979,7 +5233,17 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                   motions: toolAnimRef.current.motionGroups ?? [],
                 }),
               },
+              ...(worldBookAddon ? [{ role: 'system' as const, content: worldBookAddon }] : []),
               ...(attachmentAddon ? [{ role: 'system' as const, content: attachmentAddon }] : []),
+              ...(requestLikelyNeedsToolAction(requestForTools)
+                ? [
+                    {
+                      role: 'system' as const,
+                      content:
+                        '程序提示：本轮用户请求可能需要工具行动。若确实需要截图、搜索、网页操作、文件读写或运行命令，优先输出 create_task；若只是普通聊天、解释、安慰、角色互动或不需要真实工具结果，允许输出 chat。',
+                    },
+                  ]
+                : []),
               ...plannerHistory,
             ],
             { signal: abort.signal },
@@ -4092,10 +5356,14 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                 systemAddon = ''
               }
               const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
-              const mergedSystemAddon = [systemAddon.trim(), toolFactsAddon.trim()].filter(Boolean).join('\n\n')
+              const mergedSystemAddon = [systemAddon.trim(), worldBookAddon.trim(), toolFactsAddon.trim()].filter(Boolean).join('\n\n')
 
               const historyWithPreface = [...chatHistory, { role: 'assistant' as const, content: assistantMessage.content }]
-              const trimmed = trimChatHistoryToMaxContext(historyWithPreface, mergedSystemAddon)
+              const trimmed = await maybeCompressChatHistoryToMaxContext(aiService, historyWithPreface, mergedSystemAddon, {
+                signal: abort.signal,
+                notify: false,
+                reason: 'task-finalize',
+              })
               taskFinalizeContextRef.current.set(created.id, {
                 sessionId: currentSessionId,
                 messageId: assistantId,
@@ -4141,6 +5409,10 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       }
 
       {
+        if (worldBookAddon.trim()) systemAddonParts.push(worldBookAddon.trim())
+      }
+
+      {
         const toolFactsAddon = buildSessionToolFactsAddon(currentSessionId)
         if (toolFactsAddon.trim()) systemAddonParts.push(toolFactsAddon.trim())
       }
@@ -4148,13 +5420,12 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const systemAddon = systemAddonParts.filter(Boolean).join('\n\n')
 
       {
-        const trimmed = trimChatHistoryToMaxContext(chatHistory, systemAddon)
-        chatHistory = trimmed.history
-        if (trimmed.trimmedCount > 0) {
-          setError(
-            `提示：对话上下文过长，已自动截断为最近 ${chatHistory.length} 条消息（本地仍保存全部）。可右键“一键总结”或清空对话。`,
-          )
-        }
+        const prepared = await maybeCompressChatHistoryToMaxContext(aiService, chatHistory, systemAddon, {
+          signal: abort.signal,
+          notify: true,
+          reason: 'chat-send',
+        })
+        chatHistory = prepared.history
       }
 
       const enableChatStreaming = settingsRef.current?.ai?.enableChatStreaming ?? false
@@ -4164,18 +5435,25 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         const utteranceId = newMessageId()
         setTtsPendingUtteranceId(utteranceId)
         setTtsRevealedSegments((prev) => ({ ...prev, [utteranceId]: 0 }))
+        const segmentedStopSeq = chatStopSeqRef.current
+        const isSegmentedStopped = () => abort.signal.aborted || chatStopSeqRef.current !== segmentedStopSeq
 
         try {
           const response = enableChatStreaming
             ? await (async () => {
                 let acc = ''
+
                 const res = await aiService.chatStream(chatHistory, {
                   signal: abort.signal,
                   systemAddon,
                   onDelta: (delta) => {
+                    if (isSegmentedStopped()) return
                     acc += delta
+                    const display = normalizeAssistantDisplayText(acc)
+                    if (display.trim()) sendBubblePreview({ text: display, autoHideDelay: 0 })
                   },
                 })
+                if (isSegmentedStopped()) return { content: '', error: ABORTED_ERROR }
                 if (!res.error) {
                   const merged = res.content?.trim().length ? res.content : acc
                   return { ...res, content: merged }
@@ -4184,8 +5462,20 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               })()
             : await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
 
+          if (isSegmentedStopped()) {
+            sendBubblePreview({ clear: true }, { force: true })
+            setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
+            setTtsRevealedSegments((prev) => {
+              const next = { ...prev }
+              delete next[utteranceId]
+              return next
+            })
+            return
+          }
+
           if (response.error) {
             if (response.error === ABORTED_ERROR) {
+              sendBubblePreview({ clear: true }, { force: true })
               setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
               setTtsRevealedSegments((prev) => {
                 const next = { ...prev }
@@ -4194,6 +5484,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               })
               return
             }
+            sendBubblePreview({ clear: true }, { force: true })
             const errUi = formatAiErrorForUser(response.error)
             setError(errUi.message)
             if (errUi.shouldAlert) window.alert(errUi.message)
@@ -4215,6 +5506,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           }
 
           const content = normalizeAssistantDisplayText(response.content, { trim: true })
+          if (content.trim()) sendBubblePreview({ text: content, autoHideDelay: 0 })
           // 更新真实的 API usage 统计
           if (response.usage) setLastApiUsage(response.usage)
           const assistantCreatedAt = Date.now()
@@ -4244,6 +5536,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           if (response.expression) api.triggerExpression(response.expression)
           if (response.motion) api.triggerMotion(response.motion, 0)
         } catch (err) {
+          sendBubblePreview({ clear: true }, { force: true })
           const msg = err instanceof Error ? err.message : String(err)
           setError(msg)
           setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
@@ -4271,11 +5564,13 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         const createdAt = Date.now()
         let acc = ''
         let pending = ''
-        let raf = 0
         let lastExpression: string | undefined
         let lastMotion: string | undefined
+        const streamStopSeq = chatStopSeqRef.current
+        const isStreamStopped = () => abort.signal.aborted || chatStopSeqRef.current !== streamStopSeq
 
         const ensureMessageCreated = () => {
+          if (isStreamStopped()) return
           if (created) return
           created = true
           const assistantMessage: ChatMessageRecord = {
@@ -4289,11 +5584,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         }
 
         const flush = () => {
+          if (isStreamStopped()) {
+            pending = ''
+            return
+          }
           if (!pending) return
           acc += pending
           pending = ''
           if (!created) ensureMessageCreated()
           const display = normalizeAssistantDisplayText(acc)
+          if (display.trim()) sendBubblePreview({ text: display, autoHideDelay: 0 })
           setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: display } : m)))
 
           const tags = extractLastLive2DTags(acc)
@@ -4307,38 +5607,34 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           }
         }
 
-        const scheduleFlush = () => {
-          if (raf) return
-          raf = window.requestAnimationFrame(() => {
-            raf = 0
-            flush()
-          })
-        }
-
         const response = await aiService.chatStream(chatHistory, {
           signal: abort.signal,
           systemAddon,
           onDelta: (delta) => {
+            if (isStreamStopped()) return
             pending += delta
-            scheduleFlush()
+            flush()
           },
         })
-
-        if (raf) {
-          window.cancelAnimationFrame(raf)
-          raf = 0
-        }
         flush()
+        if (isStreamStopped()) {
+          sendBubblePreview({ clear: true }, { force: true })
+          return
+        }
 
         if (response.error) {
           if (response.error === ABORTED_ERROR) {
             // 被打断：不写入错误信息，直接结束
+            sendBubblePreview({ clear: true }, { force: true })
             return
           }
+          const partialForUi = normalizeAssistantDisplayText(response.content || acc, { trim: true })
+          if (partialForUi) sendBubblePreview({ text: partialForUi, autoHideDelay: 0 })
+          else sendBubblePreview({ clear: true }, { force: true })
           const errUi = formatAiErrorForUser(response.error)
           setError(errUi.message)
           if (errUi.shouldAlert) window.alert(errUi.message)
-          const nextContent = `[错误] ${response.error}`
+          const nextContent = buildInterruptedStreamContent(partialForUi, response.error)
           if (created) {
             setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: nextContent } : m)))
             await api.updateChatMessage(currentSessionId, assistantId, nextContent).catch(() => undefined)
@@ -4361,6 +5657,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           setMessages((prev) => [...prev, msg])
           await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
         }
+        if (finalContent.trim()) sendBubblePreview({ text: finalContent, autoHideDelay: 0 })
         if (finalContent) api.sendBubbleMessage(finalContent)
         void runAutoExtractIfNeeded(currentSessionId)
         return
@@ -4369,7 +5666,11 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const response = await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
 
       if (response.error) {
-        if (response.error === ABORTED_ERROR) return
+        if (response.error === ABORTED_ERROR) {
+          sendBubblePreview({ clear: true }, { force: true })
+          return
+        }
+        sendBubblePreview({ clear: true }, { force: true })
         const errUi = formatAiErrorForUser(response.error)
         setError(errUi.message)
         if (errUi.shouldAlert) window.alert(errUi.message)
@@ -4397,9 +5698,11 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
       if (response.expression) api.triggerExpression(response.expression)
       if (response.motion) api.triggerMotion(response.motion, 0)
+      if (response.content?.trim()) sendBubblePreview({ text: response.content, autoHideDelay: 0 })
       if (response.content) api.sendBubbleMessage(response.content)
       void runAutoExtractIfNeeded(currentSessionId)
     } catch (err) {
+      sendBubblePreview({ clear: true }, { force: true })
       const errorMessage = err instanceof Error ? err.message : String(err)
       setError(errorMessage)
       const assistantMessage: ChatMessageRecord = {
@@ -4422,8 +5725,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     currentSessionId,
     debugLog,
     getActivePersonaId,
-    input,
-    messages,
     newMessageId,
     pendingAttachments,
     buildSessionToolFactsAddon,
@@ -4431,8 +5732,10 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     retrieveEnabled,
     interrupt,
     runAutoExtractIfNeeded,
-    trimChatHistoryToMaxContext,
+    maybeCompressChatHistoryToMaxContext,
     formatAiErrorForUser,
+    syncAsrComposePreview,
+    sendBubblePreview,
   ])
 
   const flushAsrAutoSendQueue = useCallback(() => {
@@ -4470,6 +5773,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     if (!api) return
 
     let cancelled = false
+    let drainingPending = false
 
     const handleTranscript = (text: string) => {
       const cleaned = String(text ?? '').trim()
@@ -4481,42 +5785,88 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       if (asr.autoSend) {
         if (!currentSessionId) {
           pendingAsrAutoSendRef.current.push(cleaned)
+          syncAsrComposePreview('', { clearFinals: true })
           return
         }
-        void send({ text: cleaned, source: 'asr' }).then(() => flushAsrAutoSendQueue())
+        syncAsrComposePreview('', { clearFinals: true })
+        void send({ text: cleaned, source: 'asr', baseMessages: messagesRef.current }).then(() => flushAsrAutoSendQueue())
         return
       }
 
       setInput((prev) => {
         const base = prev.trim()
-        if (!base) return cleaned
-        return `${prev} ${cleaned}`
+        const next = !base ? cleaned : `${prev} ${cleaned}`
+        inputRef.current = next
+        queueMicrotask(() => syncAsrComposePreview(next))
+        return next
       })
     }
 
-    void (async () => {
-      const asr = settingsRef.current?.asr
-      if (!asr?.enabled) return
-      const cached = await api.takeAsrTranscript().catch(() => '')
-      if (cancelled) return
-      handleTranscript(cached)
-    })()
+    const notifyTranscriptReady = () => {
+      try {
+        api.notifyAsrTranscriptReady()
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const drainPendingTranscript = () => {
+      if (drainingPending) return
+      drainingPending = true
+      void (async () => {
+        try {
+          // 告知主进程聊天窗口已可接收实时 transcript，避免文本长期堆积在 pending 队列里。
+          notifyTranscriptReady()
+          const asr = settingsRef.current?.asr
+          if (!asr?.enabled) return
+          const cached = await api.takeAsrTranscript().catch(() => '')
+          if (cancelled) return
+          handleTranscript(cached)
+        } finally {
+          drainingPending = false
+        }
+      })()
+    }
 
     const off = api.onAsrTranscript(handleTranscript)
+    drainPendingTranscript()
+    const onWindowVisible = () => {
+      notifyTranscriptReady()
+      if (document.visibilityState !== 'visible') return
+      drainPendingTranscript()
+    }
+    window.addEventListener('focus', onWindowVisible)
+    document.addEventListener('visibilitychange', onWindowVisible)
     return () => {
       cancelled = true
+      window.removeEventListener('focus', onWindowVisible)
+      document.removeEventListener('visibilitychange', onWindowVisible)
       off()
     }
-  }, [api, currentSessionId, flushAsrAutoSendQueue, send])
+  }, [api, currentSessionId, flushAsrAutoSendQueue, send, syncAsrComposePreview])
 
   useEffect(() => {
     flushAsrAutoSendQueue()
   }, [flushAsrAutoSendQueue])
 
+  useEffect(() => {
+    const asr = settingsRef.current?.asr
+    if (!asr?.enabled) {
+      syncAsrComposePreview('', { clearFinals: true })
+      return
+    }
+    if (asr.autoSend) {
+      syncAsrComposePreview('', { clearFinals: true })
+      return
+    }
+    syncAsrComposePreview(inputRef.current)
+  }, [currentSessionId, input, settings?.asr?.enabled, settings?.asr?.autoSend, syncAsrComposePreview])
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      send()
+      if (isAssistantOutputting) stopAssistantOutput()
+      else send()
     }
   }
 
@@ -4828,8 +6178,12 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     (messageId: string) => {
       const msg = messages.find((m) => m.id === messageId)
       if (!msg) return
+      const editText =
+        msg.role === 'assistant' && Array.isArray(msg.blocks) && msg.blocks.length > 0
+          ? joinTextBlocks(normalizeMessageBlocks(msg)) || String(msg.content ?? '')
+          : String(msg.content ?? '')
       setEditingMessageId(messageId)
-      setEditingMessageContent(msg.content)
+      setEditingMessageContent(editText)
       setContextMenu(null)
     },
     [messages],
@@ -4842,15 +6196,32 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
   const handleSaveEdit = useCallback(async () => {
     if (!api || !currentSessionId || !editingMessageId) return
-    const nextContent = editingMessageContent
+    const nextContent = String(editingMessageContent ?? '')
+    const target = messages.find((m) => m.id === editingMessageId)
+    if (!target) return
+    const isAssistant = target.role === 'assistant'
+    const nextBlocks: ChatMessageBlock[] | undefined = isAssistant ? [{ type: 'text', text: nextContent }] : undefined
+
     setMessages((prev) =>
-      prev.map((m) => (m.id === editingMessageId ? { ...m, content: nextContent, updatedAt: Date.now() } : m)),
+      prev.map((m) =>
+        m.id === editingMessageId
+          ? {
+              ...m,
+              content: nextContent,
+              ...(isAssistant ? { blocks: nextBlocks, taskId: undefined } : {}),
+              updatedAt: Date.now(),
+            }
+          : m,
+      ),
     )
-    await api.updateChatMessage(currentSessionId, editingMessageId, nextContent)
+    await api.updateChatMessageRecord(currentSessionId, editingMessageId, {
+      content: nextContent,
+      ...(isAssistant ? { blocks: nextBlocks, taskId: undefined } : {}),
+    })
     await refreshSessions()
     setEditingMessageId(null)
     setEditingMessageContent('')
-  }, [api, currentSessionId, editingMessageId, editingMessageContent, refreshSessions])
+  }, [api, currentSessionId, editingMessageId, editingMessageContent, messages, refreshSessions])
 
   const handleResend = useCallback(
     async (messageId: string) => {
@@ -4916,6 +6287,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       setError(null)
       setIsLoading(true)
       isLoadingRef.current = true
+      sendBubblePreview({ placeholder: true, text: '思考中…', autoHideDelay: 0 })
       const abort = new AbortController()
       aiAbortRef.current = abort
       try {
@@ -4963,15 +6335,18 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         } catch (_) {
           systemAddon = ''
         }
+        {
+          const worldBookAddon = buildWorldBookAddon(settingsRef.current ?? settings, getActivePersonaId())
+          systemAddon = [systemAddon.trim(), worldBookAddon.trim()].filter(Boolean).join('\n\n')
+        }
 
         {
-          const trimmed = trimChatHistoryToMaxContext(chatHistory, systemAddon)
-          chatHistory = trimmed.history
-          if (trimmed.trimmedCount > 0) {
-            setError(
-              `提示：对话上下文过长，已自动截断为最近 ${chatHistory.length} 条消息（本地仍保存全部）。可右键“一键总结”或清空对话。`,
-            )
-          }
+          const prepared = await maybeCompressChatHistoryToMaxContext(aiService, chatHistory, systemAddon, {
+            signal: abort.signal,
+            notify: true,
+            reason: 'chat-regenerate',
+          })
+          chatHistory = prepared.history
         }
 
         const enableChatStreaming = settings?.ai?.enableChatStreaming ?? false
@@ -5178,7 +6553,6 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           const createdAt = Date.now()
           let acc = ''
           let pending = ''
-          let raf = 0
           let lastExpression: string | undefined
           let lastMotion: string | undefined
 
@@ -5201,6 +6575,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             pending = ''
             if (!created) ensureMessageCreated()
             const display = normalizeAssistantDisplayText(acc)
+            if (display.trim()) sendBubblePreview({ text: display, autoHideDelay: 0 })
             setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: display } : m)))
 
             const tags = extractLastLive2DTags(acc)
@@ -5214,37 +6589,28 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             }
           }
 
-          const scheduleFlush = () => {
-            if (raf) return
-            raf = window.requestAnimationFrame(() => {
-              raf = 0
-              flush()
-            })
-          }
-
           const response = await aiService.chatStream(chatHistory, {
             signal: abort.signal,
             systemAddon,
             onDelta: (delta) => {
               pending += delta
-              scheduleFlush()
+              flush()
             },
           })
-
-          if (raf) {
-            window.cancelAnimationFrame(raf)
-            raf = 0
-          }
           flush()
 
           if (response.error) {
             if (response.error === ABORTED_ERROR) {
+              sendBubblePreview({ clear: true }, { force: true })
               return
             }
+            const partialForUi = normalizeAssistantDisplayText(response.content || acc, { trim: true })
+            if (partialForUi) sendBubblePreview({ text: partialForUi, autoHideDelay: 0 })
+            else sendBubblePreview({ clear: true }, { force: true })
             const errUi = formatAiErrorForUser(response.error)
             setError(errUi.message)
             if (errUi.shouldAlert) window.alert(errUi.message)
-            const nextContent = `[错误] ${response.error}`
+            const nextContent = buildInterruptedStreamContent(partialForUi, response.error)
             if (created) {
               setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: nextContent } : m)))
               await api.updateChatMessage(currentSessionId, assistantId, nextContent).catch(() => undefined)
@@ -5268,6 +6634,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
           }
 
+          if (finalContent.trim()) sendBubblePreview({ text: finalContent, autoHideDelay: 0 })
           if (finalContent) api.sendBubbleMessage(finalContent)
           void runAutoExtractIfNeeded(currentSessionId)
           return
@@ -5276,6 +6643,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         const response = await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
         if (response.error) {
           if (response.error === ABORTED_ERROR) return
+          sendBubblePreview({ clear: true }, { force: true })
           const errUi = formatAiErrorForUser(response.error)
           setError(errUi.message)
           if (errUi.shouldAlert) window.alert(errUi.message)
@@ -5303,9 +6671,11 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
         if (response.expression) api.triggerExpression(response.expression)
         if (response.motion) api.triggerMotion(response.motion, 0)
+        if (response.content?.trim()) sendBubblePreview({ text: response.content, autoHideDelay: 0 })
         if (response.content) api.sendBubbleMessage(response.content)
         void runAutoExtractIfNeeded(currentSessionId)
       } catch (err) {
+        sendBubblePreview({ clear: true }, { force: true })
         const errorMessage = err instanceof Error ? err.message : String(err)
         setError(errorMessage)
         const assistantMessage: ChatMessageRecord = {
@@ -5333,13 +6703,10 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       send,
       newMessageId,
       refreshSessions,
-      settings?.ai?.enableChatStreaming,
-      settings?.memory?.enabled,
-      settings?.memory?.includeSharedOnRetrieve,
-      settings?.tts?.enabled,
-      settings?.tts?.segmented,
+      sendBubblePreview,
+      settings,
       runAutoExtractIfNeeded,
-      trimChatHistoryToMaxContext,
+      maybeCompressChatHistoryToMaxContext,
       formatAiErrorForUser,
     ],
   )
@@ -5564,14 +6931,12 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           </div>
         ) : null}
         {messages.map((m) => {
-          const profile = settings?.chatProfile
           const isUser = m.role === 'user'
-          const avatar = isUser ? profile?.userAvatar : profile?.assistantAvatar
-          const ttsSegmentedUi = (settings?.tts?.enabled ?? false) && (settings?.tts?.segmented ?? false)
+          const avatar = isUser ? userAvatar : assistantAvatar
           const isSegmentedAssistant = !isUser && ttsSegmentedUi && !!ttsSegmentedMessageFlags[m.id]
 
           const renderToolUseNode = (taskId: string, runId?: string): React.ReactNode => {
-            const t = tasks.find((x) => x.id === taskId) ?? null
+            const t = tasksById.get(taskId) ?? null
             if (!t) return null
             const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
             const steps = Array.isArray(t.steps) ? t.steps : []
@@ -5658,7 +7023,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                         .map((x) => String(x ?? '').trim())
                         .filter((x) => x && isPreviewableToolImagePath(x)),
                     ),
-                  ).slice(0, 8)
+                  ).slice(0, 1)
                 : []
               const mm = r.outputPreview ? parseMmvectorResults(r.outputPreview) : null
               const mmMedia =
@@ -6113,7 +7478,14 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         <div className="ndp-chat-input-row">
           <input
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value
+              inputRef.current = next
+              setInput(next)
+              if ((settingsRef.current?.asr?.enabled ?? false) && !(settingsRef.current?.asr?.autoSend ?? false)) {
+                syncAsrComposePreview(next)
+              }
+            }}
             onKeyDown={handleKeyDown}
             onPaste={(e) => {
               const dt = e.clipboardData
@@ -6165,8 +7537,16 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           <button className="ndp-btn" onClick={() => attachmentInputRef.current?.click()} title="选择附件（可多选图片/视频）">
             附件
           </button>
-          <button className="ndp-btn" onClick={() => send()} disabled={!input.trim() && pendingAttachments.length === 0 && !isLoading}>
-            {isLoading ? (!input.trim() && pendingAttachments.length === 0 ? '打断' : '打断并发送') : '发送'}
+          <button
+            className={`ndp-btn ${isAssistantOutputting ? 'ndp-btn-stop' : ''}`}
+            onClick={() => {
+              if (isAssistantOutputting) stopAssistantOutput()
+              else send()
+            }}
+            disabled={!isAssistantOutputting && !input.trim() && pendingAttachments.length === 0}
+            title={isAssistantOutputting ? '停止当前输出' : '发送'}
+          >
+            {isAssistantOutputting ? '停止' : '发送'}
           </button>
         </div>
       </footer>
@@ -6267,7 +7647,7 @@ function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
   const { api, settings } = props
   const [activeTab, setActiveTab] = useState<
-    'live2d' | 'bubble' | 'taskPanel' | 'ai' | 'tools' | 'persona' | 'chat' | 'tts' | 'asr'
+    'live2d' | 'bubble' | 'taskPanel' | 'ai' | 'tools' | 'persona' | 'worldBook' | 'chat' | 'tts' | 'asr'
   >('live2d')
   const [availableModels, setAvailableModels] = useState<Live2DModelInfo[]>([])
   const [isLoadingModels, setIsLoadingModels] = useState(true)
@@ -6388,6 +7768,12 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
           角色/记忆
         </button>
         <button
+          className={`ndp-tab-btn ${activeTab === 'worldBook' ? 'active' : ''}`}
+          onClick={() => setActiveTab('worldBook')}
+        >
+          设定库
+        </button>
+        <button
           className={`ndp-tab-btn ${activeTab === 'chat' ? 'active' : ''}`}
           onClick={() => setActiveTab('chat')}
         >
@@ -6436,6 +7822,7 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
         )}
         {activeTab === 'tools' && <ToolsSettingsTab api={api} settings={settings} />}
         {activeTab === 'persona' && <PersonaSettingsTab api={api} settings={settings} />}
+        {activeTab === 'worldBook' && <WorldBookSettingsTab api={api} settings={settings} />}
         {activeTab === 'chat' && <ChatUiSettingsTab api={api} chatUi={chatUi} />}
         {activeTab === 'tts' && <TtsSettingsTab api={api} ttsSettings={ttsSettings} />}
         {activeTab === 'asr' && <AsrSettingsTab api={api} asrSettings={asrSettings} />}
@@ -6447,3653 +7834,6 @@ function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings: AppSe
           重置默认
         </button>
       </footer>
-    </div>
-  )
-}
-
-function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
-  const { api, settings } = props
-  const toolSettings = settings?.tools
-  const mcpSettings = settings?.mcp
-
-  const [query, setQuery] = useState('')
-  const [tasks, setTasks] = useState<TaskRecord[]>([])
-  const [subTab, setSubTab] = useState<'builtin' | 'mcp'>('builtin')
-  const [mcpState, setMcpState] = useState<McpStateSnapshot | null>(null)
-
-  useEffect(() => {
-    if (!api) return
-    let disposed = false
-
-    api
-      .listTasks()
-      .then((res) => {
-        if (disposed) return
-        setTasks(Array.isArray(res.items) ? res.items : [])
-      })
-      .catch((err) => console.error('[Tools] listTasks failed:', err))
-
-    const off = api.onTasksChanged((payload) => setTasks(Array.isArray(payload.items) ? payload.items : []))
-    return () => {
-      disposed = true
-      off()
-    }
-  }, [api])
-
-  useEffect(() => {
-    if (!api) return
-    let disposed = false
-
-    api
-      .getMcpState()
-      .then((snap) => {
-        if (disposed) return
-        setMcpState(snap)
-      })
-      .catch((err) => console.error('[MCP] getMcpState failed:', err))
-
-    const off = api.onMcpChanged((snap) => setMcpState(snap))
-    return () => {
-      disposed = true
-      off()
-    }
-  }, [api])
-
-  const allDefs = useMemo(() => getBuiltinToolDefinitions(), [])
-  const effectiveToolSettings = useMemo(() => {
-    return toolSettings ?? { enabled: true, groups: {}, tools: {} }
-  }, [toolSettings])
-
-  const latestRunByTool = useMemo(() => {
-    const out = new Map<
-      string,
-      { status: 'running' | 'done' | 'error'; startedAt: number; endedAt?: number; error?: string; taskId: string; taskTitle: string }
-    >()
-
-    for (const t of tasks) {
-      const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
-      for (const r of runs) {
-        const toolName = typeof r?.toolName === 'string' ? r.toolName : ''
-        if (!toolName) continue
-        const startedAt = typeof r.startedAt === 'number' ? r.startedAt : 0
-        const prev = out.get(toolName)
-        if (!prev || startedAt > prev.startedAt) {
-          out.set(toolName, {
-            status: r.status,
-            startedAt,
-            endedAt: r.endedAt,
-            error: r.error,
-            taskId: t.id,
-            taskTitle: t.title,
-          })
-        }
-      }
-    }
-    return out
-  }, [tasks])
-
-  const normalizedQuery = query.trim().toLowerCase()
-  const visibleDefs = useMemo(() => {
-    if (!normalizedQuery) return allDefs
-    return allDefs.filter((d) => {
-      const hay = `${d.name}\n${d.callName}\n${d.description}\n${d.tags?.join(' ') ?? ''}`.toLowerCase()
-      return hay.includes(normalizedQuery)
-    })
-  }, [allDefs, normalizedQuery])
-
-  const groups = useMemo(() => {
-    const map = new Map<string, typeof visibleDefs>()
-    for (const d of visibleDefs) {
-      const g = getToolGroupId(d.name)
-      const arr = map.get(g)
-      if (arr) arr.push(d)
-      else map.set(g, [d])
-    }
-    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [visibleDefs])
-
-  const totalCount = allDefs.length
-  const enabledCount = allDefs.filter((d) => isToolEnabled(d.name, effectiveToolSettings)).length
-
-  const updateToolSettings = useCallback(
-    async (patch: Partial<AppSettings['tools']>) => {
-      if (!api) return
-      try {
-        await api.setToolSettings(patch)
-      } catch (err) {
-        console.error('[Tools] setToolSettings failed:', err)
-      }
-    },
-    [api],
-  )
-
-  const updateMcpSettings = useCallback(
-    async (patch: Partial<AppSettings['mcp']>) => {
-      if (!api) return
-      try {
-        await api.setMcpSettings(patch)
-      } catch (err) {
-        console.error('[MCP] setMcpSettings failed:', err)
-      }
-    },
-    [api],
-  )
-
-  const onToggleGlobal = useCallback(
-    (next: boolean) => {
-      void updateToolSettings({ enabled: next })
-    },
-    [updateToolSettings],
-  )
-
-  const onToggleGroup = useCallback(
-    (groupId: string, next: boolean) => {
-      const nextGroups = { ...(effectiveToolSettings.groups ?? {}) }
-      nextGroups[groupId] = next
-      void updateToolSettings({ groups: nextGroups })
-    },
-    [effectiveToolSettings.groups, updateToolSettings],
-  )
-
-  const onResetGroup = useCallback(
-    (groupId: string) => {
-      const nextGroups = { ...(effectiveToolSettings.groups ?? {}) }
-      delete nextGroups[groupId]
-      void updateToolSettings({ groups: nextGroups })
-    },
-    [effectiveToolSettings.groups, updateToolSettings],
-  )
-
-  const onToggleTool = useCallback(
-    (toolName: string, next: boolean) => {
-      const nextTools = { ...(effectiveToolSettings.tools ?? {}) }
-      nextTools[toolName] = next
-      void updateToolSettings({ tools: nextTools })
-    },
-    [effectiveToolSettings.tools, updateToolSettings],
-  )
-
-  const onResetTool = useCallback(
-    (toolName: string) => {
-      const nextTools = { ...(effectiveToolSettings.tools ?? {}) }
-      delete nextTools[toolName]
-      void updateToolSettings({ tools: nextTools })
-    },
-    [effectiveToolSettings.tools, updateToolSettings],
-  )
-
-  const mcpEnabled = mcpSettings?.enabled ?? false
-  const mcpServersRaw = mcpSettings?.servers
-  const mcpServers = useMemo(() => {
-    return Array.isArray(mcpServersRaw) ? mcpServersRaw : []
-  }, [mcpServersRaw])
-  const mcpStateById = useMemo(() => {
-    const map = new Map<string, (McpStateSnapshot['servers'][number] | null)>()
-    const servers = Array.isArray(mcpState?.servers) ? mcpState!.servers : []
-    for (const s of servers) {
-      if (!s || typeof s.id !== 'string') continue
-      map.set(s.id, s)
-    }
-    return map
-  }, [mcpState])
-
-  const parseArgsText = useCallback((text: string): string[] => {
-    return text
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
-  }, [])
-
-  const formatArgsText = useCallback((args: string[] | undefined | null): string => {
-    return Array.isArray(args) ? args.filter((v) => typeof v === 'string' && v.trim()).join('\n') : ''
-  }, [])
-
-  const parseEnvText = useCallback((text: string): Record<string, string> => {
-    const out: Record<string, string> = {}
-    for (const rawLine of text.split(/\r?\n/)) {
-      const line = rawLine.trim()
-      if (!line) continue
-      if (line.startsWith('#')) continue
-      const eq = line.indexOf('=')
-      if (eq <= 0) continue
-      const key = line.slice(0, eq).trim()
-      const value = line.slice(eq + 1).trim()
-      if (!key) continue
-      out[key] = value
-    }
-    return out
-  }, [])
-
-  const formatEnvText = useCallback((env: Record<string, string> | undefined | null): string => {
-    if (!env) return ''
-    return Object.entries(env)
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n')
-  }, [])
-
-  const updateMcpServer = useCallback(
-    (idx: number, patch: Partial<McpServerConfig>) => {
-      const next = mcpServers.map((s, i) => (i === idx ? { ...s, ...patch } : s))
-      void updateMcpSettings({ servers: next })
-    },
-    [mcpServers, updateMcpSettings],
-  )
-
-  const removeMcpServer = useCallback(
-    (idx: number) => {
-      const next = mcpServers.filter((_, i) => i !== idx)
-      void updateMcpSettings({ servers: next })
-    },
-    [mcpServers, updateMcpSettings],
-  )
-
-  const addMcpServer = useCallback(() => {
-    const used = new Set(mcpServers.map((s) => (s?.id ?? '').trim()).filter(Boolean))
-    let id = 'server'
-    if (used.has(id)) {
-      for (let i = 2; i < 9999; i += 1) {
-        const candidate = `server-${i}`
-        if (!used.has(candidate)) {
-          id = candidate
-          break
-        }
-      }
-    }
-
-    const next: McpServerConfig = {
-      id,
-      enabled: true,
-      label: '',
-      transport: 'stdio',
-      command: '',
-      args: [],
-      cwd: '',
-      env: {},
-    }
-    void updateMcpSettings({ servers: [...mcpServers, next] })
-  }, [mcpServers, updateMcpSettings])
-
-  const [mcpImportText, setMcpImportText] = useState('')
-  const [mcpImportError, setMcpImportError] = useState<string | null>(null)
-
-  const buildMcpExportText = useCallback((servers: McpServerConfig[]) => {
-    const mcpServers: Record<
-      string,
-      { command: string; args: string[]; cwd?: string; env?: Record<string, string> }
-    > = {}
-
-    for (const s of servers) {
-      const id = (s?.id ?? '').trim()
-      if (!id) continue
-      mcpServers[id] = {
-        command: s.command ?? '',
-        args: Array.isArray(s.args) ? s.args : [],
-        cwd: s.cwd || undefined,
-        env: s.env && Object.keys(s.env).length ? s.env : undefined,
-      }
-    }
-
-    return JSON.stringify({ mcpServers }, null, 2)
-  }, [])
-
-  const parseMcpImport = useCallback((text: string): { servers: McpServerConfig[] } => {
-    const raw = (text ?? '').trim()
-    if (!raw) throw new Error('请输入 JSON')
-
-    const obj = JSON.parse(raw) as unknown
-
-    const acceptObjectServers = (value: unknown): McpServerConfig[] => {
-      const serversObj = typeof value === 'object' && value && !Array.isArray(value) ? (value as Record<string, unknown>) : null
-      if (!serversObj) return []
-
-      const out: McpServerConfig[] = []
-      for (const [idRaw, cfgRaw] of Object.entries(serversObj)) {
-        const id = String(idRaw ?? '').trim()
-        if (!id) continue
-        const cfg = typeof cfgRaw === 'object' && cfgRaw && !Array.isArray(cfgRaw) ? (cfgRaw as Record<string, unknown>) : null
-        if (!cfg) continue
-
-        const command = typeof cfg.command === 'string' ? cfg.command : ''
-        const args = Array.isArray(cfg.args) ? cfg.args.filter((x) => typeof x === 'string') : []
-        const cwd = typeof cfg.cwd === 'string' ? cfg.cwd : ''
-        const env =
-          typeof cfg.env === 'object' && cfg.env && !Array.isArray(cfg.env)
-            ? Object.fromEntries(Object.entries(cfg.env).filter(([, v]) => typeof v === 'string')) as Record<string, string>
-            : {}
-
-        out.push({
-          id,
-          enabled: cfg.enabled === false ? false : true,
-          label: typeof cfg.label === 'string' ? cfg.label : id,
-          transport: 'stdio',
-          command,
-          args,
-          cwd,
-          env,
-        })
-      }
-      return out
-    }
-
-    const acceptArrayServers = (value: unknown): McpServerConfig[] => {
-      if (!Array.isArray(value)) return []
-      const out: McpServerConfig[] = []
-      for (const it of value) {
-        const cfg = typeof it === 'object' && it && !Array.isArray(it) ? (it as Record<string, unknown>) : null
-        if (!cfg) continue
-        const id = typeof cfg.id === 'string' ? cfg.id.trim() : ''
-        if (!id) continue
-        const command = typeof cfg.command === 'string' ? cfg.command : ''
-        const args = Array.isArray(cfg.args) ? cfg.args.filter((x) => typeof x === 'string') : []
-        const cwd = typeof cfg.cwd === 'string' ? cfg.cwd : ''
-        const env =
-          typeof cfg.env === 'object' && cfg.env && !Array.isArray(cfg.env)
-            ? Object.fromEntries(Object.entries(cfg.env).filter(([, v]) => typeof v === 'string')) as Record<string, string>
-            : {}
-
-        out.push({
-          id,
-          enabled: cfg.enabled === false ? false : true,
-          label: typeof cfg.label === 'string' ? cfg.label : id,
-          transport: 'stdio',
-          command,
-          args,
-          cwd,
-          env,
-        })
-      }
-      return out
-    }
-
-    // 支持两种格式：
-    // 1) { "mcpServers": { "id": { command,args,cwd,env } } }
-    // 2) { "servers": [ {id,enabled,label,transport,command,args,cwd,env} ] } / 直接 array
-    const fromObject = acceptObjectServers((obj as { mcpServers?: unknown }).mcpServers)
-    const fromServersArray = acceptArrayServers((obj as { servers?: unknown }).servers)
-    const fromDirectArray = acceptArrayServers(obj)
-
-    const servers = fromObject.length ? fromObject : fromServersArray.length ? fromServersArray : fromDirectArray
-
-    if (!servers.length) throw new Error('未解析到任何 MCP Server（支持 {mcpServers:{...}} 或 {servers:[...]}）')
-    return { servers }
-  }, [])
-
-  const onMcpImportReplace = useCallback(() => {
-    try {
-      const parsed = parseMcpImport(mcpImportText)
-      setMcpImportError(null)
-      void updateMcpSettings({ servers: parsed.servers })
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setMcpImportError(msg)
-    }
-  }, [mcpImportText, parseMcpImport, updateMcpSettings])
-
-  const onMcpImportMerge = useCallback(() => {
-    try {
-      const parsed = parseMcpImport(mcpImportText)
-      const map = new Map(mcpServers.map((s) => [String(s.id), s] as const))
-      for (const s of parsed.servers) map.set(String(s.id), s)
-      const next = Array.from(map.values())
-      setMcpImportError(null)
-      void updateMcpSettings({ servers: next })
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setMcpImportError(msg)
-    }
-  }, [mcpImportText, mcpServers, parseMcpImport, updateMcpSettings])
-
-  const onMcpExportToTextarea = useCallback(() => {
-    setMcpImportError(null)
-    setMcpImportText(buildMcpExportText(mcpServers))
-  }, [buildMcpExportText, mcpServers])
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>工具中心</h3>
-
-      <div className="ndp-setting-item">
-        <label>工具总开关</label>
-        <div className="ndp-row">
-          <input
-            type="checkbox"
-            checked={effectiveToolSettings.enabled}
-            onChange={(e) => onToggleGlobal(e.currentTarget.checked)}
-            disabled={!api}
-          />
-          <div className="ndp-setting-hint">关闭后：Planner/Agent/执行器都不会使用任何工具</div>
-        </div>
-      </div>
-
-      <div className="ndp-toolcenter-subtabs">
-        <button className={`ndp-btn ${subTab === 'builtin' ? 'active' : ''}`} onClick={() => setSubTab('builtin')}>
-          内置工具
-        </button>
-        <button className={`ndp-btn ${subTab === 'mcp' ? 'active' : ''}`} onClick={() => setSubTab('mcp')}>
-          MCP
-        </button>
-      </div>
-
-      {subTab === 'builtin' ? (
-        <>
-          <div className="ndp-setting-item">
-            <label>搜索</label>
-            <div className="ndp-row">
-              <input
-                className="ndp-input"
-                value={query}
-                onChange={(e) => setQuery(e.currentTarget.value)}
-                placeholder="按名称/描述/tags 搜索…"
-              />
-              <div className="ndp-setting-hint">
-                启用：{enabledCount}/{totalCount}
-              </div>
-            </div>
-          </div>
-
-          <div className="ndp-toolcenter-list">
-            {groups.map(([groupId, defs]) => {
-              const groupOverride = (effectiveToolSettings.groups ?? {})[groupId]
-              const groupEffective = effectiveToolSettings.enabled && (typeof groupOverride === 'boolean' ? groupOverride : true)
-              const groupEnabledCount = defs.filter((d) => isToolEnabled(d.name, effectiveToolSettings)).length
-
-              return (
-                <details key={groupId} className="ndp-toolcenter-group" open={normalizedQuery ? true : undefined}>
-                  <summary className="ndp-toolcenter-group-summary">
-                    <div className="ndp-toolcenter-group-left">
-                      <span className="ndp-toolcenter-group-name">{groupId}</span>
-                      <span className="ndp-setting-hint">
-                        {groupEnabledCount}/{defs.length}
-                      </span>
-                    </div>
-
-                    <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
-                      <label className="ndp-toolcenter-toggle" title="分组开关（可覆盖总开关以外的默认）">
-                        <input
-                          type="checkbox"
-                          checked={groupEffective}
-                          onChange={(e) => onToggleGroup(groupId, e.currentTarget.checked)}
-                          disabled={!api || !effectiveToolSettings.enabled}
-                        />
-                        <span>启用</span>
-                      </label>
-                      {typeof groupOverride === 'boolean' ? (
-                        <button className="ndp-btn ndp-btn-mini" onClick={() => onResetGroup(groupId)} disabled={!api}>
-                          重置
-                        </button>
-                      ) : null}
-                    </div>
-                  </summary>
-
-                  <div className="ndp-toolcenter-group-body">
-                    {defs
-                      .slice()
-                      .sort((a, b) => a.name.localeCompare(b.name))
-                      .map((d) => {
-                        const toolOverride = (effectiveToolSettings.tools ?? {})[d.name]
-                        const toolEnabled = isToolEnabled(d.name, effectiveToolSettings)
-                        const last = latestRunByTool.get(d.name) ?? null
-
-                        return (
-                          <details key={d.name} className={`ndp-toolcenter-tool ${toolEnabled ? '' : 'ndp-toolcenter-tool-disabled'}`}>
-                            <summary className="ndp-toolcenter-tool-summary">
-                              <div className="ndp-toolcenter-tool-left">
-                                <span className="ndp-toolcenter-tool-name">{d.name}</span>
-                                <span className="ndp-setting-hint">{d.risk}/{d.cost}</span>
-                                {last ? (
-                                  <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${last.status}`}>
-                                    {last.status}
-                                  </span>
-                                ) : (
-                                  <span className="ndp-setting-hint">未调用</span>
-                                )}
-                              </div>
-
-                              <div className="ndp-toolcenter-tool-actions" onClick={(e) => e.stopPropagation()}>
-                                <label className="ndp-toolcenter-toggle">
-                                  <input
-                                    type="checkbox"
-                                    checked={toolEnabled}
-                                    onChange={(e) => onToggleTool(d.name, e.currentTarget.checked)}
-                                    disabled={!api || !effectiveToolSettings.enabled}
-                                  />
-                                  <span>启用</span>
-                                </label>
-                                {typeof toolOverride === 'boolean' ? (
-                                  <button className="ndp-btn ndp-btn-mini" onClick={() => onResetTool(d.name)} disabled={!api}>
-                                    重置
-                                  </button>
-                                ) : null}
-                              </div>
-                            </summary>
-
-                            <div className="ndp-toolcenter-tool-body">
-                              <div className="ndp-toolcenter-desc">{d.description}</div>
-                              {Array.isArray(d.tags) && d.tags.length ? (
-                                <div className="ndp-setting-hint">tags: {d.tags.join(', ')}</div>
-                              ) : null}
-
-                              <div className="ndp-toolcenter-meta">
-                                <div className="ndp-setting-hint">callName: {d.callName}</div>
-                                <div className="ndp-setting-hint">version: {d.version}</div>
-                              </div>
-
-                              {last ? (
-                                <div className="ndp-toolcenter-last">
-                                  <div className="ndp-setting-hint">
-                                    最近一次：{new Date(last.startedAt).toLocaleString()}（任务：{last.taskTitle}）
-                                  </div>
-                                  {last.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {last.error}</div> : null}
-                                </div>
-                              ) : null}
-
-                              <details className="ndp-toolcenter-sub">
-                                <summary className="ndp-toolcenter-sub-summary">inputSchema</summary>
-                                <pre className="ndp-toolcenter-pre">{JSON.stringify(d.inputSchema ?? {}, null, 2)}</pre>
-                              </details>
-
-                              <details className="ndp-toolcenter-sub">
-                                <summary className="ndp-toolcenter-sub-summary">examples</summary>
-                                <div className="ndp-toolcenter-examples">
-                                  {(Array.isArray(d.examples) ? d.examples : []).map((ex, idx) => (
-                                    <div key={`${d.name}-ex-${idx}`} className="ndp-toolcenter-example">
-                                      <div className="ndp-toolcenter-example-title">{ex.title}</div>
-                                      <pre className="ndp-toolcenter-pre">{JSON.stringify(ex.input ?? {}, null, 2)}</pre>
-                                    </div>
-                                  ))}
-                                  {!d.examples?.length ? <div className="ndp-setting-hint">无</div> : null}
-                                </div>
-                              </details>
-                            </div>
-                          </details>
-                        )
-                      })}
-                  </div>
-                </details>
-              )
-            })}
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="ndp-setting-item">
-            <label>MCP 总开关</label>
-            <div className="ndp-row">
-              <input
-                type="checkbox"
-                checked={mcpEnabled}
-                onChange={(e) => void updateMcpSettings({ enabled: e.currentTarget.checked })}
-                disabled={!api}
-              />
-              <div className="ndp-setting-hint">
-                开启后：连接成功的 MCP Server 会把工具暴露到 Agent（仍受“工具总开关/分组/单工具”影响）
-              </div>
-            </div>
-          </div>
-
-          <details className="ndp-toolcenter-group" open={false}>
-            <summary className="ndp-toolcenter-group-summary">
-              <div className="ndp-toolcenter-group-left">
-                <span className="ndp-toolcenter-group-name">一键导入/导出（JSON）</span>
-                <span className="ndp-setting-hint">兼容 {`{ "mcpServers": { ... } }`}</span>
-              </div>
-              <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
-                <button className="ndp-btn ndp-btn-mini" onClick={onMcpExportToTextarea} disabled={!api}>
-                  导出到文本框
-                </button>
-              </div>
-            </summary>
-
-            <div className="ndp-toolcenter-group-body">
-              <textarea
-                className="ndp-input ndp-textarea"
-                value={mcpImportText}
-                onChange={(e) => setMcpImportText(e.currentTarget.value)}
-                placeholder={`{
-  "mcpServers": {
-    "exa": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "exa-mcp-server@latest"],
-      "env": { "EXA_API_KEY": "..." }
-    }
-  }
-}`}
-              />
-              {mcpImportError ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {mcpImportError}</div> : null}
-              <div className="ndp-row">
-                <button className="ndp-btn" onClick={onMcpImportReplace} disabled={!api}>
-                  覆盖导入
-                </button>
-                <button className="ndp-btn" onClick={onMcpImportMerge} disabled={!api}>
-                  合并导入（按 id 更新/新增）
-                </button>
-                <div className="ndp-setting-hint">导入后会触发自动重连；server id 会在保存时自动规范化并去重。</div>
-              </div>
-            </div>
-          </details>
-
-          <div className="ndp-setting-item">
-            <div className="ndp-row" style={{ justifyContent: 'space-between' }}>
-              <div>
-                <div style={{ fontWeight: 600 }}>MCP Servers</div>
-                <div className="ndp-setting-hint">仅支持 stdio；修改 command/args/cwd/env 后会自动重连。</div>
-              </div>
-              <button className="ndp-btn" onClick={addMcpServer} disabled={!api}>
-                + 添加
-              </button>
-            </div>
-          </div>
-
-          <div className="ndp-toolcenter-list">
-            {mcpServers.length ? null : <div className="ndp-setting-hint">暂无 MCP Server，点击“+ 添加”创建一个。</div>}
-
-            {mcpServers.map((cfg, idx) => {
-              const cfgId = (cfg?.id ?? '').trim() || `server-${idx + 1}`
-              const state = mcpStateById.get(cfgId) ?? null
-              const status = state?.status ?? 'disconnected'
-              const tools = Array.isArray(state?.tools) ? state!.tools : []
-              const enabledToolCount = tools.filter((t) => isToolEnabled(t.toolName, effectiveToolSettings)).length
-              const groupId = `mcp.${cfgId}`
-              const groupOverride = (effectiveToolSettings.groups ?? {})[groupId]
-              const groupEffective = effectiveToolSettings.enabled && (typeof groupOverride === 'boolean' ? groupOverride : true)
-
-              return (
-                <details key={`${cfgId}-${idx}`} className="ndp-toolcenter-group">
-                  <summary className="ndp-toolcenter-group-summary">
-                    <div className="ndp-toolcenter-group-left">
-                      <span className="ndp-toolcenter-group-name">{cfg.label?.trim() || cfgId}</span>
-                      <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${status}`}>{status}</span>
-                      <span className="ndp-setting-hint">
-                        工具：{enabledToolCount}/{tools.length}
-                      </span>
-                    </div>
-
-                    <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
-                      <label className="ndp-toolcenter-toggle" title="MCP Server 开关（关闭会断开连接并隐藏工具）">
-                        <input
-                          type="checkbox"
-                          checked={cfg.enabled !== false}
-                          onChange={(e) => updateMcpServer(idx, { enabled: e.currentTarget.checked })}
-                          disabled={!api}
-                        />
-                        <span>启用</span>
-                      </label>
-                      <button className="ndp-btn ndp-btn-mini" onClick={() => removeMcpServer(idx)} disabled={!api}>
-                        删除
-                      </button>
-                    </div>
-                  </summary>
-
-                  <div className="ndp-toolcenter-group-body">
-                    <div className="ndp-setting-item">
-                      <label>Server ID（mcp.&lt;serverId&gt;.*）</label>
-                      <div className="ndp-row">
-                        <input
-                          className="ndp-input"
-                          defaultValue={cfgId}
-                          placeholder="例如：local-tools"
-                          onBlur={(e) => updateMcpServer(idx, { id: e.currentTarget.value.trim() || cfgId })}
-                          disabled={!api}
-                        />
-                        <div className="ndp-setting-hint">仅允许字母/数字/_/-；变更会自动规范化。</div>
-                      </div>
-                    </div>
-
-                    <div className="ndp-setting-item">
-                      <label>label（可选）</label>
-                      <div className="ndp-row">
-                        <input
-                          className="ndp-input"
-                          defaultValue={cfg.label ?? ''}
-                          placeholder="显示名称"
-                          onBlur={(e) => updateMcpServer(idx, { label: e.currentTarget.value })}
-                          disabled={!api}
-                        />
-                        <div className="ndp-setting-hint">用于工具中心显示，不影响 toolName。</div>
-                      </div>
-                    </div>
-
-                    <div className="ndp-setting-item">
-                      <label>command</label>
-                      <div className="ndp-row">
-                        <input
-                          className="ndp-input"
-                          defaultValue={cfg.command ?? ''}
-                          placeholder="例如：node"
-                          onBlur={(e) => updateMcpServer(idx, { command: e.currentTarget.value })}
-                          disabled={!api}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="ndp-setting-item">
-                      <label>args（每行一个）</label>
-                      <textarea
-                        className="ndp-input ndp-textarea"
-                        defaultValue={formatArgsText(cfg.args)}
-                        placeholder="例如：path/to/server.js"
-                        onBlur={(e) => updateMcpServer(idx, { args: parseArgsText(e.currentTarget.value) })}
-                        disabled={!api}
-                      />
-                    </div>
-
-                    <div className="ndp-setting-item">
-                      <label>cwd（可选）</label>
-                      <div className="ndp-row">
-                        <input
-                          className="ndp-input"
-                          defaultValue={cfg.cwd ?? ''}
-                          placeholder="工作目录（空=默认）"
-                          onBlur={(e) => updateMcpServer(idx, { cwd: e.currentTarget.value })}
-                          disabled={!api}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="ndp-setting-item">
-                      <label>env（KEY=VALUE，每行一个，可选）</label>
-                      <textarea
-                        className="ndp-input ndp-textarea"
-                        defaultValue={formatEnvText(cfg.env)}
-                        placeholder={'# 例如：\nOPENAI_API_KEY=xxxx\nHTTP_PROXY=http://127.0.0.1:7890'}
-                        onBlur={(e) => updateMcpServer(idx, { env: parseEnvText(e.currentTarget.value) })}
-                        disabled={!api}
-                      />
-                    </div>
-
-                    <div className="ndp-setting-item">
-                      <label>工具分组开关：{groupId}</label>
-                      <div className="ndp-row">
-                        <label className="ndp-toolcenter-toggle" title="分组开关（可覆盖总开关以外的默认）">
-                          <input
-                            type="checkbox"
-                            checked={groupEffective}
-                            onChange={(e) => onToggleGroup(groupId, e.currentTarget.checked)}
-                            disabled={!api || !effectiveToolSettings.enabled}
-                          />
-                          <span>启用</span>
-                        </label>
-                        {typeof groupOverride === 'boolean' ? (
-                          <button className="ndp-btn ndp-btn-mini" onClick={() => onResetGroup(groupId)} disabled={!api}>
-                            重置
-                          </button>
-                        ) : null}
-                        <div className="ndp-setting-hint">关闭分组会隐藏该 server 下所有工具。</div>
-                      </div>
-                    </div>
-
-                    {state?.lastError ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {state.lastError}</div> : null}
-
-                    {Array.isArray(state?.stderrTail) && state.stderrTail.length ? (
-                      <details className="ndp-toolcenter-sub">
-                        <summary className="ndp-toolcenter-sub-summary">stderr（最近 {state.stderrTail.length} 行）</summary>
-                        <pre className="ndp-toolcenter-pre">{state.stderrTail.join('\n')}</pre>
-                      </details>
-                    ) : null}
-
-                    <details className="ndp-toolcenter-sub" open={tools.length ? undefined : false}>
-                      <summary className="ndp-toolcenter-sub-summary">
-                        tools（{enabledToolCount}/{tools.length}）
-                      </summary>
-                      <div className="ndp-toolcenter-list">
-                        {tools
-                          .slice()
-                          .sort((a, b) => a.toolName.localeCompare(b.toolName))
-                          .map((t) => {
-                            const toolOverride = (effectiveToolSettings.tools ?? {})[t.toolName]
-                            const toolEnabled = isToolEnabled(t.toolName, effectiveToolSettings)
-
-                            return (
-                              <details
-                                key={t.toolName}
-                                className={`ndp-toolcenter-tool ${toolEnabled ? '' : 'ndp-toolcenter-tool-disabled'}`}
-                              >
-                                <summary className="ndp-toolcenter-tool-summary">
-                                  <div className="ndp-toolcenter-tool-left">
-                                    <span className="ndp-toolcenter-tool-name">{t.toolName}</span>
-                                    <span className="ndp-setting-hint">{t.callName}</span>
-                                  </div>
-                                  <div className="ndp-toolcenter-tool-actions" onClick={(e) => e.stopPropagation()}>
-                                    <label className="ndp-toolcenter-toggle">
-                                      <input
-                                        type="checkbox"
-                                        checked={toolEnabled}
-                                        onChange={(e) => onToggleTool(t.toolName, e.currentTarget.checked)}
-                                        disabled={!api || !effectiveToolSettings.enabled}
-                                      />
-                                      <span>启用</span>
-                                    </label>
-                                    {typeof toolOverride === 'boolean' ? (
-                                      <button className="ndp-btn ndp-btn-mini" onClick={() => onResetTool(t.toolName)} disabled={!api}>
-                                        重置
-                                      </button>
-                                    ) : null}
-                                  </div>
-                                </summary>
-
-                                <div className="ndp-toolcenter-tool-body">
-                                  {t.description ? <div className="ndp-toolcenter-desc">{t.description}</div> : null}
-                                  <div className="ndp-toolcenter-meta">
-                                    <div className="ndp-setting-hint">callName: {t.callName}</div>
-                                    <div className="ndp-setting-hint">name: {t.name}</div>
-                                  </div>
-
-                                  <details className="ndp-toolcenter-sub">
-                                    <summary className="ndp-toolcenter-sub-summary">inputSchema</summary>
-                                    <pre className="ndp-toolcenter-pre">{JSON.stringify(t.inputSchema ?? {}, null, 2)}</pre>
-                                  </details>
-                                  {t.outputSchema ? (
-                                    <details className="ndp-toolcenter-sub">
-                                      <summary className="ndp-toolcenter-sub-summary">outputSchema</summary>
-                                      <pre className="ndp-toolcenter-pre">{JSON.stringify(t.outputSchema ?? {}, null, 2)}</pre>
-                                    </details>
-                                  ) : null}
-                                </div>
-                              </details>
-                            )
-                          })}
-                      </div>
-                    </details>
-                  </div>
-                </details>
-              )
-            })}
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
-  const { api, settings } = props
-  const activePersonaId = settings?.activePersonaId ?? 'default'
-  const memoryEnabled = settings?.memory?.enabled ?? true
-  const includeSharedOnRetrieve = settings?.memory?.includeSharedOnRetrieve ?? true
-  const vectorDedupeThreshold = settings?.memory?.vectorDedupeThreshold ?? 0.9
-
-  const autoExtractEnabled = settings?.memory?.autoExtractEnabled ?? false
-  const autoExtractEveryEffectiveMessages = settings?.memory?.autoExtractEveryEffectiveMessages ?? 20
-  const autoExtractMaxEffectiveMessages = settings?.memory?.autoExtractMaxEffectiveMessages ?? 60
-  const autoExtractCooldownMs = settings?.memory?.autoExtractCooldownMs ?? 120000
-  const autoExtractUseCustomAi = settings?.memory?.autoExtractUseCustomAi ?? false
-  const autoExtractAiBaseUrl = settings?.memory?.autoExtractAiBaseUrl ?? ''
-  const autoExtractAiApiKey = settings?.memory?.autoExtractAiApiKey ?? ''
-  const autoExtractAiModel = settings?.memory?.autoExtractAiModel ?? ''
-  const autoExtractAiTemperature = settings?.memory?.autoExtractAiTemperature ?? 0.2
-  const autoExtractAiMaxTokens = settings?.memory?.autoExtractAiMaxTokens ?? 1600
-
-  const tagEnabled = settings?.memory?.tagEnabled ?? true
-  const tagMaxExpand = settings?.memory?.tagMaxExpand ?? 6
-
-  const vectorEnabled = settings?.memory?.vectorEnabled ?? false
-  const vectorEmbeddingModel = settings?.memory?.vectorEmbeddingModel ?? 'text-embedding-3-small'
-  const vectorMinScore = settings?.memory?.vectorMinScore ?? 0.35
-  const vectorTopK = settings?.memory?.vectorTopK ?? 20
-  const vectorScanLimit = settings?.memory?.vectorScanLimit ?? 2000
-  const vectorUseCustomAi = settings?.memory?.vectorUseCustomAi ?? false
-  const vectorAiBaseUrl = settings?.memory?.vectorAiBaseUrl ?? ''
-  const vectorAiApiKey = settings?.memory?.vectorAiApiKey ?? ''
-
-  const mmVectorEnabled = settings?.memory?.mmVectorEnabled ?? false
-  const mmVectorEmbeddingModel = settings?.memory?.mmVectorEmbeddingModel ?? 'qwen3-vl-embedding-8b'
-  const mmVectorUseCustomAi = settings?.memory?.mmVectorUseCustomAi ?? false
-  const mmVectorAiBaseUrl = settings?.memory?.mmVectorAiBaseUrl ?? ''
-  const mmVectorAiApiKey = settings?.memory?.mmVectorAiApiKey ?? ''
-
-  const kgEnabled = settings?.memory?.kgEnabled ?? false
-  const kgIncludeChatMessages = settings?.memory?.kgIncludeChatMessages ?? false
-  const kgUseCustomAi = settings?.memory?.kgUseCustomAi ?? true
-  const kgAiBaseUrl = settings?.memory?.kgAiBaseUrl ?? ''
-  const kgAiApiKey = settings?.memory?.kgAiApiKey ?? ''
-  const kgAiModel = settings?.memory?.kgAiModel ?? 'gpt-4o-mini'
-  const kgAiTemperature = settings?.memory?.kgAiTemperature ?? 0.2
-  const kgAiMaxTokens = settings?.memory?.kgAiMaxTokens ?? 1200
-
-  const [personas, setPersonas] = useState<PersonaSummary[]>([])
-  const [currentPersona, setCurrentPersona] = useState<Persona | null>(null)
-  const [draftName, setDraftName] = useState('')
-  const [draftPrompt, setDraftPrompt] = useState('')
-  const [subTab, setSubTab] = useState<'persona' | 'memory' | 'recall' | 'textVector' | 'mmVector' | 'manage'>('persona')
-  const [memScope, setMemScope] = useState<'persona' | 'shared' | 'all'>('persona')
-  const [memRole, setMemRole] = useState<'all' | 'user' | 'assistant' | 'note'>('all')
-  const [memQuery, setMemQuery] = useState('')
-  const [memItems, setMemItems] = useState<Array<{ rowid: number; createdAt: number; role: string | null; kind: string; scope: string; content: string }>>([])
-  const [memTotal, setMemTotal] = useState(0)
-  const [memOffset, setMemOffset] = useState(0)
-  const [memNewText, setMemNewText] = useState('')
-  const [memNewScope, setMemNewScope] = useState<'persona' | 'shared'>('persona')
-  const saveTimerRef = useRef<number | null>(null)
-
-  const refresh = useCallback(async () => {
-    if (!api) return
-    const list = await api.listPersonas()
-    setPersonas(list)
-  }, [api])
-
-  const refreshMemoryList = useCallback(async () => {
-    if (!api) return
-    const res = await api.listMemory({
-      personaId: activePersonaId,
-      scope: memScope,
-      role: memRole,
-      query: memQuery.trim() || undefined,
-      limit: 50,
-      offset: memOffset,
-    })
-    setMemTotal(res.total)
-    setMemItems(res.items)
-  }, [api, activePersonaId, memScope, memRole, memQuery, memOffset])
-
-  useEffect(() => {
-    if (!api) return
-    void refresh().catch((err) => console.error('[Persona] listPersonas failed:', err))
-  }, [api, refresh])
-
-  useEffect(() => {
-    void (async () => {
-      if (!api) return
-      const p = await api.getPersona(activePersonaId)
-      setCurrentPersona(p)
-      setDraftName(p?.name ?? '')
-      setDraftPrompt(p?.prompt ?? '')
-      setMemScope('persona')
-      setMemRole('all')
-      setMemQuery('')
-      setMemOffset(0)
-    })().catch((err) => console.error('[Persona] getPersona failed:', err))
-  }, [api, activePersonaId])
-
-  useEffect(() => {
-    if (!api) return
-    void refreshMemoryList().catch((err) => console.error('[Memory] list failed:', err))
-  }, [api, refreshMemoryList])
-
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
-    }
-  }, [])
-
-  const scheduleSavePrompt = useCallback(
-    (personaId: string, prompt: string) => {
-      if (!api) return
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = window.setTimeout(() => {
-        void api
-          .updatePersona(personaId, { prompt })
-          .then((p) => setCurrentPersona(p))
-          .catch((err) => console.error('[Persona] updatePersona failed:', err))
-      }, 450)
-    },
-    [api],
-  )
-
-  const scheduleSavePersonaFlags = useCallback(
-    (personaId: string, patch: { captureEnabled?: boolean; captureUser?: boolean; captureAssistant?: boolean; retrieveEnabled?: boolean }) => {
-      if (!api) return
-      void api
-        .updatePersona(personaId, patch)
-        .then((p) => setCurrentPersona(p))
-        .catch((err) => console.error('[Persona] updatePersona flags failed:', err))
-    },
-    [api],
-  )
-
-  const onChangePersona = useCallback(
-    async (personaId: string) => {
-      if (!api) return
-      await api.setActivePersonaId(personaId)
-    },
-    [api],
-  )
-
-  const onToggleGlobalMemory = useCallback(
-    async (enabled: boolean) => {
-      if (!api) return
-      await api.setMemorySettings({ enabled })
-    },
-    [api],
-  )
-
-  const onToggleIncludeShared = useCallback(
-    async (enabled: boolean) => {
-      if (!api) return
-      await api.setMemorySettings({ includeSharedOnRetrieve: enabled })
-    },
-    [api],
-  )
-
-  const onSetAutoExtractSettings = useCallback(
-    async (patch: Partial<AppSettings['memory']>) => {
-      if (!api) return
-      await api.setMemorySettings(patch)
-    },
-    [api],
-  )
-
-  const onCreatePersona = useCallback(async () => {
-    if (!api) return
-    const created = await api.createPersona('新角色')
-    await refresh()
-    await api.setActivePersonaId(created.id)
-  }, [api, refresh])
-
-  const onRenamePersona = useCallback(async () => {
-    if (!api) return
-    if (!currentPersona) return
-    const nextName = draftName.trim()
-    if (!nextName) return
-    await api.updatePersona(currentPersona.id, { name: nextName })
-    await refresh()
-  }, [api, currentPersona, draftName, refresh])
-
-  const onDeletePersona = useCallback(async () => {
-    if (!api) return
-    if (!currentPersona) return
-    if (currentPersona.id === 'default') return
-    const ok = window.confirm(`确定删除角色「${currentPersona.name}」？\n该操作会删除人设配置；聊天会话仍会保留在本地。`)
-    if (!ok) return
-    await api.deletePersona(currentPersona.id)
-    await refresh()
-    await api.setActivePersonaId('default')
-  }, [api, currentPersona, refresh])
-
-  const onAddManualMemory = useCallback(async () => {
-    if (!api) return
-    const content = memNewText.trim()
-    if (!content) return
-    await api.upsertManualMemory({ personaId: activePersonaId, scope: memNewScope, content })
-    setMemNewText('')
-    setMemOffset(0)
-    await refreshMemoryList()
-  }, [api, activePersonaId, memNewScope, memNewText, refreshMemoryList])
-
-  const onDeleteMemory = useCallback(
-    async (rowid: number) => {
-      if (!api) return
-      const ok = window.confirm('确定删除这条记忆？')
-      if (!ok) return
-      await api.deleteMemory({ rowid })
-      await refreshMemoryList()
-    },
-    [api, refreshMemoryList],
-  )
-
-  if (!api) {
-    return (
-      <div className="ndp-settings-section">
-        <h3>角色</h3>
-        <p className="ndp-setting-hint">API 未就绪，请稍后再试。</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="ndp-settings-section">
-      <div className="ndp-settings-subtabs">
-        <button className={`ndp-tab-btn ${subTab === 'persona' ? 'active' : ''}`} onClick={() => setSubTab('persona')}>
-          角色
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'memory' ? 'active' : ''}`} onClick={() => setSubTab('memory')}>
-          记忆
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'recall' ? 'active' : ''}`} onClick={() => setSubTab('recall')}>
-          召回
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'textVector' ? 'active' : ''}`} onClick={() => setSubTab('textVector')}>
-          文本向量
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'mmVector' ? 'active' : ''}`} onClick={() => setSubTab('mmVector')}>
-          多模态向量
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'manage' ? 'active' : ''}`} onClick={() => setSubTab('manage')}>
-          管理
-        </button>
-      </div>
-
-      {subTab === 'persona' ? (
-        <>
-          <h3>角色</h3>
-
-          <div className="ndp-setting-item">
-            <label>当前角色</label>
-            <div className="ndp-row">
-              <select className="ndp-select" value={activePersonaId} onChange={(e) => void onChangePersona(e.target.value)}>
-                {personas.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <button className="ndp-btn" onClick={() => void onCreatePersona()}>
-                新建
-              </button>
-              <button className="ndp-btn" disabled={!currentPersona || currentPersona.id === 'default'} onClick={() => void onDeletePersona()}>
-                删除
-              </button>
-            </div>
-            <p className="ndp-setting-hint">每个角色的长期记忆与会话列表隔离；公共事实层后续再加。</p>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>角色名称</label>
-            <div className="ndp-row">
-              <input className="ndp-input" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
-              <button className="ndp-btn" disabled={!currentPersona} onClick={() => void onRenamePersona()}>
-                保存
-              </button>
-            </div>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>人设补充提示词</label>
-            <textarea
-              className="ndp-textarea"
-              rows={10}
-              value={draftPrompt}
-              placeholder="写下这个角色的口癖、价值观、禁忌、关系设定等（会追加到全局 systemPrompt 后）"
-              onChange={(e) => {
-                const next = e.target.value
-                setDraftPrompt(next)
-                if (currentPersona) scheduleSavePrompt(currentPersona.id, next)
-              }}
-            />
-            <p className="ndp-setting-hint">建议只写“稳定约束”。对话原文会自动写入长期记忆库用于召回。</p>
-          </div>
-        </>
-      ) : null}
-
-      {subTab === 'memory' ? <h3>记忆开关</h3> : null}
-
-      {subTab === 'memory' ? (
-        <>
-          <div className="ndp-setting-item">
-            <label className="ndp-checkbox-label">
-              <input type="checkbox" checked={memoryEnabled} onChange={(e) => void onToggleGlobalMemory(e.target.checked)} />
-              <span>启用长期记忆（全局）</span>
-            </label>
-            <p className="ndp-setting-hint">关闭后不会再记录新内容，也不会将记忆注入到提示词。</p>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label className="ndp-checkbox-label">
-              <input
-                type="checkbox"
-                checked={includeSharedOnRetrieve}
-                onChange={(e) => void onToggleIncludeShared(e.target.checked)}
-              />
-              <span>检索时包含共享记忆（默认）</span>
-            </label>
-          </div>
-        </>
-      ) : null}
-
-      {subTab === 'textVector' ? (
-        <>
-          <h3>向量去重</h3>
-
-          <div className="ndp-setting-item">
-            <label>向量去重阈值（越高越保守）</label>
-            <input
-              className="ndp-input"
-              type="number"
-              min={0.1}
-              max={0.99}
-              step={0.01}
-              value={vectorDedupeThreshold}
-              onChange={(e) => void onSetAutoExtractSettings({ vectorDedupeThreshold: Number(e.target.value) })}
-            />
-            <p className="ndp-setting-hint">每次写入记忆时：先用 embeddings 做相似度匹配，命中相似条目就立即合并，不新增重复记录。</p>
-          </div>
-        </>
-      ) : null}
-
-      {subTab === 'recall' ? (
-        <>
-          <h3>召回增强（M5）</h3>
-
-          <div className="ndp-setting-item">
-            <label className="ndp-checkbox-label">
-              <input
-                type="checkbox"
-                checked={tagEnabled}
-                onChange={(e) => void onSetAutoExtractSettings({ tagEnabled: e.target.checked })}
-              />
-              <span>启用 Tag 网络（模糊问法扩展，本地低延迟）</span>
-            </label>
-            <p className="ndp-setting-hint">把重点词拆成轻量 Tag，用于模糊问法的扩展与召回。</p>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>Tag 扩展数（0=不扩展）</label>
-            <input
-              className="ndp-input"
-              type="number"
-              min={0}
-              max={40}
-              value={tagMaxExpand}
-              onChange={(e) => void onSetAutoExtractSettings({ tagMaxExpand: Number(e.target.value) })}
-            />
-          </div>
-        </>
-      ) : null}
-
-      {subTab === 'textVector' ? (
-        <>
-          <h3>文本向量召回（M5）</h3>
-
-          <div className="ndp-setting-item">
-            <label className="ndp-checkbox-label">
-              <input
-                type="checkbox"
-                checked={vectorEnabled}
-                onChange={(e) => void onSetAutoExtractSettings({ vectorEnabled: e.target.checked })}
-              />
-              <span>启用向量召回（更强，需 embeddings API）</span>
-            </label>
-            <p className="ndp-setting-hint">启用后会在后台逐步补齐你的记忆嵌入，不会阻塞聊天。</p>
-          </div>
-
-      <div className="ndp-setting-item">
-        <label>embeddings 模型</label>
-        <input
-          className="ndp-input"
-          value={vectorEmbeddingModel}
-          placeholder="例如：text-embedding-3-small"
-          onChange={(e) => void onSetAutoExtractSettings({ vectorEmbeddingModel: e.target.value })}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>向量最低相似度（0~1）</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={0}
-          max={1}
-          step={0.05}
-          value={vectorMinScore}
-          onChange={(e) => void onSetAutoExtractSettings({ vectorMinScore: Number(e.target.value) })}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>向量 TopK</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={1}
-          max={100}
-          value={vectorTopK}
-          onChange={(e) => void onSetAutoExtractSettings({ vectorTopK: Number(e.target.value) })}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>向量扫描上限（降低延迟）</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={200}
-          max={200000}
-          value={vectorScanLimit}
-          onChange={(e) => void onSetAutoExtractSettings({ vectorScanLimit: Number(e.target.value) })}
-        />
-        <p className="ndp-setting-hint">数值越大→召回上限更高，但也会更慢。建议先从 2000 开始。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={vectorUseCustomAi}
-            onChange={(e) => void onSetAutoExtractSettings({ vectorUseCustomAi: e.target.checked })}
-          />
-          <span>向量使用单独 API Key/BaseUrl</span>
-        </label>
-        {!vectorUseCustomAi ? <p className="ndp-setting-hint">当前将使用聊天的 API Key/BaseUrl。</p> : null}
-      </div>
-
-      {vectorUseCustomAi ? (
-        <>
-          <div className="ndp-setting-item">
-            <label>embeddings BaseUrl</label>
-            <input
-              className="ndp-input"
-              value={vectorAiBaseUrl}
-              placeholder="例如：https://api.openai.com/v1"
-              onChange={(e) => void onSetAutoExtractSettings({ vectorAiBaseUrl: e.target.value })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>embeddings API Key</label>
-            <input
-              className="ndp-input"
-              type="password"
-              value={vectorAiApiKey}
-              placeholder="sk-..."
-              onChange={(e) => void onSetAutoExtractSettings({ vectorAiApiKey: e.target.value })}
-            />
-          </div>
-        </>
-      ) : null}
-        </>
-      ) : null}
-
-      {subTab === 'mmVector' ? (
-        <>
-          <h3>多模态向量（按需）</h3>
-
-          <div className="ndp-setting-item">
-            <label className="ndp-checkbox-label">
-              <input
-                type="checkbox"
-                checked={mmVectorEnabled}
-                onChange={(e) => void onSetAutoExtractSettings({ mmVectorEnabled: e.target.checked })}
-              />
-              <span>启用多模态向量（图片/视频）</span>
-            </label>
-            <p className="ndp-setting-hint">建议按需手动开启：服务成本高，不常开时保持关闭即可。</p>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>多模态 embeddings 模型</label>
-            <input
-              className="ndp-input"
-              value={mmVectorEmbeddingModel}
-              placeholder="例如：qwen3-vl-embedding-8b"
-              onChange={(e) => void onSetAutoExtractSettings({ mmVectorEmbeddingModel: e.target.value })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label className="ndp-checkbox-label">
-              <input
-                type="checkbox"
-                checked={mmVectorUseCustomAi}
-                onChange={(e) => void onSetAutoExtractSettings({ mmVectorUseCustomAi: e.target.checked })}
-              />
-              <span>多模态向量使用单独 API Key/BaseUrl</span>
-            </label>
-            {!mmVectorUseCustomAi ? <p className="ndp-setting-hint">当前将使用聊天的 API Key/BaseUrl。</p> : null}
-          </div>
-
-          {mmVectorUseCustomAi ? (
-            <>
-              <div className="ndp-setting-item">
-                <label>多模态 embeddings BaseUrl</label>
-                <input
-                  className="ndp-input"
-                  value={mmVectorAiBaseUrl}
-                  placeholder="例如：http://127.0.0.1:8000/v1"
-                  onChange={(e) => void onSetAutoExtractSettings({ mmVectorAiBaseUrl: e.target.value })}
-                />
-              </div>
-
-              <div className="ndp-setting-item">
-                <label>多模态 embeddings API Key</label>
-                <input
-                  className="ndp-input"
-                  type="password"
-                  value={mmVectorAiApiKey}
-                  placeholder="留空则不发送 Authorization"
-                  onChange={(e) => void onSetAutoExtractSettings({ mmVectorAiApiKey: e.target.value })}
-                />
-              </div>
-            </>
-          ) : null}
-        </>
-      ) : null}
-
-      {subTab === 'recall' ? <h3>图谱层（M6，可选）</h3> : null}
-
-      {subTab === 'recall' ? (
-        <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={kgEnabled} onChange={(e) => void onSetAutoExtractSettings({ kgEnabled: e.target.checked })} />
-          <span>启用 KG（实体/关系）召回</span>
-        </label>
-        <p className="ndp-setting-hint">开启后会在后台用 LLM 抽取实体/关系，并在召回时用“图谱证据”补命中（仍以低延迟为优先）。</p>
-        </div>
-      ) : null}
-
-      {subTab === 'recall' ? (
-        <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={kgIncludeChatMessages}
-            onChange={(e) => void onSetAutoExtractSettings({ kgIncludeChatMessages: e.target.checked })}
-            disabled={!kgEnabled}
-          />
-          <span>抽取 chat_message（更全但更噪）</span>
-        </label>
-        </div>
-      ) : null}
-
-      {subTab === 'recall' ? (
-        <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={kgUseCustomAi}
-            onChange={(e) => void onSetAutoExtractSettings({ kgUseCustomAi: e.target.checked })}
-            disabled={!kgEnabled}
-          />
-          <span>KG 抽取使用单独 API</span>
-        </label>
-        </div>
-      ) : null}
-
-      {subTab === 'recall' && kgEnabled && kgUseCustomAi ? (
-        <>
-          <div className="ndp-setting-item">
-            <label>KG BaseUrl</label>
-            <input
-              className="ndp-input"
-              value={kgAiBaseUrl}
-              placeholder="例如：https://api.openai.com/v1"
-              onChange={(e) => void onSetAutoExtractSettings({ kgAiBaseUrl: e.target.value })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>KG API Key</label>
-            <input
-              className="ndp-input"
-              type="password"
-              value={kgAiApiKey}
-              placeholder="sk-..."
-              onChange={(e) => void onSetAutoExtractSettings({ kgAiApiKey: e.target.value })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>KG 模型</label>
-            <input
-              className="ndp-input"
-              value={kgAiModel}
-              placeholder="例如：gpt-4o-mini"
-              onChange={(e) => void onSetAutoExtractSettings({ kgAiModel: e.target.value })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>KG Temperature</label>
-            <input
-              className="ndp-input"
-              type="number"
-              min={0}
-              max={2}
-              step={0.05}
-              value={kgAiTemperature}
-              onChange={(e) => void onSetAutoExtractSettings({ kgAiTemperature: Number(e.target.value) })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>KG MaxTokens</label>
-            <input
-              className="ndp-input"
-              type="number"
-              min={200}
-              max={8000}
-              value={kgAiMaxTokens}
-              onChange={(e) => void onSetAutoExtractSettings({ kgAiMaxTokens: Number(e.target.value) })}
-            />
-          </div>
-        </>
-      ) : null}
-
-      {subTab === 'memory' ? (
-        <>
-          <h3>自动提炼</h3>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={autoExtractEnabled}
-            onChange={(e) => void onSetAutoExtractSettings({ autoExtractEnabled: e.target.checked })}
-          />
-          <span>对话超过阈值自动提炼（写入长期记忆）</span>
-        </label>
-        <p className="ndp-setting-hint">
-          计数采用“有效消息”：会把连续的助手分句（例如 TTS 分句产生的多条助手消息）合并为 1 条来计算，避免过于频繁提炼。
-        </p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>每新增多少条有效消息触发一次</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={2}
-          max={2000}
-          value={autoExtractEveryEffectiveMessages}
-          onChange={(e) => void onSetAutoExtractSettings({ autoExtractEveryEffectiveMessages: Number(e.target.value) })}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>提炼窗口：最多取最近多少条有效消息</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={10}
-          max={2000}
-          value={autoExtractMaxEffectiveMessages}
-          onChange={(e) => void onSetAutoExtractSettings({ autoExtractMaxEffectiveMessages: Number(e.target.value) })}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>自动提炼最小间隔（秒）</label>
-        <input
-          className="ndp-input"
-          type="number"
-          min={0}
-          max={3600}
-          value={Math.round(autoExtractCooldownMs / 1000)}
-          onChange={(e) => void onSetAutoExtractSettings({ autoExtractCooldownMs: Number(e.target.value) * 1000 })}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={autoExtractUseCustomAi}
-            onChange={(e) => void onSetAutoExtractSettings({ autoExtractUseCustomAi: e.target.checked })}
-          />
-          <span>自动提炼使用单独的 LLM 配置（不影响聊天主模型）</span>
-        </label>
-      </div>
-
-      {autoExtractUseCustomAi && (
-        <div className="ndp-setting-item">
-          <label>自动提炼 LLM 配置</label>
-          <div className="ndp-setting-hint">留空表示继承聊天主模型对应字段。</div>
-          <div className="ndp-setting-item">
-            <label>Base URL</label>
-            <input
-              className="ndp-input"
-              placeholder="例如：https://api.openai.com/v1"
-              value={autoExtractAiBaseUrl}
-              onChange={(e) => void onSetAutoExtractSettings({ autoExtractAiBaseUrl: e.target.value })}
-            />
-          </div>
-          <div className="ndp-setting-item">
-            <label>API Key</label>
-            <input
-              className="ndp-input"
-              type="password"
-              placeholder="留空则继承聊天主模型"
-              value={autoExtractAiApiKey}
-              onChange={(e) => void onSetAutoExtractSettings({ autoExtractAiApiKey: e.target.value })}
-            />
-          </div>
-          <div className="ndp-setting-item">
-            <label>Model</label>
-            <input
-              className="ndp-input"
-              placeholder="例如：gpt-4o-mini"
-              value={autoExtractAiModel}
-              onChange={(e) => void onSetAutoExtractSettings({ autoExtractAiModel: e.target.value })}
-            />
-          </div>
-          <div className="ndp-setting-item">
-            <label>Temperature</label>
-            <input
-              className="ndp-input"
-              type="number"
-              min={0}
-              max={2}
-              step={0.05}
-              value={autoExtractAiTemperature}
-              onChange={(e) => void onSetAutoExtractSettings({ autoExtractAiTemperature: Number(e.target.value) })}
-            />
-          </div>
-          <div className="ndp-setting-item">
-            <label>Max Tokens</label>
-            <input
-              className="ndp-input"
-              type="number"
-              min={128}
-              max={64000}
-              step={128}
-              value={autoExtractAiMaxTokens}
-              onChange={(e) => void onSetAutoExtractSettings({ autoExtractAiMaxTokens: Number(e.target.value) })}
-            />
-          </div>
-        </div>
-      )}
-
-          <div className="ndp-setting-item">
-            <label>当前角色：写入 / 召回</label>
-            <div className="ndp-setting-item">
-              <label className="ndp-checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={currentPersona?.captureEnabled ?? true}
-                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureEnabled: e.target.checked })}
-                />
-                <span>允许写入该角色的长期记忆</span>
-              </label>
-            </div>
-            <div className="ndp-setting-item">
-              <label className="ndp-checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={currentPersona?.captureUser ?? true}
-                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureUser: e.target.checked })}
-                />
-                <span>记录用户消息</span>
-              </label>
-            </div>
-            <div className="ndp-setting-item">
-              <label className="ndp-checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={currentPersona?.captureAssistant ?? true}
-                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { captureAssistant: e.target.checked })}
-                />
-                <span>记录 AI 消息</span>
-              </label>
-            </div>
-            <div className="ndp-setting-item">
-              <label className="ndp-checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={currentPersona?.retrieveEnabled ?? true}
-                  onChange={(e) => currentPersona && scheduleSavePersonaFlags(currentPersona.id, { retrieveEnabled: e.target.checked })}
-                />
-                <span>允许该角色参与召回注入</span>
-              </label>
-            </div>
-          </div>
-        </>
-      ) : null}
-
-      {subTab === 'manage' ? (
-        <>
-          <h3>记忆管理</h3>
-
-          <div className="ndp-setting-item">
-            <label>手动添加</label>
-            <div className="ndp-row">
-              <select className="ndp-select" value={memNewScope} onChange={(e) => setMemNewScope(e.target.value as 'persona' | 'shared')}>
-                <option value="persona">当前角色</option>
-                <option value="shared">共享</option>
-              </select>
-              <button className="ndp-btn" onClick={() => void onAddManualMemory()} disabled={!memNewText.trim()}>
-                添加
-              </button>
-            </div>
-            <textarea
-              className="ndp-textarea ndp-textarea-compact"
-              rows={3}
-              value={memNewText}
-              placeholder="写一条手动记忆（例如：长期设定、重要事实、约束）"
-              onChange={(e) => setMemNewText(e.target.value)}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>筛选</label>
-            <div className="ndp-row">
-              <select
-                className="ndp-select"
-                value={memScope}
-                onChange={(e) => {
-                  const v = e.target.value
-                  if (v === 'persona' || v === 'shared' || v === 'all') setMemScope(v)
-                  setMemOffset(0)
-                }}
-              >
-                <option value="persona">当前角色</option>
-                <option value="shared">共享</option>
-                <option value="all">当前角色 + 共享</option>
-              </select>
-              <select
-                className="ndp-select"
-                value={memRole}
-                onChange={(e) => {
-                  const v = e.target.value
-                  if (v === 'all' || v === 'user' || v === 'assistant' || v === 'note') setMemRole(v)
-                  setMemOffset(0)
-                }}
-              >
-                <option value="all">全部</option>
-                <option value="user">用户</option>
-                <option value="assistant">AI</option>
-                <option value="note">笔记</option>
-              </select>
-            </div>
-            <div className="ndp-row" style={{ marginTop: 10 }}>
-              <input className="ndp-input" value={memQuery} placeholder="关键词（LIKE）" onChange={(e) => setMemQuery(e.target.value)} />
-              <button
-                className="ndp-btn"
-                onClick={() => {
-                  setMemOffset(0)
-                  void refreshMemoryList()
-                }}
-              >
-                搜索
-              </button>
-            </div>
-            <p className="ndp-setting-hint">共 {memTotal} 条</p>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>列表</label>
-            <div className="ndp-memory-list">
-              {memItems.length === 0 && <div className="ndp-setting-hint">暂无记录</div>}
-              {memItems.map((m) => (
-                <div key={m.rowid} className="ndp-memory-item">
-                  <div className="ndp-memory-meta">
-                    <span>#{m.rowid}</span>
-                    <span>{new Date(m.createdAt).toLocaleString()}</span>
-                    <span>{m.scope}</span>
-                    <span>{m.role ?? 'note'}</span>
-                    <span>{m.kind}</span>
-                  </div>
-                  <div className="ndp-memory-content">{m.content}</div>
-                  <div className="ndp-memory-actions">
-                    <button className="ndp-btn" onClick={() => void onDeleteMemory(m.rowid)}>
-                      删除
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="ndp-row" style={{ marginTop: 10 }}>
-              <button className="ndp-btn" disabled={memOffset === 0} onClick={() => setMemOffset((o) => Math.max(0, o - 50))}>
-                上一页
-              </button>
-              <button className="ndp-btn" disabled={memOffset + 50 >= memTotal} onClick={() => setMemOffset((o) => o + 50)}>
-                下一页
-              </button>
-              <button className="ndp-btn" onClick={() => void refreshMemoryList()}>
-                刷新
-              </button>
-            </div>
-          </div>
-        </>
-      ) : null}
-    </div>
-  )
-}
-
-// Live2D Settings Tab Component
-function Live2DSettingsTab(props: {
-  api: ReturnType<typeof getApi>
-  petScale: number
-  petOpacity: number
-  live2dModelId: string
-  live2dMouseTrackingEnabled: boolean
-  live2dIdleSwayEnabled: boolean
-  availableModels: Live2DModelInfo[]
-  selectedModelInfo: Live2DModelInfo | null
-  isLoadingModels: boolean
-  refreshModels: (opts?: { force?: boolean }) => Promise<void>
-}) {
-  const {
-    api,
-    petScale,
-    petOpacity,
-    live2dModelId,
-    live2dMouseTrackingEnabled,
-    live2dIdleSwayEnabled,
-    availableModels,
-    selectedModelInfo,
-    isLoadingModels,
-    refreshModels,
-  } = props
-  const triggerRefresh = useCallback(() => {
-    void refreshModels()
-  }, [refreshModels])
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>Live2D 模型设置</h3>
-
-      {/* Model Selection */}
-      <div className="ndp-setting-item">
-        <label>选择模型</label>
-        <select
-          className="ndp-select"
-          value={live2dModelId}
-          onMouseDown={triggerRefresh}
-          onFocus={triggerRefresh}
-          onChange={(e) => {
-            const selectedModel = availableModels.find((m) => m.id === e.target.value)
-            if (selectedModel) {
-              api?.setLive2dModel(selectedModel.id, selectedModel.modelFile)
-            }
-          }}
-          disabled={isLoadingModels}
-        >
-          {isLoadingModels ? (
-            <option value="">扫描模型中...</option>
-          ) : availableModels.length === 0 ? (
-            <option value="">未找到模型</option>
-          ) : (
-            availableModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))
-          )}
-        </select>
-        <p className="ndp-setting-hint">
-          {isLoadingModels ? '正在扫描 live2d 目录...' : `共 ${availableModels.length} 个模型可用`}
-        </p>
-      </div>
-
-      {/* Model Info */}
-      {selectedModelInfo && (
-        <div className="ndp-model-info">
-          <p className="ndp-model-path">
-            路径: <code>{selectedModelInfo.modelFile}</code>
-          </p>
-          <div className="ndp-model-features">
-            {selectedModelInfo.hasPhysics && <span className="ndp-feature-tag">物理</span>}
-            {selectedModelInfo.hasPose && <span className="ndp-feature-tag">姿势</span>}
-            {selectedModelInfo.expressions && selectedModelInfo.expressions.length > 0 && (
-              <span className="ndp-feature-tag">{selectedModelInfo.expressions.length} 表情</span>
-            )}
-            {selectedModelInfo.motionGroups && selectedModelInfo.motionGroups.length > 0 && (
-              <span className="ndp-feature-tag">{selectedModelInfo.motionGroups.length} 动作组</span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Expression Test */}
-      {selectedModelInfo?.expressions && selectedModelInfo.expressions.length > 0 && (
-        <div className="ndp-setting-item">
-          <label>表情测试</label>
-          <div className="ndp-test-buttons">
-            {selectedModelInfo.expressions.map((exp) => (
-              <button
-                key={exp.name}
-                className="ndp-test-btn"
-                onClick={() => api?.triggerExpression(exp.name)}
-              >
-                {exp.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Motion Test */}
-      {selectedModelInfo?.motionGroups && selectedModelInfo.motionGroups.length > 0 && (
-        <div className="ndp-setting-item">
-          <label>动作测试</label>
-          <div className="ndp-test-buttons">
-            {selectedModelInfo.motionGroups.map((group) => (
-              <button
-                key={group.name}
-                className="ndp-test-btn"
-                onClick={() => api?.triggerMotion(group.name, 0)}
-              >
-                {group.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={live2dMouseTrackingEnabled}
-            onChange={(e) => api?.setLive2dMouseTrackingEnabled(e.target.checked)}
-          />
-          <span>鼠标跟随</span>
-        </label>
-        <p className="ndp-setting-hint">开启后模型会跟随鼠标方向。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={live2dIdleSwayEnabled}
-            onChange={(e) => api?.setLive2dIdleSwayEnabled(e.target.checked)}
-          />
-          <span>物理摇摆</span>
-        </label>
-        <p className="ndp-setting-hint">关闭后禁用待机摇摆，模型姿态更稳定。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>模型大小</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0.5"
-            max="5"
-            step="0.1"
-            value={petScale}
-            onChange={(e) => api?.setPetScale(parseFloat(e.target.value))}
-          />
-          <span>{petScale.toFixed(1)}x</span>
-        </div>
-        <p className="ndp-setting-hint">调整 Live2D 模型的显示大小（高分辨率模型可能需要更大的值）</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>模型透明度</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0.3"
-            max="1.0"
-            step="0.1"
-            value={petOpacity}
-            onChange={(e) => api?.setPetOpacity(parseFloat(e.target.value))}
-          />
-          <span>{Math.round(petOpacity * 100)}%</span>
-        </div>
-        <p className="ndp-setting-hint">调整 Live2D 模型的透明度</p>
-      </div>
-    </div>
-  )
-}
-
-// Bubble Settings Tab Component
-function BubbleSettingsTab(props: {
-  api: ReturnType<typeof getApi>
-  bubbleSettings: AppSettings['bubble'] | undefined
-}) {
-  const { api, bubbleSettings } = props
-  const [phrasesText, setPhrasesText] = useState('')
-
-  const style = bubbleSettings?.style ?? 'cute'
-  const positionX = bubbleSettings?.positionX ?? 75
-  const positionY = bubbleSettings?.positionY ?? 10
-  const tailDirection = bubbleSettings?.tailDirection ?? 'down'
-  const showOnClick = bubbleSettings?.showOnClick ?? true
-  const showOnChat = bubbleSettings?.showOnChat ?? true
-  const autoHideDelay = bubbleSettings?.autoHideDelay ?? 5000
-  const clickPhrases = bubbleSettings?.clickPhrases ?? []
-  const clickPhrasesText = clickPhrases.join('\n')
-  const contextOrbEnabled = bubbleSettings?.contextOrbEnabled ?? false
-  const contextOrbX = bubbleSettings?.contextOrbX ?? 12
-  const contextOrbY = bubbleSettings?.contextOrbY ?? 16
-
-  // Sync phrases text with settings
-  useEffect(() => {
-    setPhrasesText(clickPhrasesText)
-  }, [clickPhrasesText])
-
-  const styleOptions: { value: BubbleStyle; label: string; desc: string }[] = [
-    { value: 'cute', label: '可爱粉', desc: '粉色渐变，带爱心装饰' },
-    { value: 'pixel', label: '像素风', desc: '复古像素游戏风格' },
-    { value: 'minimal', label: '简约白', desc: '简洁现代风格' },
-    { value: 'cloud', label: '云朵蓝', desc: '蓝色云朵造型' },
-  ]
-
-  const tailOptions: { value: TailDirection; label: string; icon: string }[] = [
-    { value: 'up', label: '上', icon: '↑' },
-    { value: 'down', label: '下', icon: '↓' },
-    { value: 'left', label: '左', icon: '←' },
-    { value: 'right', label: '右', icon: '→' },
-  ]
-
-  const handlePhrasesChange = (text: string) => {
-    setPhrasesText(text)
-  }
-
-  const handlePhrasesSave = () => {
-    const phrases = phrasesText
-      .split('\n')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-    api?.setBubbleSettings({ clickPhrases: phrases })
-  }
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>气泡样式</h3>
-
-      {/* Style Selection */}
-      <div className="ndp-setting-item">
-        <label>气泡风格</label>
-        <div className="ndp-style-grid">
-          {styleOptions.map((opt) => (
-            <button
-              key={opt.value}
-              className={`ndp-style-btn ${style === opt.value ? 'active' : ''}`}
-              onClick={() => api?.setBubbleSettings({ style: opt.value })}
-            >
-              <span className="ndp-style-label">{opt.label}</span>
-              <span className="ndp-style-desc">{opt.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Position X */}
-      <div className="ndp-setting-item">
-        <label>水平位置 (X)</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="5"
-            value={positionX}
-            onChange={(e) => api?.setBubbleSettings({ positionX: parseInt(e.target.value) })}
-          />
-          <span>{positionX}%</span>
-        </div>
-        <p className="ndp-setting-hint">0% 为最左边，100% 为最右边</p>
-      </div>
-
-      {/* Position Y */}
-      <div className="ndp-setting-item">
-        <label>垂直位置 (Y)</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="5"
-            value={positionY}
-            onChange={(e) => api?.setBubbleSettings({ positionY: parseInt(e.target.value) })}
-          />
-          <span>{positionY}%</span>
-        </div>
-        <p className="ndp-setting-hint">0% 为最上边，100% 为最下边</p>
-      </div>
-
-      {/* Tail Direction */}
-      <div className="ndp-setting-item">
-        <label>尾巴方向</label>
-        <div className="ndp-tail-grid">
-          {tailOptions.map((opt) => (
-            <button
-              key={opt.value}
-              className={`ndp-tail-btn ${tailDirection === opt.value ? 'active' : ''}`}
-              onClick={() => api?.setBubbleSettings({ tailDirection: opt.value })}
-            >
-              <span className="ndp-tail-icon">{opt.icon}</span>
-              <span className="ndp-tail-label">{opt.label}</span>
-            </button>
-          ))}
-        </div>
-        <p className="ndp-setting-hint">气泡尾巴指向的方向</p>
-      </div>
-
-      <h3>显示设置</h3>
-
-      {/* Show on Click */}
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={showOnClick}
-            onChange={(e) => api?.setBubbleSettings({ showOnClick: e.target.checked })}
-          />
-          <span>点击宠物时显示气泡</span>
-        </label>
-        <p className="ndp-setting-hint">点击桌宠时随机显示可爱的台词</p>
-      </div>
-
-      {/* Show on Chat */}
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={showOnChat}
-            onChange={(e) => api?.setBubbleSettings({ showOnChat: e.target.checked })}
-          />
-          <span>AI 回复时显示气泡</span>
-        </label>
-        <p className="ndp-setting-hint">AI 回复消息时在桌宠旁边显示气泡</p>
-      </div>
-
-      {/* Auto Hide Delay */}
-      <div className="ndp-setting-item">
-        <label>自动隐藏延迟</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="15000"
-            step="1000"
-            value={autoHideDelay}
-            onChange={(e) => api?.setBubbleSettings({ autoHideDelay: parseInt(e.target.value) })}
-          />
-          <span>{autoHideDelay === 0 ? '手动关闭' : `${autoHideDelay / 1000}秒`}</span>
-        </div>
-        <p className="ndp-setting-hint">气泡显示后自动消失的时间，0 表示需要手动关闭</p>
-      </div>
-
-      <h3>上下文情况</h3>
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={contextOrbEnabled}
-            onChange={(e) => api?.setBubbleSettings({ contextOrbEnabled: e.target.checked })}
-          />
-          <span>显示上下文小球</span>
-        </label>
-        <p className="ndp-setting-hint">在桌宠窗口显示一个可拖动的小球，鼠标悬停可查看上下文占用。</p>
-        <div className="ndp-setting-actions">
-          <button
-            className="ndp-btn"
-            onClick={() => api?.setBubbleSettings({ contextOrbX: 12, contextOrbY: 16 })}
-            disabled={!contextOrbEnabled}
-            title="重置到默认位置"
-          >
-            重置位置
-          </button>
-          <span className="ndp-setting-hint" style={{ marginLeft: 10 }}>
-            当前位置：{Math.round(contextOrbX)}% / {Math.round(contextOrbY)}%
-          </span>
-        </div>
-      </div>
-
-      <h3>自定义台词</h3>
-
-      {/* Custom Click Phrases */}
-      <div className="ndp-setting-item">
-        <label>点击台词</label>
-        <textarea
-          className="ndp-textarea"
-          value={phrasesText}
-          placeholder="每行一句台词..."
-          rows={6}
-          onChange={(e) => handlePhrasesChange(e.target.value)}
-          onBlur={handlePhrasesSave}
-        />
-        <p className="ndp-setting-hint">每行一句，点击桌宠时随机显示（共 {clickPhrases.length} 句）</p>
-      </div>
-    </div>
-  )
-}
-
-function TaskPanelSettingsTab(props: {
-  api: ReturnType<typeof getApi>
-  taskPanelSettings: AppSettings['taskPanel'] | undefined
-}) {
-  const { api, taskPanelSettings } = props
-  const positionX = taskPanelSettings?.positionX ?? 50
-  const positionY = taskPanelSettings?.positionY ?? 78
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>任务面板</h3>
-      <p className="ndp-setting-hint">仅在有任务进行中时出现，用于查看进度与暂停/终止。</p>
-
-      <div className="ndp-setting-item">
-        <label>水平位置 (X)</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="2"
-            value={positionX}
-            onChange={(e) => api?.setTaskPanelSettings({ positionX: parseInt(e.target.value) })}
-          />
-          <span>{positionX}%</span>
-        </div>
-        <p className="ndp-setting-hint">0% 为最左边，100% 为最右边</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>垂直位置 (Y)</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="2"
-            value={positionY}
-            onChange={(e) => api?.setTaskPanelSettings({ positionY: parseInt(e.target.value) })}
-          />
-          <span>{positionY}%</span>
-        </div>
-        <p className="ndp-setting-hint">0% 为最上边，100% 为最下边</p>
-      </div>
-    </div>
-  )
-}
-
-// Chat UI Settings Tab Component
-function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatUi: AppSettings['chatUi'] | undefined }) {
-  const { api, chatUi } = props
-
-  const background = chatUi?.background ?? 'rgba(20, 20, 24, 0.45)'
-  const userBubbleBackground = chatUi?.userBubbleBackground ?? 'rgba(80, 140, 255, 0.22)'
-  const assistantBubbleBackground = chatUi?.assistantBubbleBackground ?? 'rgba(0, 0, 0, 0.25)'
-  const bubbleRadius = chatUi?.bubbleRadius ?? 14
-  const backgroundImage = chatUi?.backgroundImage ?? ''
-  const backgroundImageOpacity = chatUi?.backgroundImageOpacity ?? 0.6
-  const contextOrbEnabled = chatUi?.contextOrbEnabled ?? false
-  const contextOrbX = chatUi?.contextOrbX ?? 6
-  const contextOrbY = chatUi?.contextOrbY ?? 14
-  const backgroundImageInputRef = useRef<HTMLInputElement>(null)
-
-  const clampInt = (v: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(v)))
-  const clampFloat = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
-
-  const parseRgba = (
-    value: string,
-    fallback: { r: number; g: number; b: number; a: number },
-  ): { r: number; g: number; b: number; a: number } => {
-    const m = value
-      .trim()
-      .match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9]*\.?[0-9]+))?\s*\)$/i)
-    if (!m) return fallback
-    const r = clampInt(parseInt(m[1] || '0'), 0, 255)
-    const g = clampInt(parseInt(m[2] || '0'), 0, 255)
-    const b = clampInt(parseInt(m[3] || '0'), 0, 255)
-    const a = clampFloat(m[4] == null ? 1 : parseFloat(m[4]), 0, 1)
-    return { r, g, b, a }
-  }
-
-  const toRgba = (rgba: { r: number; g: number; b: number; a: number }) =>
-    `rgba(${clampInt(rgba.r, 0, 255)}, ${clampInt(rgba.g, 0, 255)}, ${clampInt(rgba.b, 0, 255)}, ${clampFloat(
-      rgba.a,
-      0,
-      1,
-    ).toFixed(2)})`
-
-  const renderRgbaEditor = (opts: {
-    label: string
-    value: string
-    onChange: (next: string) => void
-  }) => {
-    const rgba = parseRgba(opts.value, { r: 20, g: 20, b: 24, a: 0.45 })
-
-    const set = (next: Partial<typeof rgba>) => {
-      const safe: Partial<typeof rgba> = {}
-      if (typeof next.r === 'number' && Number.isFinite(next.r)) safe.r = next.r
-      if (typeof next.g === 'number' && Number.isFinite(next.g)) safe.g = next.g
-      if (typeof next.b === 'number' && Number.isFinite(next.b)) safe.b = next.b
-      if (typeof next.a === 'number' && Number.isFinite(next.a)) safe.a = next.a
-
-      const merged = { ...rgba, ...safe }
-      opts.onChange(toRgba(merged))
-    }
-
-    return (
-      <div className="ndp-setting-item">
-        <label>{opts.label}</label>
-        <div className="ndp-rgba-editor">
-          <div className="ndp-rgba-preview" style={{ background: opts.value }} />
-
-          <div className="ndp-rgba-row">
-            <span className="ndp-rgba-key">R</span>
-            <input
-              type="range"
-              min="0"
-              max="255"
-              step="1"
-              value={rgba.r}
-              onChange={(e) => set({ r: Number(e.target.value) })}
-            />
-            <input
-              className="ndp-rgba-input"
-              type="number"
-              min="0"
-              max="255"
-              value={rgba.r}
-              onChange={(e) => set({ r: Number(e.target.value) })}
-            />
-          </div>
-
-          <div className="ndp-rgba-row">
-            <span className="ndp-rgba-key">G</span>
-            <input
-              type="range"
-              min="0"
-              max="255"
-              step="1"
-              value={rgba.g}
-              onChange={(e) => set({ g: Number(e.target.value) })}
-            />
-            <input
-              className="ndp-rgba-input"
-              type="number"
-              min="0"
-              max="255"
-              value={rgba.g}
-              onChange={(e) => set({ g: Number(e.target.value) })}
-            />
-          </div>
-
-          <div className="ndp-rgba-row">
-            <span className="ndp-rgba-key">B</span>
-            <input
-              type="range"
-              min="0"
-              max="255"
-              step="1"
-              value={rgba.b}
-              onChange={(e) => set({ b: Number(e.target.value) })}
-            />
-            <input
-              className="ndp-rgba-input"
-              type="number"
-              min="0"
-              max="255"
-              value={rgba.b}
-              onChange={(e) => set({ b: Number(e.target.value) })}
-            />
-          </div>
-
-          <div className="ndp-rgba-row">
-            <span className="ndp-rgba-key">A</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={rgba.a}
-              onChange={(e) => set({ a: Number(e.target.value) })}
-            />
-            <input
-              className="ndp-rgba-input"
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              value={rgba.a}
-              onChange={(e) => set({ a: Number(e.target.value) })}
-            />
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  const readBackgroundFile = (file: File) => {
-    if (!file.type.startsWith('image/')) return
-    if (file.size > 5 * 1024 * 1024) return
-    const reader = new FileReader()
-    reader.onload = () => api?.setChatUiSettings({ backgroundImage: String(reader.result || '') })
-    reader.readAsDataURL(file)
-  }
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>聊天界面美化</h3>
-      <p className="ndp-setting-hint">头像在聊天窗口中点击头像即可更换（不在设置里）。</p>
-
-      {renderRgbaEditor({
-        label: '聊天背景 RGBA',
-        value: background,
-        onChange: (next) => api?.setChatUiSettings({ background: next }),
-      })}
-
-      <div className="ndp-setting-item">
-        <label>背景图片</label>
-        <div className="ndp-bgimg-row">
-          <div className="ndp-bgimg-preview">{backgroundImage ? <img src={backgroundImage} alt="bg" /> : <span>无</span>}</div>
-          <div className="ndp-bgimg-actions">
-            <button className="ndp-btn" onClick={() => backgroundImageInputRef.current?.click()}>
-              选择图片
-            </button>
-            <button
-              className="ndp-btn"
-              onClick={() => api?.setChatUiSettings({ backgroundImage: '' })}
-              disabled={!backgroundImage}
-            >
-              清除
-            </button>
-          </div>
-        </div>
-        <input
-          ref={backgroundImageInputRef}
-          type="file"
-          accept="image/*"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            const file = e.target.files?.[0]
-            if (!file) return
-            readBackgroundFile(file)
-            e.currentTarget.value = ''
-          }}
-        />
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={backgroundImageOpacity}
-            onChange={(e) => api?.setChatUiSettings({ backgroundImageOpacity: parseFloat(e.target.value) })}
-          />
-          <span>{Math.round(backgroundImageOpacity * 100)}%</span>
-        </div>
-        <p className="ndp-setting-hint">拖动调整背景图片透明度（建议图片小于 5MB）</p>
-      </div>
-
-      {renderRgbaEditor({
-        label: '用户气泡 RGBA',
-        value: userBubbleBackground,
-        onChange: (next) => api?.setChatUiSettings({ userBubbleBackground: next }),
-      })}
-
-      {renderRgbaEditor({
-        label: '助手气泡 RGBA',
-        value: assistantBubbleBackground,
-        onChange: (next) => api?.setChatUiSettings({ assistantBubbleBackground: next }),
-      })}
-
-      <div className="ndp-setting-item">
-        <label>气泡圆角</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="6"
-            max="24"
-            step="1"
-            value={bubbleRadius}
-            onChange={(e) => api?.setChatUiSettings({ bubbleRadius: parseInt(e.target.value) })}
-          />
-          <span>{bubbleRadius}px</span>
-        </div>
-      </div>
-
-      <h3>上下文情况</h3>
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={contextOrbEnabled}
-            onChange={(e) => api?.setChatUiSettings({ contextOrbEnabled: e.target.checked })}
-          />
-          <span>显示上下文小球</span>
-        </label>
-        <p className="ndp-setting-hint">在聊天窗口显示一个可拖动的小球，鼠标悬停可查看上下文占用。</p>
-        <div className="ndp-setting-actions">
-          <button
-            className="ndp-btn"
-            onClick={() => api?.setChatUiSettings({ contextOrbX: 6, contextOrbY: 14 })}
-            disabled={!contextOrbEnabled}
-            title="重置到默认位置"
-          >
-            重置位置
-          </button>
-          <span className="ndp-setting-hint" style={{ marginLeft: 10 }}>
-            当前位置：{Math.round(contextOrbX)}% / {Math.round(contextOrbY)}%
-          </span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSettings: AppSettings['tts'] | undefined }) {
-  const { api, ttsSettings } = props
-
-  const enabled = ttsSettings?.enabled ?? false
-  const gptWeightsPath = ttsSettings?.gptWeightsPath ?? 'GPT_SoVITS/pretrained_models/s1v3.ckpt'
-  const sovitsWeightsPath = ttsSettings?.sovitsWeightsPath ?? 'GPT_SoVITS/pretrained_models/v2Pro/s2Gv2ProPlus.pth'
-  const speedFactor = ttsSettings?.speedFactor ?? 1.0
-  const refAudioPath = ttsSettings?.refAudioPath ?? ''
-  const promptText = ttsSettings?.promptText ?? ''
-  const streaming = ttsSettings?.streaming ?? true
-  const segmented = ttsSettings?.segmented ?? false
-  const pauseMs = Math.max(0, Math.min(60000, ttsSettings?.pauseMs ?? 280))
-
-  const [options, setOptions] = useState<
-    | {
-        gptModels: Array<{ label: string; weightsPath: string }>
-        sovitsModels: Array<{ label: string; weightsPath: string }>
-        refAudios: Array<{ label: string; value: string; promptText: string }>
-        ttsRoot: string
-      }
-    | null
-  >(null)
-  const [optionsError, setOptionsError] = useState<string | null>(null)
-  const lastOptionsRefreshAtRef = useRef(0)
-
-  const refreshOptions = useCallback(
-    async (opts?: { force?: boolean }) => {
-      if (!api) return
-      const now = Date.now()
-      if (!opts?.force && now - lastOptionsRefreshAtRef.current < 800) return
-      lastOptionsRefreshAtRef.current = now
-
-      setOptionsError(null)
-      try {
-        const data = await api.listTtsOptions()
-        setOptions(data)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        setOptionsError(msg)
-      }
-    },
-    [api],
-  )
-
-  useEffect(() => {
-    void refreshOptions({ force: true })
-  }, [refreshOptions])
-
-  const onSelectRefAudio = (value: string) => {
-    const selected = options?.refAudios?.find((x) => x.value === value)
-    api?.setTtsSettings({
-      refAudioPath: value,
-      promptText: selected?.promptText ?? promptText,
-    })
-  }
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>TTS 语音</h3>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={enabled} onChange={(e) => api?.setTtsSettings({ enabled: e.target.checked })} />
-          <span>启用 TTS（助手消息自动播报）</span>
-        </label>
-        <p className="ndp-setting-hint">需要先启动 `GPT-SoVITS-v2_ProPlus` 的 API 服务（默认: http://127.0.0.1:9880）。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>GPT 模型</label>
-        <select
-          className="ndp-select"
-          value={gptWeightsPath}
-          onMouseDown={() => void refreshOptions()}
-          onFocus={() => void refreshOptions()}
-          onChange={(e) => api?.setTtsSettings({ gptWeightsPath: e.target.value })}
-        >
-          {(options?.gptModels?.length ?? 0) > 0 ? (
-            options!.gptModels.map((m) => (
-              <option key={m.weightsPath} value={m.weightsPath}>
-                {m.label}
-              </option>
-            ))
-          ) : (
-            <option value={gptWeightsPath}>（未扫描到，使用当前配置）</option>
-          )}
-        </select>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>SoVITS 模型</label>
-        <select
-          className="ndp-select"
-          value={sovitsWeightsPath}
-          onMouseDown={() => void refreshOptions()}
-          onFocus={() => void refreshOptions()}
-          onChange={(e) => api?.setTtsSettings({ sovitsWeightsPath: e.target.value })}
-        >
-          {(options?.sovitsModels?.length ?? 0) > 0 ? (
-            options!.sovitsModels.map((m) => (
-              <option key={m.weightsPath} value={m.weightsPath}>
-                {m.label}
-              </option>
-            ))
-          ) : (
-            <option value={sovitsWeightsPath}>（未扫描到，使用当前配置）</option>
-          )}
-        </select>
-        <p className="ndp-setting-hint">默认“直接推底模”只需要设置参考音频即可。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>语速</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0.5"
-            max="2"
-            step="0.05"
-            value={speedFactor}
-            onChange={(e) => api?.setTtsSettings({ speedFactor: parseFloat(e.target.value) })}
-          />
-          <span>{speedFactor.toFixed(2)}x</span>
-        </div>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>参考音频</label>
-        <select
-          className="ndp-select"
-          value={refAudioPath}
-          onMouseDown={() => void refreshOptions()}
-          onFocus={() => void refreshOptions()}
-          onChange={(e) => onSelectRefAudio(e.target.value)}
-        >
-          <option value="">请选择（从 `参考音频` 目录扫描）</option>
-          {(options?.refAudios ?? []).map((a) => (
-            <option key={a.value} value={a.value} title={a.value}>
-              {a.label}
-            </option>
-          ))}
-        </select>
-        <p className="ndp-setting-hint">下拉框仅显示文件名里 `[]` 内的内容（例如角色名）。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>参考音频文本（自动从文件名解析，可编辑）</label>
-        <textarea
-          className="ndp-textarea"
-          value={promptText}
-          rows={3}
-          placeholder="例如：该做的事都做完了么？好，别睡下了才想起来日常没做，拜拜。"
-          onChange={(e) => api?.setTtsSettings({ promptText: e.target.value })}
-        />
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={streaming} onChange={(e) => api?.setTtsSettings({ streaming: e.target.checked })} />
-          <span>流式处理（边生成边播放）</span>
-        </label>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={segmented} onChange={(e) => api?.setTtsSettings({ segmented: e.target.checked })} />
-          <span>分句同步显示（TTS 念一句，聊天/气泡显示一句）</span>
-        </label>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>分句停顿（ms）</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="60000"
-            step="20"
-            value={pauseMs}
-            onChange={(e) => api?.setTtsSettings({ pauseMs: parseInt(e.target.value) })}
-          />
-          <input
-            className="ndp-input"
-            style={{ width: 96 }}
-            type="number"
-            min={0}
-            max={60000}
-            step={20}
-            value={pauseMs}
-            onChange={(e) => api?.setTtsSettings({ pauseMs: parseInt(e.target.value || '0') })}
-          />
-        </div>
-      </div>
-
-      {options?.ttsRoot ? <p className="ndp-setting-hint">扫描目录: {options.ttsRoot}</p> : null}
-      {optionsError ? <p className="ndp-setting-hint">扫描失败: {optionsError}</p> : null}
-    </div>
-  )
-}
-
-function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSettings: AppSettings['asr'] | undefined }) {
-  const { api, asrSettings } = props
-
-  const enabled = asrSettings?.enabled ?? false
-  const wsUrl = asrSettings?.wsUrl ?? 'ws://127.0.0.1:8766/ws'
-  const micDeviceId = asrSettings?.micDeviceId ?? ''
-  const captureBackend = (asrSettings?.captureBackend ?? 'script') as 'auto' | 'script' | 'worklet'
-  const language = asrSettings?.language ?? 'auto'
-  const useItn = asrSettings?.useItn ?? true
-  const autoSend = asrSettings?.autoSend ?? false
-  const mode = (asrSettings?.mode ?? 'continuous') as 'continuous' | 'hotkey'
-  const hotkey = asrSettings?.hotkey ?? 'F8'
-  const showSubtitle = asrSettings?.showSubtitle ?? true
-
-  const vadChunkMs = Math.max(40, Math.min(800, asrSettings?.vadChunkMs ?? 200))
-  const maxEndSilenceMs = Math.max(80, Math.min(4000, asrSettings?.maxEndSilenceMs ?? 800))
-  const minSpeechMs = Math.max(0, Math.min(5000, asrSettings?.minSpeechMs ?? 600))
-  const maxSpeechMs = Math.max(800, Math.min(60000, asrSettings?.maxSpeechMs ?? 15000))
-  const prerollMs = Math.max(0, Math.min(2000, asrSettings?.prerollMs ?? 120))
-  const postrollMs = Math.max(0, Math.min(2000, asrSettings?.postrollMs ?? 80))
-
-  const enableAgc = asrSettings?.enableAgc ?? true
-  const agcTargetRms = Math.max(0.005, Math.min(0.2, asrSettings?.agcTargetRms ?? 0.05))
-  const agcMaxGain = Math.max(1, Math.min(80, asrSettings?.agcMaxGain ?? 20))
-  const debug = asrSettings?.debug ?? false
-
-  const applyInt = (value: string, fallback: number) => {
-    const n = parseInt(value || '', 10)
-    return Number.isFinite(n) ? n : fallback
-  }
-
-  const applyFloat = (value: string, fallback: number) => {
-    const n = parseFloat(value || '')
-    return Number.isFinite(n) ? n : fallback
-  }
-
-  const [micDevices, setMicDevices] = useState<Array<{ deviceId: string; label: string }>>([])
-  const [micLoading, setMicLoading] = useState(false)
-  const [micError, setMicError] = useState<string | null>(null)
-
-  const refreshMicDevices = useCallback(async () => {
-    setMicLoading(true)
-    setMicError(null)
-
-    try {
-      if (!navigator.mediaDevices) {
-        setMicDevices([])
-        setMicError('当前环境不支持枚举音频设备')
-        return
-      }
-
-      // 先请求一次权限，否则 device.label 可能为空，且部分环境 enumerateDevices 不完整
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices()
-        const mics = devices
-          .filter((d) => d.kind === 'audioinput')
-          .map((d) => ({ deviceId: d.deviceId, label: d.label || `麦克风（${d.deviceId.slice(0, 6)}…）` }))
-        setMicDevices(mics)
-      } finally {
-        stream.getTracks().forEach((t) => t.stop())
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setMicDevices([])
-      setMicError(msg)
-    } finally {
-      setMicLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void refreshMicDevices()
-  }, [refreshMicDevices])
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>语音识别（ASR）</h3>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={enabled} onChange={(e) => api?.setAsrSettings({ enabled: e.target.checked })} />
-          <span>启用语音识别（麦克风转文字）</span>
-        </label>
-        <p className="ndp-setting-hint">
-          需要先启动本地 ASR 服务端（推荐：WebSocket 实时音频流 + FSMN-VAD 断句 + SenseVoiceSmall 转写）。
-        </p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>WebSocket 地址</label>
-        <input type="text" className="ndp-input" value={wsUrl} onChange={(e) => api?.setAsrSettings({ wsUrl: e.target.value })} />
-        <p className="ndp-setting-hint">示例：ws://127.0.0.1:8766/ws（默认端口 8766）</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>采集方式</label>
-        <select
-          className="ndp-select"
-          value={captureBackend}
-          onChange={(e) => api?.setAsrSettings({ captureBackend: e.target.value as AppSettings['asr']['captureBackend'] })}
-        >
-          <option value="script">ScriptProcessor（更稳定，推荐）</option>
-          <option value="worklet">AudioWorklet（更低延迟）</option>
-          <option value="auto">自动（优先 worklet）</option>
-        </select>
-        <p className="ndp-setting-hint">如果识别结果出现大量“🎼”等富文本标记或明显异常，优先切到 ScriptProcessor</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>选择麦克风</label>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <select
-            className="ndp-select"
-            style={{ flex: 1 }}
-            value={micDeviceId}
-            onMouseDown={() => refreshMicDevices()}
-            onFocus={() => refreshMicDevices()}
-            onChange={(e) => api?.setAsrSettings({ micDeviceId: e.target.value })}
-          >
-            <option value="">系统默认</option>
-            {micDevices.map((d) => (
-              <option key={d.deviceId} value={d.deviceId} title={d.deviceId}>
-                {d.label}
-              </option>
-            ))}
-          </select>
-          <button className="ndp-btn" onClick={() => refreshMicDevices()} disabled={micLoading} type="button">
-            {micLoading ? '刷新中...' : '刷新'}
-          </button>
-        </div>
-        <p className="ndp-setting-hint">
-          如果下拉框为空或无法选择，先点一次“刷新”并允许麦克风权限；设备名称只有在授权后才会显示
-        </p>
-        {micError ? <p className="ndp-setting-hint">刷新失败：{micError}</p> : null}
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>识别语言</label>
-        <select className="ndp-select" value={language} onChange={(e) => api?.setAsrSettings({ language: e.target.value as AppSettings['asr']['language'] })}>
-          <option value="auto">自动 (auto)</option>
-          <option value="zn">中文 (zn)</option>
-          <option value="yue">粤语 (yue)</option>
-          <option value="en">英文 (en)</option>
-          <option value="ja">日文 (ja)</option>
-          <option value="ko">韩文 (ko)</option>
-          <option value="nospeech">无语音 (nospeech)</option>
-        </select>
-        <p className="ndp-setting-hint">建议默认 auto；如果混识别，可固定为 zn/en 等</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={useItn} onChange={(e) => api?.setAsrSettings({ useItn: e.target.checked })} />
-          <span>标点/ITN（更像输入法）</span>
-        </label>
-        <p className="ndp-setting-hint">开启后会自动补标点、数字等格式化，通常更可读</p>
-      </div>
-
-      <h3>启动方式</h3>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="radio" name="asrMode" checked={mode === 'continuous'} onChange={() => api?.setAsrSettings({ mode: 'continuous' })} />
-          <span>持续录音（无需按键）</span>
-        </label>
-        <label className="ndp-checkbox-label" style={{ marginTop: 8 }}>
-          <input type="radio" name="asrMode" checked={mode === 'hotkey'} onChange={() => api?.setAsrSettings({ mode: 'hotkey' })} />
-          <span>按键录音（按一下开始，再按一下结束）</span>
-        </label>
-
-        {mode === 'hotkey' && (
-          <div style={{ marginTop: 10 }}>
-            <label>录音快捷键</label>
-            <input type="text" className="ndp-input" value={hotkey} onChange={(e) => api?.setAsrSettings({ hotkey: e.target.value })} />
-            <p className="ndp-setting-hint">示例：F8 / Ctrl+Alt+V / A（全局快捷键，可能和系统/软件冲突）</p>
-          </div>
-        )}
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={showSubtitle} onChange={(e) => api?.setAsrSettings({ showSubtitle: e.target.checked })} />
-          <span>桌宠窗口显示识别字幕</span>
-        </label>
-        <p className="ndp-setting-hint">字幕显示在桌宠（Live2D）左侧，用于确认识别到的文本。</p>
-      </div>
-
-      <h3>识别结果处理</h3>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="radio" name="asrSendMode" checked={autoSend} onChange={() => api?.setAsrSettings({ autoSend: true })} />
-          <span>直接发送（识别完自动发给 LLM）</span>
-        </label>
-        <label className="ndp-checkbox-label" style={{ marginTop: 8 }}>
-          <input
-            type="radio"
-            name="asrSendMode"
-            checked={!autoSend}
-            onChange={() => api?.setAsrSettings({ autoSend: false })}
-          />
-          <span>仅在输入框（识别完只填入输入框，手动发送）</span>
-        </label>
-        <p className="ndp-setting-hint">开启“直接发送”后，会把每次端点结束的一段识别结果作为一条用户消息发送</p>
-      </div>
-
-      <h3>端点检测（VAD）</h3>
-
-      <div className="ndp-setting-item">
-        <label>VAD 分块大小（ms）</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="40"
-            max="500"
-            step="10"
-            value={vadChunkMs}
-            onChange={(e) => api?.setAsrSettings({ vadChunkMs: parseInt(e.target.value) })}
-          />
-          <input
-            className="ndp-input"
-            style={{ width: 96 }}
-            type="number"
-            min={40}
-            max={500}
-            step={10}
-            value={vadChunkMs}
-            onChange={(e) => api?.setAsrSettings({ vadChunkMs: applyInt(e.target.value, vadChunkMs) })}
-          />
-        </div>
-        <p className="ndp-setting-hint">越小越低延迟，但 CPU 开销更高；建议 160-240ms</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>尾部静音判停（ms）</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="200"
-            max="2000"
-            step="20"
-            value={maxEndSilenceMs}
-            onChange={(e) => api?.setAsrSettings({ maxEndSilenceMs: parseInt(e.target.value) })}
-          />
-          <input
-            className="ndp-input"
-            style={{ width: 96 }}
-            type="number"
-            min={80}
-            max={4000}
-            step={20}
-            value={maxEndSilenceMs}
-            onChange={(e) => api?.setAsrSettings({ maxEndSilenceMs: applyInt(e.target.value, maxEndSilenceMs) })}
-          />
-        </div>
-        <p className="ndp-setting-hint">过低易截断，过高会“停得慢”；普通说话建议 600-1000ms</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>最短语音段（ms）</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="2000"
-            step="20"
-            value={minSpeechMs}
-            onChange={(e) => api?.setAsrSettings({ minSpeechMs: parseInt(e.target.value) })}
-          />
-          <input
-            className="ndp-input"
-            style={{ width: 96 }}
-            type="number"
-            min={0}
-            max={5000}
-            step={20}
-            value={minSpeechMs}
-            onChange={(e) => api?.setAsrSettings({ minSpeechMs: applyInt(e.target.value, minSpeechMs) })}
-          />
-        </div>
-        <p className="ndp-setting-hint">用于过滤短噪声（键盘、鼠标、喷麦）；太大可能漏掉短词</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>最长语音段（ms）</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="2000"
-            max="30000"
-            step="200"
-            value={maxSpeechMs}
-            onChange={(e) => api?.setAsrSettings({ maxSpeechMs: parseInt(e.target.value) })}
-          />
-          <input
-            className="ndp-input"
-            style={{ width: 96 }}
-            type="number"
-            min={800}
-            max={60000}
-            step={200}
-            value={maxSpeechMs}
-            onChange={(e) => api?.setAsrSettings({ maxSpeechMs: applyInt(e.target.value, maxSpeechMs) })}
-          />
-        </div>
-        <p className="ndp-setting-hint">超长句会强制切分，避免一直不出结果；建议 10-20 秒</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>起点预留 / 终点补偿（ms）</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="500"
-            step="10"
-            value={prerollMs}
-            onChange={(e) => api?.setAsrSettings({ prerollMs: parseInt(e.target.value) })}
-          />
-          <span>起点 {prerollMs}ms</span>
-        </div>
-        <div className="ndp-range-input" style={{ marginTop: 8 }}>
-          <input
-            type="range"
-            min="0"
-            max="500"
-            step="10"
-            value={postrollMs}
-            onChange={(e) => api?.setAsrSettings({ postrollMs: parseInt(e.target.value) })}
-          />
-          <span>终点 {postrollMs}ms</span>
-        </div>
-        <p className="ndp-setting-hint">防止吞掉开头/结尾的辅音；太大可能把环境音也带进去</p>
-      </div>
-
-      <h3>音量处理</h3>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={enableAgc} onChange={(e) => api?.setAsrSettings({ enableAgc: e.target.checked })} />
-          <span>自动增益（AGC）</span>
-        </label>
-        <p className="ndp-setting-hint">当麦克风声音太小时自动放大，提升识别稳定性；如果容易爆音/喷麦可关闭</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>AGC 目标 RMS / 最大增益</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0.01"
-            max="0.12"
-            step="0.005"
-            value={agcTargetRms}
-            onChange={(e) => api?.setAsrSettings({ agcTargetRms: parseFloat(e.target.value) })}
-          />
-          <input
-            className="ndp-input"
-            style={{ width: 96 }}
-            type="number"
-            min={0.005}
-            max={0.2}
-            step={0.005}
-            value={agcTargetRms}
-            onChange={(e) => api?.setAsrSettings({ agcTargetRms: applyFloat(e.target.value, agcTargetRms) })}
-          />
-        </div>
-        <div className="ndp-range-input" style={{ marginTop: 8 }}>
-          <input
-            type="range"
-            min="1"
-            max="40"
-            step="1"
-            value={agcMaxGain}
-            onChange={(e) => api?.setAsrSettings({ agcMaxGain: parseInt(e.target.value) })}
-          />
-          <span>{agcMaxGain}x</span>
-        </div>
-        <p className="ndp-setting-hint">目标 RMS 建议 0.03-0.08；最大增益建议 10-30x</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input type="checkbox" checked={debug} onChange={(e) => api?.setAsrSettings({ debug: e.target.checked })} />
-          <span>调试日志</span>
-        </label>
-        <p className="ndp-setting-hint">开启后服务端/前端会输出更多处理信息，便于定位断句与识别问题</p>
-      </div>
-    </div>
-  )
-}
-
-// AI Settings Tab Component
-function AISettingsTab(props: {
-  api: ReturnType<typeof getApi>
-  aiSettings: AppSettings['ai'] | undefined
-  orchestrator: AppSettings['orchestrator'] | undefined
-  aiProfiles: AppSettings['aiProfiles'] | undefined
-  activeAiProfileId: string | undefined
-}) {
-  const { api, aiSettings, orchestrator, aiProfiles, activeAiProfileId } = props
-
-  const apiKey = aiSettings?.apiKey ?? ''
-  const baseUrl = aiSettings?.baseUrl ?? 'https://api.openai.com/v1'
-  const model = aiSettings?.model ?? 'gpt-4o-mini'
-  const temperature = aiSettings?.temperature ?? 0.7
-  const maxTokens = aiSettings?.maxTokens ?? 64000
-  const maxContextTokens = aiSettings?.maxContextTokens ?? 128000
-  const reasoningUi = resolveReasoningUiState(model, aiSettings ?? {})
-  const thinkingProvider = reasoningUi.providerChoice
-  const thinkingProviderEffective = reasoningUi.providerEffective
-  const openaiReasoningEffort = reasoningUi.openaiReasoningEffort
-  const claudeThinkingEffort = reasoningUi.claudeThinkingEffort
-  const geminiThinkingEffort = reasoningUi.geminiThinkingEffort
-  const systemPrompt = aiSettings?.systemPrompt ?? ''
-  const enableVision = aiSettings?.enableVision ?? false
-  const enableChatStreaming = aiSettings?.enableChatStreaming ?? false
-
-  const profiles = Array.isArray(aiProfiles) ? aiProfiles : []
-  const activeProfile = profiles.find((p) => p.id === (activeAiProfileId ?? '')) ?? null
-  const [profileName, setProfileName] = useState('')
-  const [modelOptions, setModelOptions] = useState<string[]>([])
-  const [modelsLoading, setModelsLoading] = useState(false)
-  const [modelsError, setModelsError] = useState('')
-
-  useEffect(() => {
-    setProfileName(activeProfile?.name ?? '')
-  }, [activeProfile?.id, activeProfile?.name])
-
-  const saveApiProfile = async (opts?: { overwrite?: boolean }) => {
-    if (!api) return
-    const overwrite = opts?.overwrite ?? false
-    const id = overwrite ? activeProfile?.id : undefined
-    const fallbackName = `${baseUrl || '接口'} ${model || ''}`.trim() || '新配置'
-    const name = profileName.trim() || fallbackName
-    await api.saveAIProfile({ id, name, apiKey, baseUrl, model })
-  }
-
-  const deleteApiProfile = async () => {
-    if (!api || !activeProfile?.id) return
-    await api.deleteAIProfile(activeProfile.id)
-  }
-
-  const applyApiProfile = async (id: string) => {
-    if (!api || !id) return
-    await api.applyAIProfile(id)
-  }
-
-  const fetchModelList = async () => {
-    if (!api) return
-    setModelsLoading(true)
-    setModelsError('')
-    try {
-      const res = await api.listAIModels({ apiKey, baseUrl })
-      if (!res.ok) {
-        setModelOptions([])
-        setModelsError(res.error || '拉取模型列表失败')
-        return
-      }
-      const incoming = Array.isArray(res.models) ? res.models : []
-      const merged = Array.from(new Set([model, ...incoming].map((x) => String(x ?? '').trim()).filter(Boolean)))
-      setModelOptions(merged)
-      setModelsError('')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      setModelOptions([])
-      setModelsError(msg || '拉取模型列表失败')
-    } finally {
-      setModelsLoading(false)
-    }
-  }
-
-  const toolMode = orchestrator?.toolCallingMode ?? 'auto'
-  const toolUseCustomAi = orchestrator?.toolUseCustomAi ?? false
-  const toolAiApiKey = orchestrator?.toolAiApiKey ?? ''
-  const toolAiBaseUrl = orchestrator?.toolAiBaseUrl ?? ''
-  const toolAiModel = orchestrator?.toolAiModel ?? ''
-  const toolAiTemperature = orchestrator?.toolAiTemperature ?? 0.2
-  const toolAiMaxTokens = orchestrator?.toolAiMaxTokens ?? 900
-  const toolAiTimeoutMs = orchestrator?.toolAiTimeoutMs ?? 60000
-  const toolAgentMaxTurns = orchestrator?.toolAgentMaxTurns ?? 8
-  const skillEnabled = orchestrator?.skillEnabled ?? true
-  const skillAllowModelInvocation = orchestrator?.skillAllowModelInvocation ?? true
-  const skillManagedDir = orchestrator?.skillManagedDir ?? ''
-  const skillVerboseLogging = orchestrator?.skillVerboseLogging ?? false
-
-  const selectedReasoningProvider: Exclude<AIReasoningProvider, 'auto'> =
-    thinkingProvider === 'auto' ? (thinkingProviderEffective ?? 'openai') : thinkingProvider
-  const providerDisplayName =
-    selectedReasoningProvider === 'openai' ? 'OpenAI' : selectedReasoningProvider === 'claude' ? 'Claude' : 'Gemini'
-  const inferredProviderText =
-    thinkingProvider === 'auto'
-      ? thinkingProviderEffective == null
-        ? '自动模式：当前模型名未识别，默认按 OpenAI 兼容参数处理。'
-        : `自动模式：当前按 ${providerDisplayName} 规则映射。`
-      : `手动模式：固定按 ${providerDisplayName} 规则映射。`
-
-  const applyProviderThinkingLevel = (
-    provider: Exclude<AIReasoningProvider, 'auto'>,
-    level: OpenAIReasoningEffort | ClaudeThinkingEffort | GeminiThinkingEffort,
-  ) => {
-    if (!api) return
-    const legacy = toLegacyThinkingEffortFromProviderLevel(provider, level)
-    if (provider === 'openai') {
-      void api.setAISettings({ openaiReasoningEffort: level as OpenAIReasoningEffort, thinkingEffort: legacy })
-      return
-    }
-    if (provider === 'claude') {
-      void api.setAISettings({ claudeThinkingEffort: level as ClaudeThinkingEffort, thinkingEffort: legacy })
-      return
-    }
-    void api.setAISettings({ geminiThinkingEffort: level as GeminiThinkingEffort, thinkingEffort: legacy })
-  }
-
-  // Format large numbers for display
-  const formatTokens = (n: number) => {
-    if (n >= 1000) return `${Math.round(n / 1000)}K`
-    return String(n)
-  }
-
-  return (
-    <div className="ndp-settings-section">
-      <h3>API 设置</h3>
-
-      <div className="ndp-setting-item">
-        <label>已保存的 API 配置</label>
-        <div className="ndp-row">
-          <select className="ndp-select" value={activeAiProfileId ?? ''} onChange={(e) => void applyApiProfile(e.target.value)}>
-            <option value="">（无）</option>
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="ndp-setting-actions">
-          <input
-            type="text"
-            className="ndp-input"
-            value={profileName}
-            placeholder="配置名称"
-            onChange={(e) => setProfileName(e.target.value)}
-          />
-          <button className="ndp-btn" onClick={() => void saveApiProfile()}>
-            保存新配置
-          </button>
-          <button className="ndp-btn" disabled={!activeProfile?.id} onClick={() => void saveApiProfile({ overwrite: true })}>
-            覆盖当前配置
-          </button>
-          <button className="ndp-btn ndp-btn-danger" disabled={!activeProfile?.id} onClick={() => void deleteApiProfile()}>
-            删除配置
-          </button>
-        </div>
-        <p className="ndp-setting-hint">可在多个 API 之间快速切换，不需要重复输入 Key / Base URL / 模型。</p>
-      </div>
-
-      {/* API Key */}
-      <div className="ndp-setting-item">
-        <label>API Key</label>
-        <input
-          type="password"
-          className="ndp-input"
-          value={apiKey}
-          placeholder="sk-..."
-          onChange={(e) => api?.setAISettings({ apiKey: e.target.value })}
-        />
-        <p className="ndp-setting-hint">支持 OpenAI 兼容的 API</p>
-      </div>
-
-      {/* Base URL */}
-      <div className="ndp-setting-item">
-        <label>API Base URL</label>
-        <input
-          type="text"
-          className="ndp-input"
-          value={baseUrl}
-          placeholder="https://api.openai.com/v1"
-          onChange={(e) => api?.setAISettings({ baseUrl: e.target.value })}
-        />
-        <p className="ndp-setting-hint">可配置代理或其他兼容 API 地址</p>
-      </div>
-
-      {/* Model */}
-      <div className="ndp-setting-item">
-        <label>模型名称</label>
-        <input
-          type="text"
-          className="ndp-input"
-          value={model}
-          placeholder="gpt-4o-mini"
-          onChange={(e) => api?.setAISettings({ model: e.target.value })}
-        />
-        <div className="ndp-setting-actions">
-          <button className="ndp-btn" onClick={() => void fetchModelList()} disabled={modelsLoading}>
-            {modelsLoading ? '加载中...' : '拉取模型列表'}
-          </button>
-          {modelOptions.length > 0 ? (
-            <select className="ndp-select" value={model} onChange={(e) => api?.setAISettings({ model: e.target.value })}>
-              {modelOptions.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          ) : null}
-        </div>
-        {modelsError ? <p className="ndp-setting-hint">{modelsError}</p> : null}
-        <p className="ndp-setting-hint">可手动输入模型 ID，也可以先拉取后选择。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={enableVision}
-            onChange={(e) => api?.setAISettings({ enableVision: e.target.checked })}
-          />
-          <span>启用识图能力（发送图片）</span>
-        </label>
-        <p className="ndp-setting-hint">部分模型不支持图片输入，关闭后聊天窗口将禁用“图片”按钮</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={enableChatStreaming}
-            onChange={(e) => api?.setAISettings({ enableChatStreaming: e.target.checked })}
-          />
-          <span>聊天流式生成（逐步输出）</span>
-        </label>
-        <p className="ndp-setting-hint">开启后会以 SSE 方式逐步生成文本；若同时开启 TTS 分句同步，会按句子分段出现</p>
-      </div>
-
-      <h3>生成设置</h3>
-
-      <div className="ndp-setting-item">
-        <label>思考提供商</label>
-        <select
-          className="ndp-select"
-          value={thinkingProvider}
-          onChange={(e) => api?.setAISettings({ thinkingProvider: e.target.value as AIReasoningProvider })}
-        >
-          <option value="auto">自动（按模型名推断）</option>
-          <option value="openai">OpenAI（含 GPT-5 / Codex 系列）</option>
-          <option value="claude">Claude（4.6 系列等）</option>
-          <option value="gemini">Gemini（3.1 Pro 等）</option>
-        </select>
-        <p className="ndp-setting-hint">{inferredProviderText}</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>思考强度（{providerDisplayName}）</label>
-        {selectedReasoningProvider === 'openai' ? (
-          <>
-            <select
-              className="ndp-select"
-              value={openaiReasoningEffort}
-              onChange={(e) => applyProviderThinkingLevel('openai', e.target.value as OpenAIReasoningEffort)}
-            >
-              <option value="disabled">禁用（本地不下发）</option>
-              <option value="minimal">极低（minimal）</option>
-              <option value="low">低（low）</option>
-              <option value="medium">中（medium）</option>
-              <option value="high">高（high）</option>
-              <option value="xhigh">超高（xhigh）</option>
-            </select>
-            <p className="ndp-setting-hint">
-              通过 OpenAI 兼容参数 `reasoning_effort` 下发；`minimal/xhigh` 主要用于 GPT-5 / Codex 推理模型（网关需支持）。
-            </p>
-          </>
-        ) : null}
-        {selectedReasoningProvider === 'claude' ? (
-          <>
-            <select
-              className="ndp-select"
-              value={claudeThinkingEffort}
-              onChange={(e) => applyProviderThinkingLevel('claude', e.target.value as ClaudeThinkingEffort)}
-            >
-              <option value="disabled">禁用（disabled）</option>
-              <option value="low">低（low）</option>
-              <option value="medium">中（medium）</option>
-              <option value="high">高（high）</option>
-            </select>
-            <p className="ndp-setting-hint">
-              当前程序走 OpenAI 兼容 `chat/completions`，会映射为 Claude 的 `thinking.budget_tokens`（兼容网关更稳）。
-            </p>
-          </>
-        ) : null}
-        {selectedReasoningProvider === 'gemini' ? (
-          <>
-            <select
-              className="ndp-select"
-              value={geminiThinkingEffort}
-              onChange={(e) => applyProviderThinkingLevel('gemini', e.target.value as GeminiThinkingEffort)}
-            >
-              <option value="disabled">禁用（本地不下发）</option>
-              <option value="low">低（low）</option>
-              <option value="medium">中（medium）</option>
-              <option value="high">高（high）</option>
-            </select>
-            <p className="ndp-setting-hint">
-              当前程序走 OpenAI 兼容 `chat/completions`，Gemini 将映射为兼容字段 `reasoning_effort`；Gemini 3.1 Pro 建议使用低/中/高。
-            </p>
-          </>
-        ) : null}
-        <p className="ndp-setting-hint">兼容旧配置：会自动同步一个旧版统一强度字段，避免历史逻辑失效。</p>
-      </div>
-
-      {/* Temperature */}
-      <div className="ndp-setting-item">
-        <label>温度 (Temperature)</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="0"
-            max="2"
-            step="0.1"
-            value={temperature}
-            onChange={(e) => api?.setAISettings({ temperature: parseFloat(e.target.value) })}
-          />
-          <span>{temperature.toFixed(1)}</span>
-        </div>
-        <p className="ndp-setting-hint">较低值更确定，较高值更有创意</p>
-      </div>
-
-      {/* Max Tokens */}
-      <div className="ndp-setting-item">
-        <label>最大回复长度</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="1000"
-            max="128000"
-            step="1000"
-            value={maxTokens}
-            onChange={(e) => api?.setAISettings({ maxTokens: parseInt(e.target.value) })}
-          />
-          <span>{formatTokens(maxTokens)}</span>
-        </div>
-        <p className="ndp-setting-hint">AI 单次回复的最大 token 数量</p>
-      </div>
-
-      {/* Max Context Tokens */}
-      <div className="ndp-setting-item">
-        <label>最大上下文长度</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="4000"
-            max="1000000"
-            step="4000"
-            value={maxContextTokens}
-            onChange={(e) => api?.setAISettings({ maxContextTokens: parseInt(e.target.value) })}
-          />
-          <span>{formatTokens(maxContextTokens)}</span>
-        </div>
-        <p className="ndp-setting-hint">对话历史的最大 token 数量</p>
-      </div>
-
-      <h3>工具(Agent) 设置</h3>
-
-      <div className="ndp-setting-item">
-        <label>工具执行模式</label>
-        <select
-          className="ndp-select"
-          value={toolMode}
-          onChange={(e) => api?.setOrchestratorSettings({ toolCallingMode: e.target.value as 'auto' | 'native' | 'text' })}
-        >
-          <option value="auto">auto（优先原生工具调用，失败自动降级兼容模式）</option>
-          <option value="native">native（仅使用原生工具调用）</option>
-          <option value="text">text（兼容模式：文本工具调用）</option>
-        </select>
-        <p className="ndp-setting-hint">
-          部分模型或代理的原生工具调用兼容性不稳定时，可改用 text 兼容模式绕开。
-        </p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>Agent 最大回合数 (maxTurns)</label>
-        <div className="ndp-range-input">
-          <input
-            type="range"
-            min="1"
-            max="30"
-            step="1"
-            value={toolAgentMaxTurns}
-            onChange={(e) => api?.setOrchestratorSettings({ toolAgentMaxTurns: parseInt(e.target.value) })}
-          />
-          <span>{toolAgentMaxTurns}</span>
-        </div>
-        <p className="ndp-setting-hint">命中“已达到最大回合”时可调大；建议 6~12，过大会更慢且更耗工具调用。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={skillEnabled}
-            onChange={(e) => api?.setOrchestratorSettings({ skillEnabled: e.target.checked })}
-          />
-          <span>启用 Skill（技能提示与 /skill 命令）</span>
-        </label>
-        <p className="ndp-setting-hint">关闭后将禁用 Skills 提示注入与显式 `/skill` 指令匹配，便于排查 Agent 行为。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={skillAllowModelInvocation}
-            disabled={!skillEnabled}
-            onChange={(e) => api?.setOrchestratorSettings({ skillAllowModelInvocation: e.target.checked })}
-          />
-          <span>允许模型自动选用 Skill（注入 available_skills）</span>
-        </label>
-        <p className="ndp-setting-hint">
-          关闭后仅保留手动 `/skill xxx ...` 触发；模型不会自动看到技能列表。
-        </p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label>托管 Skill 目录（可选）</label>
-        <input
-          type="text"
-          className="ndp-input"
-          value={skillManagedDir}
-          placeholder="%USERPROFILE%\\.neodeskpet\\skills（留空使用默认）"
-          onChange={(e) => api?.setOrchestratorSettings({ skillManagedDir: e.target.value })}
-        />
-        <p className="ndp-setting-hint">
-          工作区 Skills 固定读取当前项目 <code>skills/</code>；这里用于配置全局托管目录（留空走默认路径）。
-        </p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={skillVerboseLogging}
-            onChange={(e) => api?.setOrchestratorSettings({ skillVerboseLogging: e.target.checked })}
-          />
-          <span>记录 Skill 调试日志（任务日志里可见）</span>
-        </label>
-        <p className="ndp-setting-hint">会记录 Skill 加载统计、冲突处理与命中详情，便于定位“为什么选了某个 skill”。</p>
-      </div>
-
-      <div className="ndp-setting-item">
-        <label className="ndp-checkbox-label">
-          <input
-            type="checkbox"
-            checked={toolUseCustomAi}
-            onChange={(e) => api?.setOrchestratorSettings({ toolUseCustomAi: e.target.checked })}
-          />
-          <span>工具/Agent 使用单独的 API</span>
-        </label>
-        <p className="ndp-setting-hint">开启后，工具任务会优先使用下面的 API 配置；否则沿用上面的“API 设置”。</p>
-      </div>
-
-      {toolUseCustomAi && (
-        <>
-          <div className="ndp-setting-item">
-            <label>工具 API Key</label>
-            <input
-              type="password"
-              className="ndp-input"
-              value={toolAiApiKey}
-              placeholder="(可留空，沿用主 API Key)"
-              onChange={(e) => api?.setOrchestratorSettings({ toolAiApiKey: e.target.value })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>工具 API Base URL</label>
-            <input
-              type="text"
-              className="ndp-input"
-              value={toolAiBaseUrl}
-              placeholder="例如 https://generativelanguage.googleapis.com/v1beta/openai/"
-              onChange={(e) => api?.setOrchestratorSettings({ toolAiBaseUrl: e.target.value })}
-            />
-            <p className="ndp-setting-hint">
-              Gemini 官方 OpenAI 兼容基址：<code>https://generativelanguage.googleapis.com/v1beta/openai/</code>
-            </p>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>工具模型名称</label>
-            <input
-              type="text"
-              className="ndp-input"
-              value={toolAiModel}
-              placeholder="例如 gemini-2.5-flash / gpt-4o-mini"
-              onChange={(e) => api?.setOrchestratorSettings({ toolAiModel: e.target.value })}
-            />
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>工具温度 (Temperature)</label>
-            <div className="ndp-range-input">
-              <input
-                type="range"
-                min="0"
-                max="2"
-                step="0.1"
-                value={toolAiTemperature}
-                onChange={(e) => api?.setOrchestratorSettings({ toolAiTemperature: parseFloat(e.target.value) })}
-              />
-              <span>{toolAiTemperature.toFixed(1)}</span>
-            </div>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>工具最大输出 (maxTokens)</label>
-            <div className="ndp-range-input">
-              <input
-                type="range"
-                min="128"
-                max="8192"
-                step="64"
-                value={toolAiMaxTokens}
-                onChange={(e) => api?.setOrchestratorSettings({ toolAiMaxTokens: parseInt(e.target.value) })}
-              />
-              <span>{toolAiMaxTokens}</span>
-            </div>
-          </div>
-
-          <div className="ndp-setting-item">
-            <label>工具超时 (ms)</label>
-            <input
-              type="number"
-              className="ndp-input"
-              value={toolAiTimeoutMs}
-              min={2000}
-              max={180000}
-              step={500}
-              onChange={(e) => api?.setOrchestratorSettings({ toolAiTimeoutMs: parseInt(e.target.value) })}
-            />
-          </div>
-        </>
-      )}
-
-      {/* System Prompt */}
-      <div className="ndp-setting-item">
-        <label>系统提示词</label>
-        <textarea
-          className="ndp-textarea"
-          value={systemPrompt}
-          placeholder="在这里填写桌宠的人设（system prompt）"
-          rows={4}
-          onChange={(e) => api?.setAISettings({ systemPrompt: e.target.value })}
-        />
-        <p className="ndp-setting-hint">定义 AI 的角色和行为</p>
-      </div>
     </div>
   )
 }

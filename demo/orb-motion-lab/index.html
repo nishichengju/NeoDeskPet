@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orb Motion Lab</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="lab-app">
+      <aside class="lab-sidebar">
+        <div>
+          <div class="lab-kicker">NeoDeskPet</div>
+          <h1 class="lab-title">悬浮球 Motion Lab</h1>
+          <p class="lab-desc">只验证动画，不接桌宠真实窗口逻辑。先在这里选顺眼的开合方式，再回改正式悬浮球。</p>
+        </div>
+
+        <section class="lab-card">
+          <div class="lab-card-title">控制项</div>
+          <label class="lab-field">
+            <span>停靠边</span>
+            <select id="dockSelect">
+              <option value="right">右侧</option>
+              <option value="left">左侧</option>
+            </select>
+          </label>
+
+          <label class="lab-field">
+            <span>策略</span>
+            <select id="strategySelect">
+              <option value="liquid-stretch">液体拉伸</option>
+              <option value="corner-return">角落回球</option>
+              <option value="edge-reveal">整边裁切</option>
+            </select>
+          </label>
+
+          <label class="lab-field">
+            <span>打开目标</span>
+            <select id="targetSelect">
+              <option value="bar">输入条</option>
+              <option value="panel">上下文面板</option>
+            </select>
+          </label>
+
+          <label class="lab-field">
+            <span>动画时长 <strong id="durationText">280ms</strong></span>
+            <input id="durationRange" type="range" min="140" max="420" step="10" value="280" />
+          </label>
+
+          <label class="lab-field">
+            <span>回球高度 <strong id="offsetText">72px</strong></span>
+            <input id="offsetRange" type="range" min="24" max="120" step="2" value="72" />
+          </label>
+        </section>
+
+        <section class="lab-card">
+          <div class="lab-card-title">动作</div>
+          <div class="lab-actions">
+            <button id="openBarBtn" class="lab-btn">打开 Bar</button>
+            <button id="openPanelBtn" class="lab-btn">打开 Panel</button>
+            <button id="closeBtn" class="lab-btn lab-btn-primary">收回 Ball</button>
+            <button id="replayBtn" class="lab-btn">重播当前</button>
+            <button id="demoBtn" class="lab-btn">播放一轮</button>
+          </div>
+        </section>
+
+        <section class="lab-card">
+          <div class="lab-card-title">状态</div>
+          <div class="lab-status">
+            <div>当前视图：<strong id="viewText">ball</strong></div>
+            <div>当前阶段：<strong id="phaseText">idle</strong></div>
+          </div>
+          <p id="strategyHint" class="lab-hint"></p>
+        </section>
+      </aside>
+
+      <main class="lab-main">
+        <div class="lab-stage-wrap">
+          <div id="stage" class="lab-stage" data-dock="right" data-strategy="liquid-stretch" data-view="ball" data-phase="idle">
+            <div class="lab-window-grid"></div>
+
+            <div id="anchor" class="orb-anchor orb-dock-right">
+              <div id="surfaceShell" class="orb-surface-shell is-hidden" aria-hidden="true">
+                <div id="shellSkin" class="orb-shell-skin"></div>
+                <div id="barSurface" class="orb-surface orb-bar">
+                  <div class="orb-bar-left">
+                    <span class="orb-icon">＋</span>
+                    <span class="orb-icon">🕒</span>
+                  </div>
+                  <div class="orb-input">给我一个更顺的开合动画…</div>
+                  <div class="orb-send">▶</div>
+                </div>
+
+                <div id="panelSurface" class="orb-surface orb-panel is-hidden">
+                  <div class="orb-panel-header">
+                    <div class="orb-panel-title">当前上下文会话</div>
+                    <div class="orb-panel-actions">
+                      <span class="orb-panel-pill">12 条</span>
+                      <span class="orb-panel-mini">↗</span>
+                    </div>
+                  </div>
+                  <div class="orb-panel-body">
+                    <div class="orb-msg orb-msg-user">现在的球体开合有点瞬移，尤其收回去不自然。</div>
+                    <div class="orb-msg orb-msg-assistant">建议先验证“液体拉伸”这类拟物开合，再回改正式桌宠。</div>
+                    <div class="orb-msg orb-msg-user">有历史记录时，最好像从右上角那个球位收回去。</div>
+                    <div class="orb-msg orb-msg-assistant">这个实验页就是专门验证这件事的。</div>
+                  </div>
+                </div>
+              </div>
+
+              <div id="ballGhost" class="orb-ball orb-ball-ghost is-hidden"></div>
+              <div id="ball" class="orb-ball orb-ball-live">
+                <div class="orb-ball-core"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="lab-footnote">
+          运行后访问 <code>/demo/orb-motion-lab/</code>，先在这里挑顺眼的方案，再决定怎么迁回正式悬浮球。
+        </div>
+      </main>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -128,6 +128,7 @@ export type WindowBounds = {
 }
 
 export type AIThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
+export type AICompressionApiSource = 'main' | 'profile'
 export type AIReasoningProvider = 'auto' | 'openai' | 'claude' | 'gemini'
 export type OpenAIReasoningEffort = 'disabled' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 export type ClaudeThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
@@ -140,6 +141,12 @@ export type AISettings = {
   temperature: number // 0.0 - 2.0
   maxTokens: number // Max output tokens
   maxContextTokens: number // Max context tokens
+  autoContextCompressionEnabled?: boolean // Auto summarize older turns when context usage exceeds threshold
+  autoContextCompressionApiSource?: AICompressionApiSource // Which API config to use for compression: main or a saved profile
+  autoContextCompressionProfileId?: string // Saved AI profile ID used when autoContextCompressionApiSource=profile
+  autoContextCompressionModel?: string // Optional dedicated model for context compression; empty = follow current model
+  autoContextCompressionThresholdPct?: number // Trigger compression when estimated usage exceeds N% of maxContextTokens
+  autoContextCompressionTargetPct?: number // Compression aims to reduce estimated usage to N% (best-effort)
   thinkingEffort: AIThinkingEffort // 兼容旧配置的统一思考强度（建议使用下方 provider 专属配置）
   thinkingProvider: AIReasoningProvider // auto=按模型推断；也可手动指定 openai/claude/gemini
   openaiReasoningEffort: OpenAIReasoningEffort // OpenAI 兼容 reasoning_effort（含 GPT-5 的 minimal/xhigh）
@@ -180,6 +187,28 @@ export type ChatUiSettings = {
   contextOrbY: number // 0-100
 }
 
+export type WorldBookEntryScope = 'global' | 'persona'
+
+export type WorldBookEntry = {
+  id: string
+  title: string
+  content: string
+  tags: string[]
+  enabled: boolean
+  scope: WorldBookEntryScope
+  personaId?: string
+  priority: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type WorldBookSettings = {
+  enabled: boolean
+  activeTagIds: string[]
+  maxChars: number
+  entries: WorldBookEntry[]
+}
+
 export type ContextUsageSnapshot = {
   usedTokens: number
   maxContextTokens: number
@@ -203,13 +232,22 @@ export type TtsSettings = {
   streaming: boolean // Stream TTS chunks while generating
   segmented: boolean // Segment-synced mode: speak one sentence at a time
   pauseMs: number // Pause between segmented sentences (ms)
+  playbackTextMode: 'full' | 'quoted' | 'regex' // full=全文；quoted=仅引号内；regex=自定义正则提取
+  playbackRegex: string // 自定义提取正则（regex 模式生效）
+  playbackRegexFlags: string // 正则 flags（regex 模式生效）
+  ttsRoot?: string // GPT-SoVITS-v2_ProPlus 安装目录的绝对路径；留空则 fallback 到 APP_ROOT/GPT-SoVITS-v2_ProPlus
 }
 
 export type AsrSettings = {
   enabled: boolean
-  wsUrl: string // e.g. ws://127.0.0.1:8766/ws
+  wsUrl: string // e.g. ws://127.0.0.1:8000/demo/ws/realtime (OpenTypeless realtime demo ws)
   micDeviceId: string // Microphone device ID (empty string = system default)
   captureBackend?: 'auto' | 'script' | 'worklet' // auto=prefer worklet; script=force ScriptProcessor; worklet=force AudioWorklet
+  replaceRules: string // Local replacement rules, one per line: wrong => correct
+  fillerWords: string // Filler word list (comma/newline separated)
+  stripFillers: boolean // Remove filler words from final result
+  ignoreCaseReplace: boolean // Case-insensitive replacement for English hotwords
+  processInterim: boolean // Apply filler removal to interim result too (more jitter)
   language: 'auto' | 'zn' | 'en' | 'yue' | 'ja' | 'ko' | 'nospeech'
   useItn: boolean
   autoSend: boolean // Auto-send recognized text to LLM (otherwise fill input only)
@@ -317,6 +355,7 @@ export type AppSettings = {
   activeAiProfileId?: string
   chatProfile: ChatProfile
   chatUi: ChatUiSettings
+  worldBook: WorldBookSettings
   tts: TtsSettings
   asr: AsrSettings
 }

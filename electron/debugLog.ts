@@ -14,6 +14,17 @@ let baseDir = ''
 let logFilePath = ''
 let initialized = false
 const lastWriteAtByScope = new Map<string, number>()
+const lastWriteAtByEvent = new Map<string, number>()
+const pendingLines: string[] = []
+let pendingBytes = 0
+let flushTimer: NodeJS.Timeout | null = null
+let flushing = false
+
+const DEBUG_LOG_FLUSH_INTERVAL_MS = 50
+const DEBUG_LOG_MAX_QUEUE_LINES = 2000
+const DEBUG_LOG_MAX_QUEUE_BYTES = 2 * 1024 * 1024
+const DEBUG_LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
+const DEBUG_LOG_ROTATE_KEEP_FILES = 3
 
 function now(): number {
   return Date.now()
@@ -64,6 +75,7 @@ function ensureInitialized(): void {
   initialized = true
   if (!enabled) return
   ensureDir(baseDir)
+  void cleanupRotatedLogFiles()
 }
 
 export function initDebugLog(opts: { userDataDir: string; enabled?: boolean; filePathOverride?: string }): void {
@@ -96,10 +108,149 @@ export function clearDebugLog(): void {
   ensureInitialized()
   if (!enabled) return
   try {
+    pendingLines.length = 0
+    pendingBytes = 0
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
     ensureDir(path.dirname(logFilePath))
     fs.writeFileSync(logFilePath, '', 'utf-8')
+    clearRotatedLogFilesSync()
   } catch {
     // ignore
+  }
+}
+
+function getRotatedLogPath(index: number): string {
+  return `${logFilePath}.${index}`
+}
+
+function clearRotatedLogFilesSync(): void {
+  if (!logFilePath) return
+  try {
+    const dir = path.dirname(logFilePath)
+    const baseName = path.basename(logFilePath)
+    const files = fs.readdirSync(dir)
+    for (const file of files) {
+      if (!file.startsWith(`${baseName}.`)) continue
+      const suffix = file.slice(baseName.length + 1)
+      if (!/^\d+$/.test(suffix)) continue
+      try {
+        fs.unlinkSync(path.join(dir, file))
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function cleanupRotatedLogFiles(): Promise<void> {
+  if (!logFilePath) return
+  try {
+    const dir = path.dirname(logFilePath)
+    const baseName = path.basename(logFilePath)
+    const files = await fs.promises.readdir(dir)
+    const extras = files
+      .filter((file) => file.startsWith(`${baseName}.`))
+      .map((file) => {
+        const suffix = file.slice(baseName.length + 1)
+        return /^\d+$/.test(suffix) ? { file, index: Number(suffix) } : null
+      })
+      .filter((item): item is { file: string; index: number } => !!item)
+      .filter((item) => item.index > DEBUG_LOG_ROTATE_KEEP_FILES)
+
+    for (const item of extras) {
+      try {
+        await fs.promises.unlink(path.join(dir, item.file))
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function rotateLogFileIfNeeded(incomingBytes: number): Promise<void> {
+  if (!logFilePath || incomingBytes <= 0) return
+  if (DEBUG_LOG_FILE_MAX_BYTES <= 0 || DEBUG_LOG_ROTATE_KEEP_FILES <= 0) return
+
+  let currentSize = 0
+  try {
+    currentSize = (await fs.promises.stat(logFilePath)).size
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code
+    if (code === 'ENOENT') return
+    return
+  }
+
+  if (currentSize + incomingBytes <= DEBUG_LOG_FILE_MAX_BYTES) return
+
+  try {
+    await fs.promises.unlink(getRotatedLogPath(DEBUG_LOG_ROTATE_KEEP_FILES))
+  } catch {
+    // ignore
+  }
+
+  for (let index = DEBUG_LOG_ROTATE_KEEP_FILES - 1; index >= 1; index -= 1) {
+    try {
+      await fs.promises.rename(getRotatedLogPath(index), getRotatedLogPath(index + 1))
+    } catch {
+      // ignore
+    }
+  }
+
+  try {
+    await fs.promises.rename(logFilePath, getRotatedLogPath(1))
+  } catch {
+    // ignore
+  }
+
+  await cleanupRotatedLogFiles()
+}
+
+function getEventThrottleMs(scope: string, event: string, data?: unknown): number {
+  const scopeKey = String(scope ?? '').trim()
+  const eventKey = String(event ?? '').trim()
+
+  if (scopeKey === 'renderer' && eventKey === 'chat:task.blocks') {
+    const obj = data && typeof data === 'object' ? (data as Record<string, unknown>) : null
+    const isFinal = obj?.isFinal === true
+    return isFinal ? 0 : 250
+  }
+
+  return 0
+}
+
+function scheduleFlush(): void {
+  if (flushTimer || flushing || !enabled || pendingLines.length === 0 || !logFilePath) return
+  flushTimer = setTimeout(() => {
+    flushTimer = null
+    void flushPendingLines()
+  }, DEBUG_LOG_FLUSH_INTERVAL_MS)
+  ;(flushTimer as unknown as { unref?: () => void }).unref?.()
+}
+
+async function flushPendingLines(): Promise<void> {
+  if (flushing || !enabled || !logFilePath || pendingLines.length === 0) return
+  flushing = true
+
+  const chunk = pendingLines.join('')
+  pendingLines.length = 0
+  pendingBytes = 0
+
+  try {
+    ensureDir(path.dirname(logFilePath))
+    await rotateLogFileIfNeeded(Buffer.byteLength(chunk, 'utf8'))
+    await fs.promises.appendFile(logFilePath, chunk, 'utf-8')
+  } catch {
+    // ignore
+  } finally {
+    flushing = false
+    if (pendingLines.length > 0) scheduleFlush()
   }
 }
 
@@ -118,6 +269,14 @@ export function appendDebugLog(scope: string, event: string, data?: unknown): vo
     lastWriteAtByScope.set(scopeKey, ts)
   }
 
+  const eventThrottleMs = getEventThrottleMs(scopeKey, event, data)
+  if (eventThrottleMs > 0) {
+    const eventThrottleKey = `${scopeKey}:${String(event ?? '').trim()}`
+    const last = lastWriteAtByEvent.get(eventThrottleKey) ?? 0
+    if (ts - last < eventThrottleMs) return
+    lastWriteAtByEvent.set(eventThrottleKey, ts)
+  }
+
   const entry: DebugLogEntry = {
     ts,
     pid: process.pid,
@@ -127,8 +286,20 @@ export function appendDebugLog(scope: string, event: string, data?: unknown): vo
   }
 
   try {
-    ensureDir(path.dirname(logFilePath))
-    fs.appendFileSync(logFilePath, safeJsonStringify(entry) + '\n', 'utf-8')
+    const line = safeJsonStringify(entry) + '\n'
+    const lineBytes = Buffer.byteLength(line, 'utf8')
+
+    if (pendingLines.length >= DEBUG_LOG_MAX_QUEUE_LINES || pendingBytes + lineBytes > DEBUG_LOG_MAX_QUEUE_BYTES) {
+      // 队列满时优先丢弃最旧日志，避免调试日志反过来拖垮主进程。
+      while (pendingLines.length > 0 && (pendingLines.length >= DEBUG_LOG_MAX_QUEUE_LINES || pendingBytes + lineBytes > DEBUG_LOG_MAX_QUEUE_BYTES)) {
+        const dropped = pendingLines.shift()
+        if (typeof dropped === 'string') pendingBytes = Math.max(0, pendingBytes - Buffer.byteLength(dropped, 'utf8'))
+      }
+    }
+
+    pendingLines.push(line)
+    pendingBytes += lineBytes
+    scheduleFlush()
   } catch {
     // ignore
   }

@@ -8,6 +8,13 @@ import { getWindowManagerInstance } from './runtimeRefs'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
 import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
+import {
+  getBrowserControlService,
+  type BrowserCloseTabsOptions,
+  type BrowserExtractOptions,
+  type BrowserPlaywrightAction,
+  type BrowserScreenshotOptions,
+} from './browserControlService'
 import type { TaskRecord } from './types'
 
 export type ToolInput = string | Record<string, unknown> | Array<unknown> | null
@@ -42,6 +49,40 @@ function ensureStringArray(value: unknown, maxLen: number): string[] {
     out.push(s)
     if (out.length >= maxLen) break
   }
+  return out
+}
+
+function isPowerShellCommand(cmd: string): boolean {
+  const base = path.basename(String(cmd ?? '').trim()).toLowerCase().replace(/\.exe$/i, '')
+  return base === 'powershell' || base === 'pwsh'
+}
+
+function rewriteDirectPythonScriptPowerShellCommand(command: string): string {
+  const raw = String(command ?? '')
+  const trimmed = raw.trim()
+  if (!trimmed || /^(?:python|py)(?:\.exe)?\b/i.test(trimmed)) return raw
+
+  // Windows 的 .py 文件关联可能是编辑器；弱模型常把 `python "x.py"` 写成 `& "x.py"`。
+  const m = trimmed.match(/^\s*&\s*((?:"[^"]+\.py"|'[^']+\.py'|[^\s'"]+\.py))(?=$|\s)([\s\S]*)$/i)
+  if (!m?.[1]) return raw
+
+  const script = m[1]
+  const rest = String(m[2] ?? '')
+  return `python ${script}${rest}`
+}
+
+function normalizeCliArgsForWindows(cmd: string, args: string[]): string[] {
+  if (process.platform !== 'win32' || !isPowerShellCommand(cmd)) return args
+
+  const commandIndex = args.findIndex((arg) => /^-(?:Command|c)$/i.test(String(arg ?? '').trim()))
+  if (commandIndex < 0 || commandIndex + 1 >= args.length) return args
+
+  const command = String(args[commandIndex + 1] ?? '')
+  const rewritten = rewriteDirectPythonScriptPowerShellCommand(command)
+  if (rewritten === command) return args
+
+  const out = [...args]
+  out[commandIndex + 1] = rewritten
   return out
 }
 
@@ -82,6 +123,43 @@ function isSubPathOf(parentDir: string, childPath: string): boolean {
   return true
 }
 
+function imageMimeFromExt(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase()
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.bmp') return 'image/bmp'
+  return 'image/png'
+}
+
+function isSupportedImagePath(filePath: string): boolean {
+  return ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'].includes(path.extname(filePath).toLowerCase())
+}
+
+function resolveInspectableImagePath(rawPath: string, userDataDir: string): string {
+  const raw = String(rawPath ?? '').trim()
+  if (!raw) throw new Error('image.inspect 需要 path')
+
+  const userDataRoot = path.resolve(userDataDir)
+  const target = path.resolve(path.isAbsolute(raw) ? raw : path.join(userDataRoot, raw))
+  const allowedRoots = [
+    userDataRoot,
+    path.join(userDataRoot, 'task-output'),
+    path.join(userDataRoot, 'screenshots'),
+    path.join(userDataRoot, 'browser-screenshots'),
+    path.join(userDataRoot, 'chat-attachments'),
+    path.join(userDataRoot, 'mcp-tool-images'),
+  ].map((p) => path.resolve(p))
+
+  if (!allowedRoots.some((root) => isSubPathOf(root, target))) {
+    throw new Error('image.inspect 只能读取应用数据目录中的图片')
+  }
+  if (!isSupportedImagePath(target)) {
+    throw new Error('image.inspect 仅支持 png/jpg/jpeg/webp/gif/bmp 图片')
+  }
+  return target
+}
+
 function resolveSkillRuntimeOptionsFromSettings(settings: ReturnType<typeof getSettings>): SkillManagerRuntimeOptions {
   const managedDirOverride =
     typeof settings.orchestrator?.skillManagedDir === 'string' && settings.orchestrator.skillManagedDir.trim()
@@ -114,9 +192,10 @@ function shouldAutoRefreshSkillRegistryForFileWrite(fullPath: string): boolean {
 }
 
 function sanitizeRepoDirName(raw: string): string {
-  const s = String(raw ?? '')
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-')
+  const cleaned = Array.from(String(raw ?? '').trim())
+    .map((ch) => (ch.charCodeAt(0) < 32 || /[<>:"/\\|?*]/.test(ch) ? '-' : ch))
+    .join('')
+  const s = cleaned
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '')
@@ -622,6 +701,90 @@ export async function executeBuiltinTool(
     }
   }
 
+  if (toolName === 'browser.tabs') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const service = getBrowserControlService(ctx.userDataDir)
+    const tabs = await service.listTabs({
+      profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
+      channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
+      headless: obj?.headless === true,
+      timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
+    })
+    return clampStepOutput(JSON.stringify({ ok: true, tabs }, null, 2), maxStepOutputChars)
+  }
+
+  if (toolName === 'browser.scan') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const service = getBrowserControlService(ctx.userDataDir)
+    const result = await service.scan({
+      profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
+      channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
+      headless: obj?.headless === true,
+      timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
+      tabId: typeof obj?.tabId === 'string' ? obj.tabId : undefined,
+      url: typeof obj?.url === 'string' ? obj.url : undefined,
+      textOnly: obj?.textOnly !== false,
+      tabsOnly: obj?.tabsOnly === true,
+      selector: typeof obj?.selector === 'string' ? obj.selector : undefined,
+      maxChars: typeof obj?.maxChars === 'number' ? obj.maxChars : undefined,
+    })
+    return clampStepOutput(result, maxStepOutputChars)
+  }
+
+  if (toolName === 'browser.exec_js') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const script = typeof obj?.script === 'string' ? obj.script.trim() : ''
+    if (!script) throw new Error('browser.exec_js 需要 script')
+    const service = getBrowserControlService(ctx.userDataDir)
+    const result = await service.execJs({
+      profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
+      channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
+      headless: obj?.headless === true,
+      timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
+      tabId: typeof obj?.tabId === 'string' ? obj.tabId : undefined,
+      url: typeof obj?.url === 'string' ? obj.url : undefined,
+      script,
+      noMonitor: obj?.noMonitor === true,
+      maxChars: typeof obj?.maxChars === 'number' ? obj.maxChars : undefined,
+    })
+    return clampStepOutput(result, maxStepOutputChars)
+  }
+
+  if (toolName === 'browser.screenshot') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const service = getBrowserControlService(ctx.userDataDir)
+    const result = await service.screenshot({
+      profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
+      channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
+      headless: obj?.headless === true,
+      timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
+      tabId: typeof obj?.tabId === 'string' ? obj.tabId : undefined,
+      path: typeof obj?.path === 'string' ? obj.path : undefined,
+      fullPage: obj?.fullPage === true,
+      taskId: ctx.task.id,
+    })
+    return clampStepOutput(result, maxStepOutputChars)
+  }
+
+  if (toolName === 'browser.close_tabs') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const closeOptions: BrowserCloseTabsOptions = {
+      profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
+      channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
+      headless: obj?.headless === true,
+      timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
+      tabIds: Array.isArray(obj?.tabIds) ? obj.tabIds.filter((id): id is string => typeof id === 'string') : undefined,
+      closeInactive: obj?.closeInactive === true,
+      closeBlank: obj?.closeBlank === true,
+      urlIncludes: Array.isArray(obj?.urlIncludes) ? obj.urlIncludes.filter((s): s is string => typeof s === 'string') : undefined,
+      titleIncludes: Array.isArray(obj?.titleIncludes) ? obj.titleIncludes.filter((s): s is string => typeof s === 'string') : undefined,
+      keepActive: obj?.keepActive !== false,
+    }
+    const service = getBrowserControlService(ctx.userDataDir)
+    const result = await service.closeTabs(closeOptions)
+    return clampStepOutput(result, maxStepOutputChars)
+  }
+
   if (toolName === 'browser.playwright') {
     const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
     const url = typeof obj?.url === 'string' ? obj.url : typeof input === 'string' ? input : ''
@@ -630,72 +793,41 @@ export async function executeBuiltinTool(
     const channelRaw = typeof obj?.channel === 'string' ? obj.channel.trim() : ''
     const channel = channelRaw || (process.platform === 'win32' ? 'msedge' : '')
 
+    if (!url || !/^https?:\/\//i.test(url)) throw new Error(`browser.playwright 需要有效 URL（http/https），当前：${url || '(空)'}`)
+
     const extractObj =
       typeof obj?.extract === 'object' && obj.extract && !Array.isArray(obj.extract) ? (obj.extract as Record<string, unknown>) : null
-    const shouldExtract = !!extractObj
-    const extractSelector = shouldExtract && typeof extractObj?.selector === 'string' ? String(extractObj.selector) : 'body'
-    const extractFormatRaw = shouldExtract && typeof extractObj?.format === 'string' ? String(extractObj.format) : 'innerText'
-    const extractFormat = ['innerText', 'text', 'html'].includes(extractFormatRaw) ? extractFormatRaw : 'innerText'
-    const extractOptional = shouldExtract && extractObj?.optional === true
-    const extractMaxChars =
-      shouldExtract && typeof extractObj?.maxChars === 'number' ? Math.max(80, Math.min(10000, Math.trunc(extractObj.maxChars))) : 2000
+    const extract: BrowserExtractOptions | null = extractObj
+      ? {
+          selector: typeof extractObj.selector === 'string' ? extractObj.selector : undefined,
+          format: typeof extractObj.format === 'string' ? extractObj.format : undefined,
+          maxChars: typeof extractObj.maxChars === 'number' ? extractObj.maxChars : undefined,
+          optional: extractObj.optional === true,
+        }
+      : null
 
     const screenshotObj =
       typeof obj?.screenshot === 'object' && obj.screenshot && !Array.isArray(obj.screenshot) ? (obj.screenshot as Record<string, unknown>) : null
-    const screenshotPathRaw = typeof screenshotObj?.path === 'string' ? screenshotObj.path.trim() : ''
-    const screenshotFullPage = screenshotObj?.fullPage === true
+    const screenshot: BrowserScreenshotOptions | null = screenshotObj
+      ? {
+          path: typeof screenshotObj.path === 'string' ? screenshotObj.path : undefined,
+          fullPage: screenshotObj.fullPage === true,
+        }
+      : null
 
-    const actions = Array.isArray(obj?.actions) ? (obj?.actions as Array<Record<string, unknown>>) : []
-
-    if (!url || !/^https?:\/\//i.test(url)) throw new Error(`browser.playwright 需要有效 URL（http/https），当前：${url || '(空)'}`)
-
-    const pw = (await import('playwright-core')) as unknown as {
-      chromium: {
-        launchPersistentContext: (
-          userDataDir: string,
-          options: {
-            headless: boolean
-            channel?: string
-            viewport?: { width: number; height: number }
-            ignoreHTTPSErrors?: boolean
-          },
-        ) => Promise<{
-          newPage: () => Promise<{
-            goto: (u: string, opts: { waitUntil: 'load' | 'domcontentloaded' | 'networkidle'; timeout: number }) => Promise<void>
-            waitForTimeout: (ms: number) => Promise<void>
-            waitForLoadState: (state: 'load' | 'domcontentloaded' | 'networkidle', opts: { timeout: number }) => Promise<void>
-            title: () => Promise<string>
-            locator: (selector: string) => {
-              first: () => {
-                innerText: (opts: { timeout: number }) => Promise<string>
-                textContent: (opts: { timeout: number }) => Promise<string | null>
-                innerHTML: (opts: { timeout: number }) => Promise<string>
-                click: (opts: { timeout: number }) => Promise<void>
-                fill: (value: string, opts: { timeout: number }) => Promise<void>
-                press: (key: string, opts: { timeout: number }) => Promise<void>
-              }
-            }
-            screenshot: (opts: { path: string; fullPage: boolean; timeout: number }) => Promise<void>
-          }>
-          close: () => Promise<void>
-        }>
-      }
-    }
-
-    const profileName = typeof obj?.profile === 'string' && obj.profile.trim() ? obj.profile.trim() : 'default'
-    const safeProfile = profileName.replace(/[<>:"/\\|?*]+/g, '_')
-    const profileDir = path.join(ctx.userDataDir, 'playwright', safeProfile)
-    await fs.mkdir(profileDir, { recursive: true })
+    const actions: BrowserPlaywrightAction[] = Array.isArray(obj?.actions)
+      ? (obj.actions as Array<Record<string, unknown>>).map((action) => ({
+          type: typeof action.type === 'string' ? action.type : undefined,
+          ms: typeof action.ms === 'number' ? action.ms : undefined,
+          state: typeof action.state === 'string' ? action.state : undefined,
+          selector: typeof action.selector === 'string' ? action.selector : undefined,
+          text: typeof action.text === 'string' ? action.text : undefined,
+          key: typeof action.key === 'string' ? action.key : undefined,
+        }))
+      : []
 
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(new Error('playwright timeout')), timeoutMs)
-
-    const context = await pw.chromium.launchPersistentContext(profileDir, {
-      headless,
-      channel: channel || undefined,
-      viewport: { width: 1280, height: 720 },
-      ignoreHTTPSErrors: true,
-    })
 
     ctx.setCancelCurrent(() => {
       try {
@@ -703,95 +835,28 @@ export async function executeBuiltinTool(
       } catch {
         // ignore
       }
-      void context.close().catch(() => undefined)
     })
 
     try {
-      const page = await context.newPage()
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-
-      for (const action of actions.slice(0, 30)) {
-        if (ctx.isCanceled()) break
-        await ctx.waitIfPaused()
-
-        const type = typeof action?.type === 'string' ? action.type : ''
-        if (!type) continue
-
-        if (type === 'waitMs') {
-          const ms = typeof action?.ms === 'number' ? Math.max(0, Math.min(60000, Math.trunc(action.ms))) : 500
-          await page.waitForTimeout(ms)
-          continue
-        }
-
-        if (type === 'waitForLoad') {
-          const stateRaw = typeof action?.state === 'string' ? action.state : 'networkidle'
-          const state = (['load', 'domcontentloaded', 'networkidle'].includes(stateRaw) ? stateRaw : 'networkidle') as
-            | 'load'
-            | 'domcontentloaded'
-            | 'networkidle'
-          await page.waitForLoadState(state, { timeout: timeoutMs })
-          continue
-        }
-
-        const selector = typeof action?.selector === 'string' ? action.selector : ''
-        if (!selector) continue
-        const loc = page.locator(selector).first()
-
-        if (type === 'click') {
-          await loc.click({ timeout: timeoutMs })
-          continue
-        }
-        if (type === 'fill') {
-          const text = typeof action?.text === 'string' ? action.text : ''
-          await loc.fill(text, { timeout: timeoutMs })
-          continue
-        }
-        if (type === 'press') {
-          const key = typeof action?.key === 'string' ? action.key : 'Enter'
-          await loc.press(key, { timeout: timeoutMs })
-          continue
-        }
-        if (type === 'waitFor') {
-          await loc.innerText({ timeout: timeoutMs })
-          continue
-        }
-      }
-
-      const title = await page.title().catch(() => '')
-
-      let extractPreview = ''
-      if (shouldExtract) {
-        let extracted = ''
-        try {
-          const loc = page.locator(extractSelector).first()
-          if (extractFormat === 'html') extracted = await loc.innerHTML({ timeout: timeoutMs })
-          else if (extractFormat === 'text') extracted = (await loc.textContent({ timeout: timeoutMs })) ?? ''
-          else extracted = await loc.innerText({ timeout: timeoutMs })
-        } catch (err) {
-          if (!extractOptional) throw err
-        }
-        extractPreview = extracted ? clampStepOutput(extracted.slice(0, extractMaxChars), maxStepOutputChars) : ''
-      }
-
-      let shotPath = ''
-      if (screenshotObj) {
-        const rel = screenshotPathRaw || `task-output/${ctx.task.id}-shot.png`
-        const fullPath = path.isAbsolute(rel) ? rel : path.join(ctx.userDataDir, rel)
-        await fs.mkdir(path.dirname(fullPath), { recursive: true })
-        await page.screenshot({ path: fullPath, fullPage: screenshotFullPage, timeout: timeoutMs })
-        shotPath = fullPath
-      }
-
-      const lines: string[] = []
-      if (title) lines.push(`title: ${title}`)
-      lines.push(`url: ${url}`)
-      if (shotPath) lines.push(`screenshot: ${shotPath}`)
-      if (extractPreview) lines.push(`extract(${extractSelector}): ${extractPreview}`)
-      return clampStepOutput(lines.join('\n'), maxStepOutputChars)
+      const service = getBrowserControlService(ctx.userDataDir)
+      const result = await service.runPlaywright({
+        url,
+        timeoutMs,
+        headless,
+        channel,
+        profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
+        taskId: ctx.task.id,
+        actions,
+        extract,
+        screenshot,
+        waitIfPaused: ctx.waitIfPaused,
+        isCanceled: () => ctx.isCanceled() || ac.signal.aborted,
+        signal: ac.signal,
+      })
+      return clampStepOutput(result, maxStepOutputChars)
     } finally {
       clearTimeout(timer)
       ctx.setCancelCurrent(undefined)
-      await context.close().catch(() => undefined)
     }
   }
 
@@ -1155,7 +1220,7 @@ export async function executeBuiltinTool(
         return false
       }
 
-      while (true) {
+      for (;;) {
         if (ctx.isCanceled()) {
           requestKill()
           yieldedBy = 'canceled'
@@ -1250,6 +1315,7 @@ export async function executeBuiltinTool(
     } else {
       throw new Error('cli.exec_stream 输入格式不正确')
     }
+    args = normalizeCliArgsForWindows(cmd, args)
 
     ensureCliExecStreamCapacity()
 
@@ -1354,7 +1420,7 @@ export async function executeBuiltinTool(
       return false
     }
 
-    while (true) {
+    for (;;) {
       if (ctx.isCanceled()) {
         requestKill()
         yieldedBy = 'canceled'
@@ -1452,6 +1518,7 @@ export async function executeBuiltinTool(
     } else {
       throw new Error('cli.exec 输入格式不正确')
     }
+    args = normalizeCliArgsForWindows(cmd, args)
 
     const child = spawn(cmd, args, { cwd, env, windowsHide: true })
     let killRequested = false
@@ -1925,6 +1992,129 @@ export async function executeBuiltinTool(
 
       const content = data?.choices?.[0]?.message?.content ?? ''
       return clampStepOutput(content || '(空)', maxStepOutputChars)
+    } finally {
+      clearTimeout(timer)
+      ctx.setCancelCurrent(undefined)
+    }
+  }
+
+  if (toolName === 'image.inspect') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const rawPath = typeof obj?.path === 'string' ? obj.path : typeof input === 'string' ? input : ''
+    const imagePath = resolveInspectableImagePath(rawPath, ctx.userDataDir)
+    const prompt =
+      typeof obj?.prompt === 'string' && obj.prompt.trim()
+        ? obj.prompt.trim()
+        : '请描述这张图片的主要内容、可见文字、关键状态和可能需要用户注意的细节。'
+
+    const stat = await fs.stat(imagePath).catch(() => null)
+    if (!stat || !stat.isFile()) throw new Error(`image not found: ${imagePath}`)
+    const maxImageBytes = 10 * 1024 * 1024
+    if (stat.size > maxImageBytes) throw new Error(`image too large: ${stat.size} bytes（上限 ${maxImageBytes} bytes）`)
+
+    const appSettings = settings
+    if (appSettings.ai.enableVision === false) throw new Error('AI 设置未启用视觉能力（enableVision=false）')
+
+    const baseUrl = (typeof obj?.baseUrl === 'string' && obj.baseUrl.trim() ? obj.baseUrl.trim() : appSettings.ai.baseUrl).trim()
+    const apiKey = typeof obj?.apiKey === 'string' ? obj.apiKey : appSettings.ai.apiKey
+    const model = (typeof obj?.model === 'string' && obj.model.trim() ? obj.model.trim() : appSettings.ai.model).trim()
+    const temperature =
+      typeof obj?.temperature === 'number'
+        ? Math.max(0, Math.min(2, obj.temperature))
+        : Math.max(0, Math.min(2, appSettings.ai.temperature))
+    const maxTokensRaw = typeof obj?.maxTokens === 'number' ? Math.max(64, Math.min(4096, Math.trunc(obj.maxTokens))) : 600
+    const reasoningOptions = buildOpenAICompatReasoningOptions({
+      model,
+      maxTokens: maxTokensRaw,
+      settings: {
+        thinkingEffort: obj?.thinkingEffort ?? appSettings.ai.thinkingEffort,
+        thinkingProvider: obj?.thinkingProvider ?? appSettings.ai.thinkingProvider,
+        openaiReasoningEffort: obj?.openaiReasoningEffort ?? appSettings.ai.openaiReasoningEffort,
+        claudeThinkingEffort: obj?.claudeThinkingEffort ?? appSettings.ai.claudeThinkingEffort,
+        geminiThinkingEffort: obj?.geminiThinkingEffort ?? appSettings.ai.geminiThinkingEffort,
+      },
+      claudeDisabledMinMaxTokens: 1024,
+    })
+    const maxTokens = reasoningOptions.maxTokens
+    const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(2000, Math.min(180000, Math.trunc(obj.timeoutMs))) : 60000
+
+    if (!baseUrl || !model) throw new Error('未配置 LLM baseUrl/model（设置 → AI 设置）')
+
+    const buf = await fs.readFile(imagePath)
+    const mimeType = imageMimeFromExt(imagePath)
+    const dataUrl = `data:${mimeType};base64,${buf.toString('base64')}`
+
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error('image.inspect timeout')), timeoutMs)
+    ctx.setCancelCurrent(() => ac.abort(new Error('canceled')))
+
+    try {
+      const url = joinUrl(baseUrl, 'chat/completions')
+      const headers: Record<string, string> = { 'content-type': 'application/json' }
+      const token = (apiKey ?? '').trim()
+      if (token) headers.authorization = `Bearer ${token}`
+
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: ac.signal,
+        headers,
+        body: JSON.stringify({
+          model,
+          temperature,
+          max_tokens: maxTokens,
+          ...reasoningOptions.extra,
+          messages: [
+            {
+              role: 'system',
+              content:
+                '你是严谨的图片理解助手。只能依据图片可见内容回答；看不清或无法确认时要明确说明，不能凭空猜测。',
+            },
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: dataUrl } },
+              ],
+            },
+          ],
+        }),
+      })
+
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: { message?: string }
+        choices?: Array<{ message?: { content?: unknown } }>
+      }
+      if (!res.ok) {
+        const errMsg = data?.error?.message || `HTTP ${res.status}`
+        throw new Error(errMsg)
+      }
+
+      const msg = data?.choices?.[0]?.message?.content
+      const answer = Array.isArray(msg)
+        ? msg
+            .map((p) => (p && typeof p === 'object' && typeof (p as Record<string, unknown>).text === 'string' ? String((p as Record<string, unknown>).text) : ''))
+            .filter(Boolean)
+            .join('\n')
+        : typeof msg === 'string'
+          ? msg
+          : ''
+
+      return clampStepOutput(
+        JSON.stringify(
+          {
+            ok: true,
+            path: imagePath,
+            mimeType,
+            bytes: stat.size,
+            prompt,
+            model,
+            answer: answer.trim() || '(空)',
+          },
+          null,
+          2,
+        ),
+        maxStepOutputChars,
+      )
     } finally {
       clearTimeout(timer)
       ctx.setCancelCurrent(undefined)

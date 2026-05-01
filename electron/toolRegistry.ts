@@ -52,7 +52,8 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'browser.open',
     callName: 'ndp_browser_open',
-    description: '用系统默认浏览器（或指定浏览器）打开网页链接，通常用于“只打开网站/保持登录态”。',
+    description:
+      '用系统默认浏览器（或指定浏览器）打开网页链接，只适合用户明确要求“只打开网页”。该浏览器不可被后续自动化控制；涉及搜索、点击、打开结果、截图、提取时不要用它。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -79,7 +80,7 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     name: 'browser.playwright',
     callName: 'ndp_browser_playwright',
     description:
-      '用 Playwright 打开动态网页并可选截图/执行交互。默认只返回 title/url（除非显式传 extract 才提取正文）。',
+      '兼容入口：用可控的 Playwright 浏览器打开或复用指定 URL，并可选截图/执行交互。凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，优先使用它，不要用 browser.open。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -140,6 +141,152 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     risk: 'medium',
     cost: 'high',
     tags: ['browser', 'automation', 'dynamic'],
+    version: '1.0',
+  },
+  {
+    name: 'browser.tabs',
+    callName: 'ndp_browser_tabs',
+    description: '列出桌宠内置浏览器控制服务当前可见的标签页，默认只返回低 token 的 title/url/id。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
+        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
+        headless: { type: 'boolean', description: '是否无头（默认 false，便于用户手动登录）' },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
+      },
+    },
+    examples: [{ title: '列出默认 profile 标签页', input: { profile: 'default', channel: 'msedge' } }],
+    risk: 'low',
+    cost: 'low',
+    tags: ['browser', 'tabs', 'automation'],
+    version: '1.0',
+  },
+  {
+    name: 'browser.scan',
+    callName: 'ndp_browser_scan',
+    description:
+      '低 token 扫描动态网页或桌宠内置 Playwright 当前活动标签页，返回 title/url/标签页信息和裁剪后的可见文本/简化结构；不等于系统浏览器前台页。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        url: { type: 'string', description: '可选 http/https URL；传入时会打开或复用该页面' },
+        tabId: { type: 'string', description: '可选标签页 ID，来自 browser.tabs/browser.scan 返回值' },
+        profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
+        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
+        headless: { type: 'boolean', description: '是否无头（默认 false，便于用户手动登录）' },
+        tabsOnly: { type: 'boolean', description: '只返回标签页列表，不读取页面内容' },
+        textOnly: { type: 'boolean', description: '只返回可见文本摘要（默认 true）' },
+        selector: { type: 'string', description: '可选 CSS selector，仅扫描该区域' },
+        maxChars: { type: 'integer', description: '输出最大字符数（默认 8000，硬上限 20000）', minimum: 200, maximum: 20000 },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
+      },
+    },
+    examples: [
+      { title: '扫描 B站首页', input: { url: 'https://www.bilibili.com/', profile: 'bili', channel: 'msedge', maxChars: 8000 } },
+      { title: '只看标签页', input: { profile: 'default', tabsOnly: true } },
+    ],
+    risk: 'low',
+    cost: 'medium',
+    tags: ['browser', 'scan', 'automation', 'low-token'],
+    version: '1.0',
+  },
+  {
+    name: 'browser.exec_js',
+    callName: 'ndp_browser_exec_js',
+    description:
+      '在桌宠内置浏览器标签页执行 JavaScript，用于读取页面状态、填表、点击、搜索、滚动等精确操作；若脚本打开新标签页，结果会自动指向新的活动标签页。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        script: { type: 'string', description: '要在页面中执行的 JavaScript；最后一行表达式会自动 return' },
+        url: { type: 'string', description: '可选 http/https URL；传入时会打开或复用该页面再执行' },
+        tabId: { type: 'string', description: '可选标签页 ID，来自 browser.tabs/browser.scan 返回值' },
+        profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
+        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
+        headless: { type: 'boolean', description: '是否无头（默认 false，便于用户手动登录）' },
+        noMonitor: { type: 'boolean', description: '纯读取时设为 true，跳过页面变化摘要' },
+        maxChars: { type: 'integer', description: '输出最大字符数（默认 8000，硬上限 20000）', minimum: 200, maximum: 20000 },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
+      },
+      required: ['script'],
+    },
+    examples: [
+      { title: '读取页面标题', input: { url: 'https://example.com', script: 'document.title', noMonitor: true } },
+      {
+        title: '在 B站搜索',
+        input: {
+          url: 'https://www.bilibili.com/',
+          profile: 'bili',
+          channel: 'msedge',
+          script:
+            "const input = document.querySelector('input[type=search], input.nav-search-input'); input.value = '桌宠'; input.dispatchEvent(new Event('input', { bubbles: true })); input.form?.requestSubmit?.(); return location.href;",
+        },
+      },
+    ],
+    risk: 'medium',
+    cost: 'medium',
+    tags: ['browser', 'javascript', 'automation'],
+    version: '1.0',
+  },
+  {
+    name: 'browser.screenshot',
+    callName: 'ndp_browser_screenshot',
+    description:
+      '对桌宠内置 Playwright 浏览器的当前活动标签页或指定 tabId 截图，只返回本地文件路径和页面元数据；不会因为截图而重新打开 URL，也不等于系统浏览器前台页。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        tabId: { type: 'string', description: '可选标签页 ID；不传则使用 BrowserControlService 当前活动标签页' },
+        profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
+        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
+        headless: { type: 'boolean', description: '是否无头（默认 false）' },
+        path: { type: 'string', description: '保存路径（相对 userData 或绝对）；不传则写入 task-output' },
+        fullPage: { type: 'boolean', description: '是否全页截图（默认 false）' },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
+      },
+    },
+    examples: [
+      { title: '截图当前活动标签页', input: { profile: 'bili', path: 'task-output/bili-current.png' } },
+      { title: '截图指定标签页', input: { profile: 'bili', tabId: 'playwright:bili:2', fullPage: false } },
+    ],
+    risk: 'low',
+    cost: 'medium',
+    tags: ['browser', 'screenshot', 'automation'],
+    version: '1.0',
+  },
+  {
+    name: 'browser.close_tabs',
+    callName: 'ndp_browser_close_tabs',
+    description:
+      '关闭桌宠内置 Playwright 浏览器标签页，用于清理历史残留标签。默认保留当前活动标签页；可按 tabId、非活动页、空白页、URL/title 片段关闭。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        tabIds: { type: 'array', items: { type: 'string' }, description: '要关闭的标签页 ID，来自 browser.tabs' },
+        closeInactive: { type: 'boolean', description: '关闭除当前活动页以外的所有标签页' },
+        closeBlank: { type: 'boolean', description: '关闭 about:blank 等空白页' },
+        urlIncludes: { type: 'array', items: { type: 'string' }, description: '关闭 URL 包含这些片段的标签页' },
+        titleIncludes: { type: 'array', items: { type: 'string' }, description: '关闭标题包含这些片段的标签页' },
+        keepActive: { type: 'boolean', description: '是否保留当前活动页（默认 true）' },
+        profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
+        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
+        headless: { type: 'boolean', description: '是否无头（默认 false）' },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
+      },
+    },
+    examples: [
+      { title: '关闭非活动旧标签', input: { profile: 'default', closeInactive: true, keepActive: true } },
+      { title: '关闭测试残留页', input: { profile: 'default', urlIncludes: ['example.com'], keepActive: true } },
+    ],
+    risk: 'medium',
+    cost: 'low',
+    tags: ['browser', 'tabs', 'cleanup'],
     version: '1.0',
   },
   {
@@ -275,7 +422,7 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     name: 'cli.exec_stream',
     callName: 'ndp_cli_exec_stream',
     description:
-      '流式执行命令并在进程未退出前返回部分输出（支持 start/poll/stop）。适合会先输出提示/二维码路径、再长时间等待的脚本。',
+      '流式执行命令并在进程未退出前返回部分输出（支持 start/poll/stop）。适合会先输出提示/二维码路径、再长时间等待的脚本。Windows 下复杂命令优先用 cmd+args 调 powershell -NoProfile -Command，避免 line/cmd.exe 引号转义问题；运行 .py 必须显式写 python，不要用 & 直接执行 .py。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -320,7 +467,7 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'cli.exec',
     callName: 'ndp_cli_exec',
-    description: '执行命令并返回 stdout/stderr（支持 cmd/args 或直接字符串命令）。',
+    description: '执行命令并返回 stdout/stderr（支持 cmd/args 或直接字符串命令）。Windows 运行 .py 必须显式写 python，不要用 & 直接执行 .py。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -395,6 +542,37 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     risk: 'low',
     cost: 'high',
     tags: ['llm', 'chat'],
+    version: '1.0',
+  },
+  {
+    name: 'image.inspect',
+    callName: 'ndp_image_inspect',
+    description:
+      '读取应用生成目录中的本地图片并调用视觉模型描述/分析画面；适合 browser.screenshot 后看图，不依赖 filesystem MCP。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string', description: '图片路径，必须位于应用数据目录下（如 task-output 截图）' },
+        prompt: { type: 'string', description: '识图问题或描述要求（默认：描述图片内容）' },
+        maxTokens: { type: 'integer', description: '最大输出 token（默认 600）', minimum: 64, maximum: 4096 },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 60000）', minimum: 2000, maximum: 180000 },
+        baseUrl: { type: 'string', description: '可选覆盖 baseUrl（需支持 vision 输入）' },
+        apiKey: { type: 'string', description: '可选覆盖 apiKey' },
+        model: { type: 'string', description: '可选覆盖 model（需支持 vision 输入）' },
+        temperature: { type: 'number', description: '温度（默认使用 AI 设置）', minimum: 0, maximum: 2 },
+      },
+      required: ['path'],
+    },
+    examples: [
+      {
+        title: '分析浏览器截图',
+        input: { path: 'task-output/demo-shot.png', prompt: '描述画面里正在播放什么', maxTokens: 500 },
+      },
+    ],
+    risk: 'low',
+    cost: 'high',
+    tags: ['image', 'vision', 'inspect'],
     version: '1.0',
   },
   {
