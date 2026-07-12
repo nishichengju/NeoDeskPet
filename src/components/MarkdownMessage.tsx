@@ -11,7 +11,7 @@ import {
   toLocalMediaSrc,
 } from '../utils/markdownMedia'
 
-const localAttachmentUrlCache = new Map<string, string>()
+const localAttachmentUrlCache = new Map<string, { url: string; expiresAt: number }>()
 
 function applyCjkMarkdownCompat(input: string): string {
   const text = String(input ?? '')
@@ -39,11 +39,13 @@ function MarkdownImage(props: MarkdownImageProps) {
     const candidate = localPath || raw
     return isAbsoluteLocalPath(candidate) ? candidate : ''
   }, [localPath, raw])
-  const cachedResolved = useMemo(
-    () => (absoluteLocal ? localAttachmentUrlCache.get(absoluteLocal) : ''),
-    [absoluteLocal],
-  )
-  const localFallback = useMemo(() => toLocalMediaSrc(absoluteLocal || raw), [absoluteLocal, raw])
+  const cachedResolved = useMemo(() => {
+    if (!absoluteLocal) return ''
+    const cached = localAttachmentUrlCache.get(absoluteLocal)
+    if (!cached || cached.expiresAt <= Date.now() + 5000) return ''
+    return cached.url
+  }, [absoluteLocal])
+  const localFallback = useMemo(() => (absoluteLocal ? '' : toLocalMediaSrc(raw)), [absoluteLocal, raw])
   const [resolvedSrc, setResolvedSrc] = useState<string>(() => String(cachedResolved || localFallback).trim())
 
   useEffect(() => {
@@ -63,7 +65,10 @@ function MarkdownImage(props: MarkdownImageProps) {
         if (!alive) return
         if (res?.ok && typeof res.url === 'string' && res.url.trim()) {
           const next = res.url.trim()
-          localAttachmentUrlCache.set(absoluteLocal, next)
+          localAttachmentUrlCache.set(absoluteLocal, {
+            url: next,
+            expiresAt: typeof res.expiresAt === 'number' ? res.expiresAt : Date.now() + 60_000,
+          })
           setResolvedSrc((prev) => (String(prev ?? '').trim() === next ? prev : next))
         }
       })
@@ -74,9 +79,9 @@ function MarkdownImage(props: MarkdownImageProps) {
     }
   }, [api, absoluteLocal, cachedResolved])
 
-  const finalSrc = String(resolvedSrc ?? '').trim() || localFallback || raw
+  const finalSrc = String(resolvedSrc ?? '').trim() || localFallback
   const mergedClassName = ['ndp-md-image', String(rest.className ?? '').trim()].filter(Boolean).join(' ')
-  return <img {...rest} className={mergedClassName} src={finalSrc} alt={alt ?? ''} loading="lazy" />
+  return finalSrc ? <img {...rest} className={mergedClassName} src={finalSrc} alt={alt ?? ''} loading="lazy" /> : null
 }
 
 function MarkdownMessageInner(props: { text: string; className?: string }) {

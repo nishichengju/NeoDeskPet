@@ -74,11 +74,8 @@ export function sliceTail<T>(items: T[], max: number): T[] {
 export function toLocalMediaSrc(mediaPath: string): string {
   const p = String(mediaPath ?? '').trim()
   if (!p) return ''
-  if (/^(https?:|file:|data:|blob:)/i.test(p)) return p
-  if (/^[a-zA-Z]:[\\/]/.test(p)) return `file:///${p.replace(/\\/g, '/')}`
-  if (p.startsWith('\\\\')) return `file:${p.replace(/\\/g, '/')}`
-  if (p.startsWith('/')) return `file://${p}`
-  return p
+  if (/^(https?:|data:|blob:)/i.test(p)) return p
+  return ''
 }
 
 export function normalizeAssistantDisplayText(text: string, opts?: { trim?: boolean }): string {

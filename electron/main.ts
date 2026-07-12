@@ -2,12 +2,17 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen } fro
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { createReadStream } from 'node:fs'
-import * as http from 'node:http'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { getSettings, initializeSettingsStore, setSettings } from './store'
 import { SettingsMigrationProtectionError } from './settingsMigrationSafety'
+import {
+  LocalMediaError,
+  LocalMediaRegistry,
+  localMediaTypeFromPath,
+  type LocalMediaReference,
+} from './localMediaRegistry'
+import { LocalMediaServer } from './localMediaServer'
 import { createTray } from './tray'
 import { WindowManager } from './windowManager'
 import { setWindowManagerInstance } from './runtimeRefs'
@@ -105,32 +110,19 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
-function pickChatAttachmentExt(mimeType: string, fallback: string): string {
+function pickChatAttachmentExt(mimeType: string): string {
   const mime = (mimeType ?? '').trim().toLowerCase()
   if (mime === 'image/png') return '.png'
   if (mime === 'image/jpeg') return '.jpg'
   if (mime === 'image/webp') return '.webp'
   if (mime === 'image/gif') return '.gif'
+  if (mime === 'image/bmp') return '.bmp'
   if (mime === 'video/mp4') return '.mp4'
   if (mime === 'video/webm') return '.webm'
   if (mime === 'video/quicktime') return '.mov'
   if (mime === 'video/x-msvideo') return '.avi'
   if (mime === 'video/x-matroska') return '.mkv'
-  return fallback
-}
-
-function pickChatAttachmentMimeByExt(filePath: string): string {
-  const ext = path.extname(String(filePath ?? '')).toLowerCase()
-  if (ext === '.png') return 'image/png'
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-  if (ext === '.webp') return 'image/webp'
-  if (ext === '.gif') return 'image/gif'
-  if (ext === '.mp4') return 'video/mp4'
-  if (ext === '.webm') return 'video/webm'
-  if (ext === '.mov') return 'video/quicktime'
-  if (ext === '.avi') return 'video/x-msvideo'
-  if (ext === '.mkv') return 'video/x-matroska'
-  return 'application/octet-stream'
+  return ''
 }
 
 function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } | null {
@@ -382,117 +374,54 @@ function startLive2dMouseTrackingPump(): void {
   ;(live2dMouseTrackingTimer as unknown as { unref?: () => void }).unref?.()
 }
 
-let chatAttachmentServer: http.Server | null = null
-let chatAttachmentServerPort: number | null = null
+let localMediaRegistry: LocalMediaRegistry | null = null
+let localMediaServer: LocalMediaServer | null = null
 
-function pickHttpContentTypeByExt(filePath: string): string {
-  const ext = path.extname(String(filePath ?? '')).toLowerCase()
-  if (ext === '.png') return 'image/png'
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-  if (ext === '.webp') return 'image/webp'
-  if (ext === '.gif') return 'image/gif'
-  if (ext === '.mp4') return 'video/mp4'
-  if (ext === '.webm') return 'video/webm'
-  if (ext === '.mov') return 'video/quicktime'
-  if (ext === '.avi') return 'video/x-msvideo'
-  if (ext === '.mkv') return 'video/x-matroska'
-  return 'application/octet-stream'
+function getLocalMediaRegistry(): LocalMediaRegistry {
+  if (localMediaRegistry) return localMediaRegistry
+  const userDataDir = app.getPath('userData')
+  const managedDirectories = [
+    'chat-attachments',
+    'task-output',
+    'screenshots',
+    'browser-screenshots',
+    'mcp-tool-images',
+    'generated-images',
+    'video-qa',
+    'video-qa-cache',
+  ]
+  localMediaRegistry = new LocalMediaRegistry({
+    allowedRoots: managedDirectories.map((directory) => path.join(userDataDir, directory)),
+  })
+  return localMediaRegistry
 }
 
-async function ensureChatAttachmentServer(): Promise<number> {
-  if (chatAttachmentServer && typeof chatAttachmentServerPort === 'number') return chatAttachmentServerPort
+function getLocalMediaServer(): LocalMediaServer {
+  if (!localMediaServer) localMediaServer = new LocalMediaServer(getLocalMediaRegistry())
+  return localMediaServer
+}
 
-  chatAttachmentServer = http.createServer(async (req, res) => {
-    try {
-      const method = String(req.method ?? 'GET').toUpperCase()
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-      if (url.pathname !== '/file') {
-        res.statusCode = 404
-        res.end('not found')
-        return
-      }
+function parseLocalMediaReference(payload: unknown): LocalMediaReference {
+  const normalizePathReference = (value: string): string => {
+    const raw = value.trim()
+    if (!raw || path.isAbsolute(raw) || /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)) return raw
+    return path.resolve(app.getPath('userData'), raw)
+  }
+  if (typeof payload === 'string') return normalizePathReference(payload)
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ''
+  const value = payload as Record<string, unknown>
+  return {
+    resourceId: typeof value.resourceId === 'string' ? value.resourceId.trim() : '',
+    path: typeof value.path === 'string' ? normalizePathReference(value.path) : '',
+  }
+}
 
-      const b64 = url.searchParams.get('path') ?? ''
-      if (!b64) {
-        res.statusCode = 400
-        res.end('missing path')
-        return
-      }
-
-      const filePath = Buffer.from(b64, 'base64').toString('utf8').trim()
-      if (!filePath || !path.isAbsolute(filePath)) {
-        res.statusCode = 400
-        res.end('invalid path')
-        return
-      }
-
-      const st = await fs.stat(filePath)
-      if (!st.isFile()) {
-        res.statusCode = 404
-        res.end('not a file')
-        return
-      }
-
-      const contentType = pickHttpContentTypeByExt(filePath)
-      res.setHeader('Content-Type', contentType)
-      res.setHeader('Accept-Ranges', 'bytes')
-
-      if (method !== 'GET' && method !== 'HEAD') {
-        res.statusCode = 405
-        res.end('method not allowed')
-        return
-      }
-
-      const range = typeof req.headers.range === 'string' ? req.headers.range : ''
-      if (range && /^bytes=/.test(range)) {
-        const m = range.match(/^bytes=(\d+)-(\d*)$/)
-        if (!m) {
-          res.statusCode = 416
-          res.end('invalid range')
-          return
-        }
-        const start = Math.max(0, Math.trunc(Number(m[1])))
-        const end = m[2] ? Math.max(start, Math.trunc(Number(m[2]))) : st.size - 1
-        const safeEnd = Math.min(end, st.size - 1)
-        if (start >= st.size) {
-          res.statusCode = 416
-          res.end('range not satisfiable')
-          return
-        }
-        res.statusCode = 206
-        res.setHeader('Content-Range', `bytes ${start}-${safeEnd}/${st.size}`)
-        res.setHeader('Content-Length', String(safeEnd - start + 1))
-        if (method === 'HEAD') {
-          res.end()
-          return
-        }
-        createReadStream(filePath, { start, end: safeEnd }).pipe(res)
-        return
-      }
-
-      res.setHeader('Content-Length', String(st.size))
-      if (method === 'HEAD') {
-        res.end()
-        return
-      }
-      createReadStream(filePath).pipe(res)
-    } catch (err) {
-      res.statusCode = 500
-      res.end(err instanceof Error ? err.message : 'error')
-    }
-  })
-
-  const port = await new Promise<number>((resolve, reject) => {
-    chatAttachmentServer!.listen(0, '127.0.0.1', () => {
-      const addr = chatAttachmentServer!.address()
-      if (addr && typeof addr === 'object' && typeof addr.port === 'number') resolve(addr.port)
-      else reject(new Error('failed to bind chatAttachmentServer'))
-    })
-    chatAttachmentServer!.on('error', reject)
-  })
-
-  chatAttachmentServerPort = port
-  return port
+function toPublicLocalMediaError(error: unknown): Error {
+  if (!(error instanceof LocalMediaError)) return new Error('Local media request failed')
+  if (error.code === 'forbidden_path') return new Error('Local media path is not allowed')
+  if (error.code === 'file_too_large') return new Error('Local media file is too large')
+  if (error.code === 'unsupported_type') return new Error('Local media type is not supported')
+  return new Error('Local media resource is unavailable')
 }
 
 let registeredAsrHotkey: string | null = null
@@ -1450,14 +1379,30 @@ function registerIpc() {
     const baseDir = path.join(app.getPath('userData'), 'chat-attachments')
     await fs.mkdir(baseDir, { recursive: true })
 
-    let ext = filename ? path.extname(filename) : ''
+    let ext = ''
     let detectedMime = ''
-    if (!ext && dataUrl) {
+    let contentBytes = 0
+    if (sourcePath) {
+      if (process.platform === 'win32' && /^\\\\/.test(sourcePath)) throw new Error('UNC attachments are not supported')
+      const sourceType = localMediaTypeFromPath(sourcePath)
+      if (!sourceType || sourceType.kind !== kind) throw new Error('unsupported attachment type')
+      const sourceStat = await fs.stat(sourcePath)
+      if (!sourceStat.isFile()) throw new Error('attachment source is not a file')
+      contentBytes = sourceStat.size
+      detectedMime = sourceType.mimeType
+      ext = path.extname(sourcePath).toLowerCase()
+    } else {
       const parsed = parseDataUrl(dataUrl)
-      detectedMime = parsed?.mimeType ?? ''
-      ext = pickChatAttachmentExt(detectedMime, kind === 'image' ? '.png' : '.mp4')
+      if (!parsed) throw new Error('invalid dataUrl')
+      detectedMime = parsed.mimeType
+      ext = pickChatAttachmentExt(detectedMime)
+      const expectedKind = detectedMime.startsWith('image/') ? 'image' : detectedMime.startsWith('video/') ? 'video' : ''
+      if (!ext || expectedKind !== kind) throw new Error('unsupported attachment type')
+      contentBytes = Buffer.byteLength(parsed.base64, 'base64')
     }
-    if (!ext) ext = kind === 'image' ? '.png' : '.mp4'
+
+    const maxBytes = kind === 'image' ? 32 * 1024 * 1024 : 4 * 1024 * 1024 * 1024
+    if (contentBytes <= 0 || contentBytes > maxBytes) throw new Error('attachment file is too large')
 
     const storedName = `${randomUUID()}${ext}`
     const storedPath = path.join(baseDir, storedName)
@@ -1472,39 +1417,35 @@ function registerIpc() {
       detectedMime = parsed.mimeType
     }
 
+    const resource = await getLocalMediaRegistry().registerFile(storedPath)
+
     return {
       ok: true as const,
       kind,
       path: storedPath,
+      resourceId: resource.id,
       filename: filename || storedName,
       ...(detectedMime ? { mimeType: detectedMime } : {}),
     }
   })
 
-  // Chat attachments: read local file into dataUrl for UI preview (useful when renderer cannot load file:// directly).
+  // Chat attachments: resolve managed images through the main-process media registry.
   ipcMain.handle('chat:readAttachmentDataUrl', async (_event, payload: unknown) => {
-    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
-    const filePath = typeof p.path === 'string' ? p.path.trim() : ''
-    if (!filePath) throw new Error('missing path')
-
-    const st = await fs.stat(filePath)
-    if (!st.isFile()) throw new Error('not a file')
-    if (st.size > 8 * 1024 * 1024) throw new Error('file too large')
-
-    const buf = await fs.readFile(filePath)
-    const mimeType = pickChatAttachmentMimeByExt(filePath)
-    const b64 = buf.toString('base64')
-    const dataUrl = `data:${mimeType};base64,${b64}`
-    return { ok: true as const, mimeType, dataUrl }
+    try {
+      const result = await getLocalMediaServer().readDataUrl(parseLocalMediaReference(payload))
+      return { ok: true as const, ...result }
+    } catch (error) {
+      throw toPublicLocalMediaError(error)
+    }
   })
 
   ipcMain.handle('chat:getAttachmentUrl', async (_event, payload: unknown) => {
-    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
-    const filePath = typeof p.path === 'string' ? p.path.trim() : ''
-    if (!filePath) throw new Error('missing path')
-    const port = await ensureChatAttachmentServer()
-    const b64 = Buffer.from(filePath, 'utf8').toString('base64')
-    return { ok: true as const, url: `http://127.0.0.1:${port}/file?path=${encodeURIComponent(b64)}` }
+    try {
+      const result = await getLocalMediaServer().getUrl(parseLocalMediaReference(payload))
+      return { ok: true as const, ...result }
+    } catch (error) {
+      throw toPublicLocalMediaError(error)
+    }
   })
 
   // Tasks / Orchestrator (M1)
@@ -2240,6 +2181,9 @@ app.on('before-quit', (event) => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  void localMediaServer?.close()
+  localMediaServer = null
+  localMediaRegistry = null
   if (live2dMouseTrackingTimer) {
     clearInterval(live2dMouseTrackingTimer)
     live2dMouseTrackingTimer = null

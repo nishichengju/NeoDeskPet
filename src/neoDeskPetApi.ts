@@ -48,6 +48,9 @@ import type {
   DisplayMode,
   OrbUiState,
   WorldBookSettings,
+  LocalMediaReference,
+  LocalMediaUrlResult,
+  LocalMediaDataUrlResult,
 } from '../electron/types'
 import type { TtsOptions } from '../electron/ttsOptions'
 
@@ -175,12 +178,16 @@ export type NeoDeskPetApi = {
   addChatMessage(sessionId: string, message: ChatMessageRecord): Promise<ChatSession>
   saveChatAttachment(payload: {
     kind: 'image' | 'video'
-    sourcePath?: string
     dataUrl?: string
     filename?: string
-  }): Promise<{ ok: true; kind: 'image' | 'video'; path: string; filename: string; mimeType?: string }>
-  readChatAttachmentDataUrl(path: string): Promise<{ ok: true; mimeType: string; dataUrl: string }>
-  getChatAttachmentUrl(path: string): Promise<{ ok: true; url: string }>
+  }): Promise<{ ok: true; kind: 'image' | 'video'; path: string; resourceId: string; filename: string; mimeType?: string }>
+  saveChatAttachmentFile(
+    file: File,
+    kind: 'image' | 'video',
+    filename?: string,
+  ): Promise<{ ok: true; kind: 'image' | 'video'; path: string; resourceId: string; filename: string; mimeType?: string }>
+  readChatAttachmentDataUrl(reference: LocalMediaReference): Promise<LocalMediaDataUrlResult>
+  getChatAttachmentUrl(reference: LocalMediaReference): Promise<LocalMediaUrlResult>
   updateChatMessage(sessionId: string, messageId: string, content: string): Promise<ChatSession>
   updateChatMessageRecord(sessionId: string, messageId: string, patch: Partial<ChatMessageRecord>): Promise<ChatSession>
   deleteChatMessage(sessionId: string, messageId: string): Promise<ChatSession>

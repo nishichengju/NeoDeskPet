@@ -321,6 +321,24 @@ export type AsrSettings = {
 
 export type ChatRole = 'user' | 'assistant'
 
+export type LocalMediaReference = string | { resourceId?: string; path?: string }
+
+export type LocalMediaUrlResult = {
+  ok: true
+  resourceId: string
+  url: string
+  expiresAt: number
+  mimeType: string
+  size: number
+}
+
+export type LocalMediaDataUrlResult = {
+  ok: true
+  resourceId: string
+  mimeType: string
+  dataUrl: string
+}
+
 // Blocks inside one chat turn, used to embed ToolUse/status UI in a single message
 export type ChatMessageBlock =
   | { type: 'text'; text: string }
@@ -330,6 +348,7 @@ export type ChatMessageBlock =
 export type ChatAttachment = {
   kind: 'image' | 'video'
   path: string // Absolute local path or accessible URL (typically from MCP tool output)
+  resourceId?: string // In-memory registry ID for managed local media
   filename?: string
 }
 

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   AISettings,
   AppSettings,
@@ -49,6 +49,9 @@ import type {
   DisplayMode,
   OrbUiState,
   WorldBookSettings,
+  LocalMediaReference,
+  LocalMediaUrlResult,
+  LocalMediaDataUrlResult,
 } from './types'
 import type { TtsOptions } from './ttsOptions'
 
@@ -228,14 +231,30 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     ipcRenderer.invoke('chat:addMessage', sessionId, message),
   saveChatAttachment: (payload: {
     kind: 'image' | 'video'
-    sourcePath?: string
     dataUrl?: string
     filename?: string
-  }): Promise<{ ok: true; kind: 'image' | 'video'; path: string; filename: string; mimeType?: string }> =>
-    ipcRenderer.invoke('chat:saveAttachment', payload),
-  readChatAttachmentDataUrl: (path: string): Promise<{ ok: true; mimeType: string; dataUrl: string }> =>
-    ipcRenderer.invoke('chat:readAttachmentDataUrl', { path }),
-  getChatAttachmentUrl: (path: string): Promise<{ ok: true; url: string }> => ipcRenderer.invoke('chat:getAttachmentUrl', { path }),
+  }): Promise<{ ok: true; kind: 'image' | 'video'; path: string; resourceId: string; filename: string; mimeType?: string }> =>
+    ipcRenderer.invoke('chat:saveAttachment', {
+      kind: payload.kind,
+      dataUrl: payload.dataUrl,
+      filename: payload.filename,
+    }),
+  saveChatAttachmentFile: (
+    file: File,
+    kind: 'image' | 'video',
+    filename?: string,
+  ): Promise<{ ok: true; kind: 'image' | 'video'; path: string; resourceId: string; filename: string; mimeType?: string }> => {
+    const sourcePath = webUtils.getPathForFile(file)
+    if (!sourcePath) return Promise.reject(new Error('Selected file has no local path'))
+    return ipcRenderer.invoke('chat:saveAttachment', { kind, sourcePath, filename: filename || file.name })
+  },
+  readChatAttachmentDataUrl: (reference: LocalMediaReference): Promise<LocalMediaDataUrlResult> =>
+    ipcRenderer.invoke(
+      'chat:readAttachmentDataUrl',
+      typeof reference === 'string' ? { path: reference } : reference,
+    ),
+  getChatAttachmentUrl: (reference: LocalMediaReference): Promise<LocalMediaUrlResult> =>
+    ipcRenderer.invoke('chat:getAttachmentUrl', typeof reference === 'string' ? { path: reference } : reference),
   updateChatMessage: (sessionId: string, messageId: string, content: string): Promise<ChatSession> =>
     ipcRenderer.invoke('chat:updateMessage', sessionId, messageId, content),
   updateChatMessageRecord: (sessionId: string, messageId: string, patch: Partial<ChatMessageRecord>): Promise<ChatSession> =>

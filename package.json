@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "ui:baseline": "vite build && node scripts/capture-ui-baseline.mjs",
+    "media:smoke": "node scripts/verify-local-media.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },

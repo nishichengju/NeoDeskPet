@@ -1,8 +1,38 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { BrowserContext, Page } from 'playwright-core'
+import { isPathWithinRoot } from './localMediaPolicy'
 
 export type BrowserTargetKind = 'playwright'
+
+export async function resolveBrowserScreenshotPath(
+  userDataDir: string,
+  requestedPath: string | undefined,
+  taskId?: string,
+): Promise<string> {
+  const relativeOrAbsolute =
+    typeof requestedPath === 'string' && requestedPath.trim()
+      ? requestedPath.trim()
+      : `task-output/${taskId || `browser-${Date.now().toString(36)}`}-shot.png`
+  const fullPath = path.resolve(path.isAbsolute(relativeOrAbsolute) ? relativeOrAbsolute : path.join(userDataDir, relativeOrAbsolute))
+  const style = process.platform === 'win32' ? 'win32' : 'posix'
+  const allowedRoots = [path.resolve(userDataDir, 'task-output'), path.resolve(userDataDir, 'browser-screenshots')]
+  if (!allowedRoots.some((root) => isPathWithinRoot(fullPath, root, style))) {
+    throw new Error('Browser screenshot path must stay inside userData task-output/browser-screenshots')
+  }
+  await fs.mkdir(path.dirname(fullPath), { recursive: true })
+  const realParent = await fs.realpath(path.dirname(fullPath))
+  const allowedRealRoots = await Promise.all(
+    allowedRoots.map(async (root) => {
+      await fs.mkdir(root, { recursive: true })
+      return fs.realpath(root)
+    }),
+  )
+  if (!allowedRealRoots.some((root) => isPathWithinRoot(realParent, root, style))) {
+    throw new Error('Browser screenshot path resolves outside managed storage')
+  }
+  return path.join(realParent, path.basename(fullPath))
+}
 
 export type BrowserTabSummary = {
   id: string
@@ -978,12 +1008,7 @@ export class BrowserControlService {
   ): Promise<string> {
     if (!screenshot) return ''
 
-    const rel =
-      typeof screenshot.path === 'string' && screenshot.path.trim()
-        ? screenshot.path.trim()
-        : `task-output/${taskId || `browser-${Date.now().toString(36)}`}-shot.png`
-    const fullPath = path.isAbsolute(rel) ? rel : path.join(this.userDataDir, rel)
-    await fs.mkdir(path.dirname(fullPath), { recursive: true })
+    const fullPath = await resolveBrowserScreenshotPath(this.userDataDir, screenshot.path, taskId)
     await page.screenshot({ path: fullPath, fullPage: screenshot.fullPage === true, timeout: timeoutMs })
     return fullPath
   }

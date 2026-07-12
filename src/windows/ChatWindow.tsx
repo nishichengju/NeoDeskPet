@@ -91,7 +91,14 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [sessionContextMenu, setSessionContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [editingMessageContent, setEditingMessageContent] = useState('')
-  type PendingAttachment = { id: string; kind: 'image' | 'video'; path: string; filename: string; previewDataUrl?: string }
+  type PendingAttachment = {
+    id: string
+    kind: 'image' | 'video'
+    path: string
+    resourceId?: string
+    filename: string
+    previewDataUrl?: string
+  }
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
   // 存储最近一次 API 返回的真实 token usage（用于精确上下文统计）
   const [lastApiUsage, setLastApiUsage] = useState<ChatUsage | null>(null)
@@ -1779,14 +1786,17 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         const dataUrl = await readAsDataUrl()
         setError(null)
 
-        const filePath = typeof (file as unknown as { path?: unknown }).path === 'string' ? String((file as unknown as { path: string }).path) : ''
-        const saved = await api?.saveChatAttachment({
-          kind: 'image',
-          ...(filePath ? { sourcePath: filePath } : { dataUrl }),
-          ...(file.name ? { filename: file.name } : {}),
-        })
+        const saved = await api
+          ?.saveChatAttachmentFile(file, 'image', file.name)
+          .catch(() => api.saveChatAttachment({ kind: 'image', dataUrl, filename: file.name || 'clipboard.png' }))
         if (saved?.ok) {
-          addPendingAttachment({ kind: 'image', path: saved.path, filename: saved.filename, previewDataUrl: dataUrl })
+          addPendingAttachment({
+            kind: 'image',
+            path: saved.path,
+            resourceId: saved.resourceId,
+            filename: saved.filename,
+            previewDataUrl: dataUrl,
+          })
         }
       } catch (err) {
         console.error('[chat] read/save image failed:', err)
@@ -1799,19 +1809,17 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const readChatVideoFile = useCallback(
     async (file: File) => {
       if (!file.type.startsWith('video/')) return
-      const filePath = typeof (file as unknown as { path?: unknown }).path === 'string' ? String((file as unknown as { path: string }).path) : ''
-      if (!filePath) {
-        setError('当前视频无法读取本地路径（请用拖拽文件或“视频”按钮选择）')
-        return
-      }
       try {
         setError(null)
-        const saved = await api?.saveChatAttachment({
-          kind: 'video',
-          sourcePath: filePath,
-          ...(file.name ? { filename: file.name } : {}),
-        })
-        if (saved?.ok) addPendingAttachment({ kind: 'video', path: saved.path, filename: saved.filename })
+        const saved = await api?.saveChatAttachmentFile(file, 'video', file.name)
+        if (saved?.ok) {
+          addPendingAttachment({
+            kind: 'video',
+            path: saved.path,
+            resourceId: saved.resourceId,
+            filename: saved.filename,
+          })
+        }
       } catch (err) {
         console.error('[chat] save video failed:', err)
         setError('保存视频失败')
@@ -2439,19 +2447,25 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     text?: string
     source?: 'manual' | 'asr'
     baseMessages?: ChatMessageRecord[]
-    attachments?: Array<{ kind: 'image' | 'video'; path: string; filename?: string }>
+    attachments?: ChatAttachment[]
   }) => {
     const source = override?.source ?? 'manual'
     const text = (override?.text ?? inputRef.current).trim()
     const attachmentsRaw =
       source === 'manual'
         ? (override?.attachments ??
-          pendingAttachments.map((a) => ({ kind: a.kind, path: a.path, filename: a.filename })))
+          pendingAttachments.map((a) => ({
+            kind: a.kind,
+            path: a.path,
+            resourceId: a.resourceId,
+            filename: a.filename,
+          })))
         : (override?.attachments ?? [])
     const attachments = attachmentsRaw
       .map((a) => ({
         kind: a.kind,
         path: String(a.path ?? '').trim(),
+        resourceId: typeof a.resourceId === 'string' ? a.resourceId.trim() : undefined,
         filename: typeof a.filename === 'string' ? a.filename.trim() : '',
       }))
       .filter((a) => (a.kind === 'image' || a.kind === 'video') && a.path.length > 0)
@@ -3817,8 +3831,12 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           .map((a) => {
             const kind = (a as { kind?: unknown }).kind === 'video' ? ('video' as const) : ('image' as const)
             const path = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
+            const resourceId =
+              typeof (a as { resourceId?: unknown }).resourceId === 'string'
+                ? String((a as { resourceId: string }).resourceId).trim()
+                : ''
             const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
-            return { kind, path, ...(filename ? { filename } : {}) }
+            return { kind, path, ...(resourceId ? { resourceId } : {}), ...(filename ? { filename } : {}) }
           })
           .filter((a) => a.path.length > 0)
         await send({ text: resendText, attachments: resendAttachments, source: 'manual', baseMessages })
@@ -4615,11 +4633,11 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             {pendingAttachments.map((a) => (
               <div key={a.id} className="ndp-input-preview">
                 {a.kind === 'video' ? (
-                  <LocalVideo api={api} videoPath={a.path} controls={false} muted playsInline preload="metadata" />
+                  <LocalVideo api={api} videoPath={a.path} resourceId={a.resourceId} controls={false} muted playsInline preload="metadata" />
                 ) : a.previewDataUrl ? (
                   <img src={a.previewDataUrl} alt="preview" />
                 ) : (
-                  <MmvectorImagePreview api={api} imagePath={a.path} alt="preview" />
+                  <MmvectorImagePreview api={api} imagePath={a.path} resourceId={a.resourceId} alt="preview" />
                 )}
                 <div className="ndp-input-preview-meta" title={a.path}>
                   {a.filename || a.kind}
@@ -4941,7 +4959,7 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
     async (paths: string[], index: number) => {
       const cleaned = paths.map((x) => String(x ?? '').trim()).filter(Boolean)
       if (cleaned.length === 0) return
-      const items = await Promise.all(
+      const items = (await Promise.all(
         cleaned.map(async (raw) => {
           if (/^(https?:|data:|blob:)/i.test(raw)) return { src: raw, title: raw }
           if (api) {
@@ -4954,7 +4972,8 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
           }
           return { src: toLocalMediaSrc(raw), title: raw }
         }),
-      )
+      )).filter((item) => Boolean(item.src))
+      if (items.length === 0) return
       setImageViewer({ items, index: Math.max(0, Math.min(index, items.length - 1)) })
     },
     [api],
@@ -4973,10 +4992,7 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
               if (url) return url
               const p = String(mediaPath ?? '').trim()
               if (!p) return ''
-              if (/^(https?:|file:|data:|blob:)/i.test(p)) return p
-              if (/^[a-zA-Z]:[\\/]/.test(p)) return `file:///${p.replace(/\\/g, '/')}`
-              if (p.startsWith('\\\\')) return `file:${p.replace(/\\/g, '/')}`
-              if (p.startsWith('/')) return `file://${p}`
+              if (/^(https?:|data:|blob:)/i.test(p)) return p
               return p
             }
 
@@ -5183,7 +5199,6 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
                                                 /* ignore */
                                               }
                                             }
-                                            window.open(toLocalMediaSrc(raw), '_blank')
                                           })()
                                         }}
                                       >
@@ -5262,19 +5277,16 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
           const blocks = !isUser ? normalizeMessageBlocks(m) : []
           const hasToolBlock = !isUser && blocks.some((b) => b.type === 'tool_use')
 
-          const openAttachment = async (pathOrUrl: string) => {
+          const openAttachment = async (pathOrUrl: string, resourceId?: string) => {
             const raw = String(pathOrUrl ?? '').trim()
             if (!raw) return
             if (/^(https?:|data:|blob:)/i.test(raw)) {
               window.open(raw, '_blank')
               return
             }
-            if (!api) {
-              window.open(toLocalMediaSrc(raw), '_blank')
-              return
-            }
+            if (!api) return
             try {
-              const res = await api.getChatAttachmentUrl(raw)
+              const res = await api.getChatAttachmentUrl(resourceId ? { resourceId, path: raw } : raw)
               if (res?.ok && typeof res.url === 'string') {
                 window.open(res.url, '_blank')
                 return
@@ -5282,21 +5294,35 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
             } catch {
               /* ignore */
             }
-            window.open(toLocalMediaSrc(raw), '_blank')
           }
 
           const attachmentsNode = (() => {
             if (hasToolBlock) return null
-            const normalized: Array<{ kind: 'image' | 'video'; path?: string; dataUrl?: string; filename?: string }> = []
+            const normalized: Array<{
+              kind: 'image' | 'video'
+              path?: string
+              resourceId?: string
+              dataUrl?: string
+              filename?: string
+            }> = []
 
             if (Array.isArray(m.attachments)) {
               for (const a of m.attachments) {
                 if (!a || typeof a !== 'object') continue
                 const kind = (a as { kind?: unknown }).kind === 'video' ? 'video' : (a as { kind?: unknown }).kind === 'image' ? 'image' : ''
                 const p = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
+                const resourceId =
+                  typeof (a as { resourceId?: unknown }).resourceId === 'string'
+                    ? String((a as { resourceId: string }).resourceId).trim()
+                    : ''
                 const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
                 if (!kind || !p) continue
-                normalized.push({ kind, path: p, ...(filename ? { filename } : {}) })
+                normalized.push({
+                  kind,
+                  path: p,
+                  ...(resourceId ? { resourceId } : {}),
+                  ...(filename ? { filename } : {}),
+                })
               }
             }
 
@@ -5317,8 +5343,16 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
                     if (!p) return null
                     return (
                       <div key={key} className="ndp-msg-attachment">
-                        <LocalVideo api={api} className="ndp-msg-video" videoPath={p} controls preload="metadata" playsInline />
-                        <button className="ndp-attachment-open" onClick={() => void openAttachment(p)} title="打开">
+                        <LocalVideo
+                          api={api}
+                          className="ndp-msg-video"
+                          videoPath={p}
+                          resourceId={a.resourceId}
+                          controls
+                          preload="metadata"
+                          playsInline
+                        />
+                        <button className="ndp-attachment-open" onClick={() => void openAttachment(p, a.resourceId)} title="打开">
                           打开
                         </button>
                       </div>
@@ -5340,7 +5374,7 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
                         <img className="ndp-msg-image" src={dataUrl} alt="attachment" onClick={() => void openImageViewer(imageSources, imageIndex)} />
                       ) : (
                         <div className="ndp-msg-image-hit" onClick={() => void openImageViewer(imageSources, imageIndex)}>
-                          <MmvectorImagePreview api={api} imagePath={p} alt="attachment" />
+                          <MmvectorImagePreview api={api} imagePath={p} resourceId={a.resourceId} alt="attachment" />
                         </div>
                       )}
                       <button className="ndp-attachment-open" onClick={() => void openImageViewer(imageSources, imageIndex)} title="查看">

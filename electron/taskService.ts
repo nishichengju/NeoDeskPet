@@ -15,6 +15,8 @@ import {
 import { getLive2dCapabilities } from './live2dToolState'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
 import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
+import { localMediaTypeFromPath } from './localMediaRegistry'
+import { isPathWithinRoot } from './localMediaPolicy'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, TaskStatus, VisualArtifactRef } from './types'
@@ -1119,12 +1121,39 @@ export class TaskService {
     const rawVideoPath = typeof picked.videoPath === 'string' ? picked.videoPath.trim() : ''
     const rawVideoUrl = typeof picked.videoUrl === 'string' ? picked.videoUrl.trim() : ''
 
-    let localVideoPath = rawVideoPath
-    if (!localVideoPath || !(await exists(localVideoPath))) {
+    const cacheDir = path.join(this.userDataDir, 'video-qa-cache')
+    await fs.promises.mkdir(cacheDir, { recursive: true })
+    let localVideoPath = ''
+    if (rawVideoPath && (await exists(rawVideoPath))) {
+      const sourceType = localMediaTypeFromPath(rawVideoPath)
+      if (!sourceType || sourceType.kind !== 'video') throw new Error('mmvector videoPath 类型不受支持')
+      const sourceStat = await fs.promises.stat(rawVideoPath)
+      if (!sourceStat.isFile() || sourceStat.size <= 0 || sourceStat.size > 4 * 1024 * 1024 * 1024) {
+        throw new Error('mmvector videoPath 文件大小不受支持')
+      }
+      const realSource = await fs.promises.realpath(rawVideoPath)
+      const realCache = await fs.promises.realpath(cacheDir)
+      const style = process.platform === 'win32' ? 'win32' : 'posix'
+      if (isPathWithinRoot(realSource, realCache, style)) {
+        localVideoPath = realSource
+      } else {
+        const safeBase = ((picked.filename ?? '').trim() || path.basename(realSource)).replace(/[<>:"/\\|?*]+/g, '_')
+        const ext = path.extname(realSource).toLowerCase()
+        const stem = path.basename(safeBase, path.extname(safeBase)).slice(0, 120) || 'mmvector'
+        const dest = path.join(cacheDir, `${stem}-${randomUUID()}${ext}`)
+        await fs.promises.copyFile(realSource, dest)
+        localVideoPath = dest
+      }
+    } else {
       if (!rawVideoUrl) throw new Error(`mmvector 命中但无可用 videoPath/videoUrl：${JSON.stringify(picked)}`)
-      const safeName = (picked.filename ?? '').trim() || `mmvector_${task.id}_${now().toString(36)}.mp4`
-      const dest = path.join(this.userDataDir, 'video-qa-cache', safeName.replace(/[<>:"/\\|?*]+/g, '_'))
+      const requestedName = (picked.filename ?? '').trim() || `mmvector_${task.id}_${now().toString(36)}.mp4`
+      const safeName = localMediaTypeFromPath(requestedName)?.kind === 'video' ? requestedName : `${requestedName}.mp4`
+      const dest = path.join(cacheDir, safeName.replace(/[<>:"/\\|?*]+/g, '_'))
       await downloadToFile(rawVideoUrl, dest)
+      const downloadedStat = await fs.promises.stat(dest)
+      if (!downloadedStat.isFile() || downloadedStat.size <= 0 || downloadedStat.size > 4 * 1024 * 1024 * 1024) {
+        throw new Error('下载视频文件大小不受支持')
+      }
       localVideoPath = dest
     }
 

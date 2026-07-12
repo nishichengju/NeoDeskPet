@@ -26,6 +26,18 @@ export function isAbsoluteLocalPath(raw: string): boolean {
 
 export function decodeLocalPathCompat(raw: string): string {
   const value = String(raw ?? '').trim()
+  if (/^file:/i.test(value)) {
+    try {
+      const parsed = new URL(value)
+      if (parsed.protocol !== 'file:') return value
+      const pathname = decodeURIComponent(parsed.pathname)
+      if (/^\/[a-zA-Z]:\//.test(pathname)) return pathname.slice(1).replace(/\//g, '\\')
+      if (parsed.hostname) return `\\\\${parsed.hostname}${pathname.replace(/\//g, '\\')}`
+      return pathname
+    } catch {
+      return value
+    }
+  }
   if (!value || !/%[0-9A-Fa-f]{2}/.test(value) || !isAbsoluteLocalPath(value)) return value
   try {
     return decodeURI(value)
@@ -37,11 +49,8 @@ export function decodeLocalPathCompat(raw: string): string {
 export function toLocalMediaSrc(mediaPath: string): string {
   const value = String(mediaPath ?? '').trim()
   if (!value) return ''
-  if (/^(https?:|file:|data:|blob:)/i.test(value)) return value
-  if (/^[a-zA-Z]:[\\/]/.test(value)) return `file:///${value.replace(/\\/g, '/')}`
-  if (value.startsWith('\\\\')) return `file:${value.replace(/\\/g, '/')}`
-  if (value.startsWith('/')) return `file://${value}`
-  return value
+  if (/^(https?:|data:|blob:)/i.test(value)) return value
+  return ''
 }
 
 export function markdownMediaUrlTransform(url: string): string {

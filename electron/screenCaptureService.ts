@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import { isPathWithinRoot } from './localMediaPolicy'
 
 export type ScreenCaptureRegion = {
   x: number
@@ -302,7 +303,28 @@ function normalizeOutputPath(opts: ScreenCaptureOptions): string {
   const safeTaskId = String(opts.taskId ?? '').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 32) || 'screen'
   const raw = String(opts.path ?? '').trim() || path.join('screenshots', `${safeTaskId}-${Date.now().toString(36)}.png`)
   const withExt = path.extname(raw) ? raw : `${raw}.png`
-  return path.resolve(path.isAbsolute(withExt) ? withExt : path.join(opts.userDataDir, withExt))
+  if (path.extname(withExt).toLowerCase() !== '.png') throw new Error('screen.capture 只允许保存 PNG 文件')
+  const target = path.resolve(path.isAbsolute(withExt) ? withExt : path.join(opts.userDataDir, withExt))
+  const screenshotsRoot = path.resolve(opts.userDataDir, 'screenshots')
+  const style = process.platform === 'win32' ? 'win32' : 'posix'
+  if (!isPathWithinRoot(target, screenshotsRoot, style)) {
+    throw new Error('screen.capture 保存路径必须位于 userData/screenshots')
+  }
+  return target
+}
+
+export async function resolveScreenCaptureOutputPath(opts: ScreenCaptureOptions): Promise<string> {
+  const target = normalizeOutputPath(opts)
+  const screenshotsRoot = path.resolve(opts.userDataDir, 'screenshots')
+  await fs.mkdir(screenshotsRoot, { recursive: true })
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  const realRoot = await fs.realpath(screenshotsRoot)
+  const realParent = await fs.realpath(path.dirname(target))
+  const style = process.platform === 'win32' ? 'win32' : 'posix'
+  if (!isPathWithinRoot(realParent, realRoot, style)) {
+    throw new Error('screen.capture 保存路径解析到托管目录之外')
+  }
+  return path.join(realParent, path.basename(target))
 }
 
 async function captureRectToPng(rect: ScreenRect, outPath: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
@@ -336,7 +358,7 @@ export async function captureScreenToFile(opts: ScreenCaptureOptions): Promise<S
   const { target, display, rect } = resolveCaptureRect(snapshot, opts)
   validateRect(rect)
 
-  const outPath = normalizeOutputPath(opts)
+  const outPath = await resolveScreenCaptureOutputPath(opts)
   await captureRectToPng(rect, outPath, timeoutMs, opts.signal)
   const stat = await fs.stat(outPath)
   const result: ScreenCaptureResult = {

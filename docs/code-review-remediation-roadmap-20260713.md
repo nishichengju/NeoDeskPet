@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P0-1 已完成，下一阶段为 P0-2
+- 状态：P0-2 已完成，下一阶段为 P0-3
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -224,6 +224,20 @@ renderer: attachmentId / artifactId
 - URL 中不再出现 Base64 编码后的真实路径。
 - 删除资源后旧 URL 不可继续读取。
 - 测试覆盖目录穿越、软链接、UNC 路径、大小写差异和不存在文件。
+
+### P0-2 实施记录（2026-07-13）
+
+- 已新增 `LocalMediaRegistry` 与本地媒体 HTTP 服务：资源先经过托管根目录、词法路径和 `realpath` 双重校验，再签发 30 分钟有效的随机 token。
+- 本地 URL 已改为 `/media/<opaque-token>`，不再包含明文路径、查询参数路径或 Base64 路径；仅支持 GET/HEAD、单 Range，并限制每段 Range、MIME 和文件大小。
+- HTTP 每次读取都会重新验证资源；文件删除、真实路径变化、token 过期或应用退出后，旧 URL 立即失效。
+- 允许目录收口到聊天附件、任务输出、屏幕/浏览器截图、MCP 图片、生图产物和视频托管缓存；任意系统路径、UNC、目录穿越、软链接逃逸和不存在文件均被拒绝。
+- preload 不再向 renderer 暴露可自行填写的 `sourcePath`。真实拖拽/选择文件通过 Electron `webUtils.getPathForFile(file)` 获取路径，随后复制进 `chat-attachments` 并登记；renderer 伪造 `sourcePath` 不会透传到 IPC。
+- 新聊天附件会保存 `resourceId`，旧消息或应用重启后的失效 ID 可用已持久化路径在主进程重新登记；任务产物仍兼容旧路径字段，但必须通过托管目录验证。
+- renderer 中所有 `file://` 和本地绝对路径回退已移除。Markdown、Chat、Orb、图片预览和视频播放只有在主进程签发 URL 后才会加载本地媒体。
+- `screen.capture` 输出被限制到 `userData/screenshots`；浏览器截图限制到 `task-output` 或 `browser-screenshots`，并校验父目录真实路径；外部 mmvector 视频会先复制到 `video-qa-cache`。
+- `npm test`、`npm run lint`、`npx tsc --noEmit` 均通过，共 11 个测试文件、37 个用例；覆盖穿越、软链接、UNC、大小写、不存在文件、MIME/大小、Range、过期和删除失效。
+- `npm run media:smoke` 使用打包后的真实 Electron/preload 验证通过：合法聊天附件与相对任务产物可用，外部路径和伪造 `sourcePath` 被拒绝，真实选择文件复制成功，URL 不泄露路径，视频 Range 为 206，删除后旧 URL 为 404。
+- `npm run ui:baseline` 通过，Chat、Settings、Memory、Orb 四窗口无 console error、无水平或垂直溢出；Windows unpacked 包已重新生成。
 
 ## 7. P0-3：IPC sender 校验与窗口能力分层
 

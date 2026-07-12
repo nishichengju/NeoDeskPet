@@ -98,11 +98,8 @@ function joinTextBlocks(blocks: ChatMessageBlock[]): string {
 function toLocalMediaSrc(mediaPath: string): string {
   const p = String(mediaPath ?? '').trim()
   if (!p) return ''
-  if (/^(https?:|file:|data:|blob:)/i.test(p)) return p
-  if (/^[a-zA-Z]:[\\/]/.test(p)) return `file:///${p.replace(/\\/g, '/')}`
-  if (p.startsWith('\\\\')) return `file:${p.replace(/\\/g, '/')}`
-  if (p.startsWith('/')) return `file://${p}`
-  return p
+  if (/^(https?:|data:|blob:)/i.test(p)) return p
+  return ''
 }
 
 function normalizeInterleavedTextSegment(text: string): string {
@@ -214,12 +211,13 @@ function ToolUseDuration(props: { startedAt: number; endedAt: number | null }) {
 function OrbImagePreview(props: {
   api: ReturnType<typeof getApi> | null
   imagePath: string
+  resourceId?: string
   alt: string
   dataUrl?: string
   className?: string
   onClick?: () => void
 }) {
-  const { api, imagePath, alt, dataUrl, className, onClick } = props
+  const { api, imagePath, resourceId, alt, dataUrl, className, onClick } = props
   const [src, setSrc] = useState<string>('')
 
   useEffect(() => {
@@ -235,7 +233,7 @@ function OrbImagePreview(props: {
       return
     }
     api
-      .readChatAttachmentDataUrl(p)
+      .readChatAttachmentDataUrl(resourceId ? { resourceId, path: p } : p)
       .then((res) => {
         if (!alive) return
         if (res?.ok && typeof res.dataUrl === 'string') setSrc(res.dataUrl)
@@ -244,9 +242,9 @@ function OrbImagePreview(props: {
     return () => {
       alive = false
     }
-  }, [api, dataUrl, imagePath])
+  }, [api, dataUrl, imagePath, resourceId])
 
-  const fallback = String(dataUrl ?? imagePath ?? '').trim()
+  const fallback = toLocalMediaSrc(String(dataUrl ?? imagePath ?? '').trim())
   const finalSrc = src || fallback
   if (!finalSrc) return null
   return <img className={className} src={finalSrc} alt={alt} onClick={onClick} />
@@ -255,42 +253,36 @@ function OrbImagePreview(props: {
 function OrbLocalVideo(props: {
   api: ReturnType<typeof getApi> | null
   videoPath: string
+  resourceId?: string
   className?: string
   controls?: boolean
   muted?: boolean
   playsInline?: boolean
   preload?: 'none' | 'metadata' | 'auto'
 }) {
-  const { api, videoPath, className, controls = true, muted, playsInline, preload } = props
+  const { api, videoPath, resourceId, className, controls = true, muted, playsInline, preload } = props
   const [src, setSrc] = useState<string>('')
 
   useEffect(() => {
     let alive = true
     const p = String(videoPath ?? '').trim()
     if (!p) return
-    if (/^(https?:|file:|data:|blob:)/i.test(p)) {
+    if (/^(https?:|data:|blob:)/i.test(p)) {
       setSrc(p)
       return
     }
-    if (!api) {
-      setSrc(toLocalMediaSrc(p))
-      return
-    }
+    if (!api) return
     api
-      .getChatAttachmentUrl(p)
+      .getChatAttachmentUrl(resourceId ? { resourceId, path: p } : p)
       .then((res) => {
         if (!alive) return
         if (res?.ok && typeof res.url === 'string') setSrc(res.url)
-        else setSrc(toLocalMediaSrc(p))
       })
-      .catch(() => {
-        if (!alive) return
-        setSrc(toLocalMediaSrc(p))
-      })
+      .catch(() => undefined)
     return () => {
       alive = false
     }
-  }, [api, videoPath])
+  }, [api, resourceId, videoPath])
 
   if (!src) return null
   return <video className={className} src={src} controls={controls} muted={muted} playsInline={playsInline} preload={preload} />
@@ -316,7 +308,14 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     dockSideRef.current = dockSide
   }, [dockSide])
 
-  type PendingAttachment = { id: string; kind: 'image' | 'video'; path: string; filename: string; previewDataUrl?: string }
+  type PendingAttachment = {
+    id: string
+    kind: 'image' | 'video'
+    path: string
+    resourceId?: string
+    filename: string
+    previewDataUrl?: string
+  }
   type ImageViewerRequestItem = { source: string; title?: string }
   type ImageViewerItem = { src: string; title: string }
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
@@ -456,14 +455,17 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         const dataUrl = await readAsDataUrl()
         setPanelError(null)
 
-        const filePath = typeof (file as unknown as { path?: unknown }).path === 'string' ? String((file as unknown as { path: string }).path) : ''
-        const saved = await api.saveChatAttachment({
-          kind: 'image',
-          ...(filePath ? { sourcePath: filePath } : { dataUrl }),
-          ...(file.name ? { filename: file.name } : { filename: 'clipboard.png' }),
-        })
+        const saved = await api
+          .saveChatAttachmentFile(file, 'image', file.name)
+          .catch(() => api.saveChatAttachment({ kind: 'image', dataUrl, filename: file.name || 'clipboard.png' }))
         if (saved?.ok) {
-          addPendingAttachment({ kind: 'image', path: saved.path, filename: saved.filename, previewDataUrl: dataUrl })
+          addPendingAttachment({
+            kind: 'image',
+            path: saved.path,
+            resourceId: saved.resourceId,
+            filename: saved.filename,
+            previewDataUrl: dataUrl,
+          })
         }
       } catch (err) {
         console.error('[orb] read/save image failed:', err)
@@ -477,19 +479,17 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     async (file: File) => {
       if (!api) return
       if (!file.type.startsWith('video/')) return
-      const filePath = typeof (file as unknown as { path?: unknown }).path === 'string' ? String((file as unknown as { path: string }).path) : ''
-      if (!filePath) {
-        setPanelError('当前视频无法读取本地路径（请用拖拽文件方式添加）')
-        return
-      }
       try {
         setPanelError(null)
-        const saved = await api.saveChatAttachment({
-          kind: 'video',
-          sourcePath: filePath,
-          ...(file.name ? { filename: file.name } : { filename: 'video.mp4' }),
-        })
-        if (saved?.ok) addPendingAttachment({ kind: 'video', path: saved.path, filename: saved.filename })
+        const saved = await api.saveChatAttachmentFile(file, 'video', file.name || 'video.mp4')
+        if (saved?.ok) {
+          addPendingAttachment({
+            kind: 'video',
+            path: saved.path,
+            resourceId: saved.resourceId,
+            filename: saved.filename,
+          })
+        }
       } catch (err) {
         console.error('[orb] save video failed:', err)
         setPanelError('保存视频失败')
@@ -1260,6 +1260,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
               attachments: attachmentsNow.map((a) => ({
                 kind: a.kind,
                 path: a.path,
+                resourceId: a.resourceId,
                 filename: a.filename,
               })),
             }
@@ -1704,9 +1705,19 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         .map((a) => {
           const kind = (a as { kind?: unknown }).kind === 'video' ? ('video' as const) : ('image' as const)
           const path = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
+          const resourceId =
+            typeof (a as { resourceId?: unknown }).resourceId === 'string'
+              ? String((a as { resourceId: string }).resourceId).trim()
+              : ''
           const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
           if (!path) return null
-          return { id: newAttachmentId(), kind, path, filename: filename || (kind === 'video' ? 'video.mp4' : 'image.png') }
+          return {
+            id: newAttachmentId(),
+            kind,
+            path,
+            ...(resourceId ? { resourceId } : {}),
+            filename: filename || (kind === 'video' ? 'video.mp4' : 'image.png'),
+          }
         })
         .filter((a): a is PendingAttachment => !!a)
 
@@ -1822,14 +1833,14 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     async (pathOrUrl: string): Promise<string> => {
       const raw = String(pathOrUrl ?? '').trim()
       if (!raw) return ''
-      if (/^(https?:|data:|blob:|file:)/i.test(raw)) return raw
+      if (/^(https?:|data:|blob:)/i.test(raw)) return raw
       try {
         const res = await api?.getChatAttachmentUrl(raw)
         if (res?.ok && typeof res.url === 'string') return res.url
       } catch {
         /* ignore */
       }
-      return toLocalMediaSrc(raw)
+      return ''
     },
     [api],
   )
@@ -2114,7 +2125,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
   )
 
   const openAttachment = useCallback(
-    async (pathOrUrl: string) => {
+    async (pathOrUrl: string, resourceId?: string) => {
       const raw = String(pathOrUrl ?? '').trim()
       if (!raw) return
       if (/^(https?:|data:|blob:)/i.test(raw)) {
@@ -2122,7 +2133,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         return
       }
       try {
-        const res = await api?.getChatAttachmentUrl(raw)
+        const res = await api?.getChatAttachmentUrl(resourceId ? { resourceId, path: raw } : raw)
         if (res?.ok && typeof res.url === 'string') {
           window.open(res.url, '_blank')
           return
@@ -2130,23 +2141,32 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       } catch {
         /* ignore */
       }
-      window.open(toLocalMediaSrc(raw), '_blank')
     },
     [api],
   )
 
   const renderMessageAttachments = useCallback(
     (m: ChatMessageRecord) => {
-      const normalized: Array<{ kind: 'image' | 'video'; path?: string; dataUrl?: string; filename?: string }> = []
+      const normalized: Array<{
+        kind: 'image' | 'video'
+        path?: string
+        resourceId?: string
+        dataUrl?: string
+        filename?: string
+      }> = []
 
       if (Array.isArray(m.attachments)) {
         for (const a of m.attachments) {
           if (!a || typeof a !== 'object') continue
           const kind = (a as { kind?: unknown }).kind === 'video' ? 'video' : (a as { kind?: unknown }).kind === 'image' ? 'image' : ''
           const p = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
+          const resourceId =
+            typeof (a as { resourceId?: unknown }).resourceId === 'string'
+              ? String((a as { resourceId: string }).resourceId).trim()
+              : ''
           const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
           if (!kind || !p) continue
-          normalized.push({ kind, path: p, ...(filename ? { filename } : {}) })
+          normalized.push({ kind, path: p, ...(resourceId ? { resourceId } : {}), ...(filename ? { filename } : {}) })
         }
       }
 
@@ -2179,8 +2199,16 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
               const p = String(a.path ?? '').trim()
               if (!p) return null
               return (
-                <div key={key} className="ndp-orbpanel-attachment" title={p} onClick={() => void openAttachment(p)}>
-                  <OrbLocalVideo api={api} className="ndp-orbpanel-video" videoPath={p} controls preload="metadata" playsInline />
+                <div key={key} className="ndp-orbpanel-attachment" title={p} onClick={() => void openAttachment(p, a.resourceId)}>
+                  <OrbLocalVideo
+                    api={api}
+                    className="ndp-orbpanel-video"
+                    videoPath={p}
+                    resourceId={a.resourceId}
+                    controls
+                    preload="metadata"
+                    playsInline
+                  />
                   <div className="ndp-orbpanel-attachment-meta">{a.filename || 'video'}</div>
                 </div>
               )
@@ -2203,7 +2231,13 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
                 {dataUrl ? (
                   <img className="ndp-orbpanel-image" src={dataUrl} alt={a.filename || 'image'} />
                 ) : (
-                  <OrbImagePreview api={api} className="ndp-orbpanel-image" imagePath={p} alt={a.filename || 'image'} />
+                  <OrbImagePreview
+                    api={api}
+                    className="ndp-orbpanel-image"
+                    imagePath={p}
+                    resourceId={a.resourceId}
+                    alt={a.filename || 'image'}
+                  />
                 )}
                 <div className="ndp-orbpanel-attachment-meta">{a.filename || 'image'}</div>
               </div>
@@ -2388,7 +2422,13 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
                         ) : a.previewDataUrl ? (
                           <img className="ndp-orbapp-pending-img" src={a.previewDataUrl} alt={label} />
                         ) : (
-                          <OrbImagePreview api={api} className="ndp-orbapp-pending-img" imagePath={a.path} alt={label} />
+                          <OrbImagePreview
+                            api={api}
+                            className="ndp-orbapp-pending-img"
+                            imagePath={a.path}
+                            resourceId={a.resourceId}
+                            alt={label}
+                          />
                         )}
                         <span className="ndp-orbapp-pending-x">×</span>
                       </button>

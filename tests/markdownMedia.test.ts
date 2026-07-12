@@ -21,8 +21,11 @@ describe('Markdown local media compatibility', () => {
     expect(decodeLocalPathCompat('C:/My%20Files/shot.png')).toBe('C:/My Files/shot.png')
   })
 
-  it('maps local paths to file URLs and keeps safe remote URLs', () => {
-    expect(toLocalMediaSrc('C:\\My Files\\shot.png')).toBe('file:///C:/My Files/shot.png')
+  it('blocks direct local file URLs and keeps safe remote URLs', () => {
+    expect(toLocalMediaSrc('C:\\My Files\\shot.png')).toBe('')
+    expect(toLocalMediaSrc('file:///C:/My%20Files/shot.png')).toBe('')
+    expect(decodeLocalPathCompat('file:///C:/My%20Files/shot.png')).toBe('C:\\My Files\\shot.png')
+    expect(toLocalMediaSrc('https://example.com/shot.png')).toBe('https://example.com/shot.png')
     expect(markdownMediaUrlTransform('C:\\My Files\\shot.png')).toBe('C:/My Files/shot.png')
     expect(markdownMediaUrlTransform('https://example.com/shot.png')).toBe('https://example.com/shot.png')
     expect(markdownMediaUrlTransform('javascript:alert(1)')).toBe('')
