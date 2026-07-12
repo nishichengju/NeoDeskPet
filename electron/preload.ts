@@ -19,6 +19,7 @@ import type {
   ToolSettings,
   McpSettings,
   McpStateSnapshot,
+  NovelAISettings,
   ContextUsageSnapshot,
   MemoryRetrieveArgs,
   MemoryRetrieveResult,
@@ -99,11 +100,24 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   // AI settings
   setAISettings: (aiSettings: Partial<AISettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setAISettings', aiSettings),
-  saveAIProfile: (payload: { id?: string; name: string; apiKey: string; baseUrl: string; model: string }): Promise<AppSettings> =>
+  setNovelAISettings: (patch: Partial<NovelAISettings>): Promise<AppSettings> =>
+    ipcRenderer.invoke('settings:setNovelAISettings', patch),
+  saveAIProfile: (payload: {
+    id?: string
+    name: string
+    apiMode?: AISettings['apiMode']
+    apiKey: string
+    baseUrl: string
+    model: string
+  }): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:saveAIProfile', payload),
   deleteAIProfile: (id: string): Promise<AppSettings> => ipcRenderer.invoke('settings:deleteAIProfile', id),
   applyAIProfile: (id: string): Promise<AppSettings> => ipcRenderer.invoke('settings:applyAIProfile', id),
-  listAIModels: (payload?: { apiKey?: string; baseUrl?: string }): Promise<{ ok: boolean; models: string[]; error?: string }> =>
+  listAIModels: (payload?: {
+    apiMode?: AISettings['apiMode']
+    apiKey?: string
+    baseUrl?: string
+  }): Promise<{ ok: boolean; models: string[]; error?: string }> =>
     ipcRenderer.invoke('ai:listModels', payload),
 
   // Bubble settings
@@ -243,6 +257,8 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   // Tasks / Orchestrator (M1)
   listTasks: (): Promise<TaskListResult> => ipcRenderer.invoke('task:list'),
   getTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:get', id),
+  updateTaskToolRunImages: (taskId: string, runId: string, imagePaths: string[]): Promise<TaskRecord | null> =>
+    ipcRenderer.invoke('task:updateToolRunImages', taskId, runId, imagePaths),
   createTask: (args: TaskCreateArgs): Promise<TaskRecord> => ipcRenderer.invoke('task:create', args),
   pauseTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:pause', id),
   resumeTask: (id: string): Promise<TaskRecord | null> => ipcRenderer.invoke('task:resume', id),
@@ -359,16 +375,12 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
   // Context menu
   showContextMenu: (): void => ipcRenderer.send('pet:showContextMenu'),
   setPetOverlayHover: (hovering: boolean): void => ipcRenderer.send('pet:setOverlayHover', hovering),
-  setPetOverlayRects: (
-    rects:
-      | {
-          taskPanel?:
-            | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
-            | null
-        }
-      | null,
-  ): void =>
-    ipcRenderer.send('pet:setOverlayRects', rects),
+  setPetModelHover: (hovering: boolean): void => ipcRenderer.send('pet:setModelHover', hovering),
+  onPetCursorProbe: (listener: (payload: { x: number; y: number }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { x: number; y: number }) => listener(payload)
+    ipcRenderer.on('pet:cursorProbe', handler)
+    return () => ipcRenderer.off('pet:cursorProbe', handler)
+  },
 
   // Mouse forward for transparent click-through
   setIgnoreMouseEvents: (ignore: boolean, forward: boolean): void =>

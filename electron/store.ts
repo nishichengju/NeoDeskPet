@@ -1,6 +1,9 @@
 import Store from 'electron-store'
 import type {
   AISettings,
+  AIApiMode,
+  AIVisionCapability,
+  AIVisionRoutingMode,
   AIProfile,
   AppSettings,
   AsrSettings,
@@ -10,6 +13,8 @@ import type {
   ToolSettings,
   McpSettings,
   McpServerConfig,
+  NovelAISettings,
+  NovelAIPromptPreset,
   ChatProfile,
   ChatUiSettings,
   WorldBookEntry,
@@ -28,6 +33,7 @@ import {
 
 const defaultAISettings: AISettings = {
   // OpenAI compatible API settings
+  apiMode: 'openai-compatible',
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   model: 'gpt-4o-mini',
@@ -48,6 +54,12 @@ const defaultAISettings: AISettings = {
   geminiThinkingEffort: 'disabled',
   systemPrompt: '',
   enableVision: false,
+  visionRoutingMode: 'off',
+  visionCapability: 'auto',
+  visionFallbackProfileId: '',
+  visionFallbackModel: '',
+  visionFallbackOnTransient: true,
+  visionMaxImagesPerLook: 4,
   enableChatStreaming: false,
 }
 
@@ -283,6 +295,171 @@ const defaultAsrSettings: AsrSettings = {
   debug: false,
 }
 
+const defaultNovelAIPromptRules = [
+  '把用户的画图需求整理成 NovelAI 可用的英文 tag，用逗号分隔；不要输出解释、Markdown 或 image### 包装。',
+  '顺序：质量词 -> 人数/主体 -> 桌宠角色固定外观 -> 表情/动作 -> 服装 -> 场景/时间/光线 -> 构图/镜头 -> 风格。',
+  '桌宠角色外观要稳定复用；只有用户明确要求变化时才改发色、耳朵、尾巴、体型、服装等核心特征。',
+  '动作和视角要具体，避免只写 vague/cute；需要位置关系时写清 foreground/background、looking at viewer、standing/sitting 等。',
+  '正面提示词尽量控制在 512 占用内；重要 tag 可用 {tag} 或 {{{tag}}} 加权，但不要堆太多重复权重。',
+  '负面提示词只放质量问题、解剖错误、水印文字、额外肢体、错误角色数量等排除项；不要把想要的内容写进负面。',
+  '如果用户没有指定画风，默认使用 anime style, clean lineart, soft lighting, detailed eyes。',
+].join('\n')
+
+const nowForDefaultNovelAIPreset = 0
+
+const defaultNovelAIPromptPreset: NovelAIPromptPreset = {
+  id: 'default',
+  name: '默认桌宠',
+  fixedPositivePrompt: 'masterpiece, best quality, anime style, clean lineart, soft lighting, detailed eyes',
+  fixedNegativePrompt: 'lowres, bad anatomy, bad hands, extra fingers, missing fingers, text, watermark, blurry',
+  promptRules: defaultNovelAIPromptRules,
+  maxPromptChars: 512,
+  createdAt: nowForDefaultNovelAIPreset,
+  updatedAt: nowForDefaultNovelAIPreset,
+}
+
+const legacyDefaultNovelAINegativePrompt =
+  'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry'
+
+const defaultNovelAISettings: NovelAISettings = {
+  enabled: false,
+  apiKey: '',
+  endpoint: 'https://image.novelai.net/ai/generate-image',
+  cloudQueueEnabled: false,
+  cloudQueueUrl: 'https://st-chatu-novelai-queue.hf.space',
+  cloudQueueUserId: '',
+  cloudQueueGreeting: '',
+  cloudQueuePollIntervalMs: 1500,
+  cloudQueueTimeoutMs: 300000,
+  model: 'nai-diffusion-4-5-curated',
+  sampler: 'k_euler_ancestral',
+  noiseSchedule: 'karras',
+  activePromptPresetId: defaultNovelAIPromptPreset.id,
+  promptPresets: [defaultNovelAIPromptPreset],
+  fixedPositivePrompt: defaultNovelAIPromptPreset.fixedPositivePrompt,
+  fixedNegativePrompt: defaultNovelAIPromptPreset.fixedNegativePrompt,
+  promptRules: defaultNovelAIPromptRules,
+  maxPromptChars: 512,
+  negativePrompt: '',
+  width: 1024,
+  height: 1024,
+  steps: 28,
+  scale: 5,
+  cfgRescale: 0,
+  nSamples: 1,
+  seed: -1,
+  qualityToggle: false,
+  outputDir: 'generated-images',
+}
+
+function normalizeAiApiMode(value: unknown): AIApiMode {
+  return value === 'claude' ? 'claude' : 'openai-compatible'
+}
+
+function normalizeVisionRoutingMode(value: unknown, legacyEnableVision: unknown): AIVisionRoutingMode {
+  if (value === 'auto' || value === 'main-only' || value === 'fallback-only' || value === 'off') return value
+  return legacyEnableVision === true ? 'auto' : 'off'
+}
+
+function normalizeVisionCapability(value: unknown): AIVisionCapability {
+  return value === 'supported' || value === 'unsupported' ? value : 'auto'
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(min, Math.min(max, n))
+}
+
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  return Math.trunc(clampNumber(value, fallback, min, max))
+}
+
+function sanitizeNovelAIPresetId(value: unknown, fallback: string): string {
+  const raw = String(value ?? '').trim()
+  const id = raw.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '')
+  return id.slice(0, 80) || fallback
+}
+
+function normalizeNovelAIPromptPreset(value: unknown, index: number): NovelAIPromptPreset | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Partial<NovelAIPromptPreset>
+  const fallback = index === 0 ? defaultNovelAIPromptPreset : { ...defaultNovelAIPromptPreset, id: `preset_${index + 1}` }
+  const id = sanitizeNovelAIPresetId(raw.id, fallback.id)
+  const name = String(raw.name ?? '').trim().slice(0, 80) || fallback.name || `预设 ${index + 1}`
+  const createdAt = clampInt(raw.createdAt, Date.now(), 0, 4102444800000)
+  const updatedAt = clampInt(raw.updatedAt, createdAt, 0, 4102444800000)
+  return {
+    id,
+    name,
+    fixedPositivePrompt: String(raw.fixedPositivePrompt ?? fallback.fixedPositivePrompt ?? '').slice(0, 6000),
+    fixedNegativePrompt: String(raw.fixedNegativePrompt ?? fallback.fixedNegativePrompt ?? '').slice(0, 6000),
+    promptRules: String(raw.promptRules ?? fallback.promptRules ?? defaultNovelAIPromptRules).slice(0, 12000),
+    maxPromptChars: clampInt(raw.maxPromptChars, fallback.maxPromptChars ?? 512, 128, 12000),
+    createdAt,
+    updatedAt,
+  }
+}
+
+function normalizeNovelAIPromptPresets(value: unknown): NovelAIPromptPreset[] {
+  const rawList = Array.isArray(value) ? value : [defaultNovelAIPromptPreset]
+  const seen = new Set<string>()
+  const presets: NovelAIPromptPreset[] = []
+  rawList.slice(0, 80).forEach((entry, index) => {
+    const preset = normalizeNovelAIPromptPreset(entry, index)
+    if (!preset) return
+    let id = preset.id
+    let suffix = 2
+    while (seen.has(id)) {
+      id = `${preset.id}_${suffix}`
+      suffix += 1
+    }
+    seen.add(id)
+    presets.push({ ...preset, id })
+  })
+  return presets.length ? presets : [defaultNovelAIPromptPreset]
+}
+
+function normalizeNovelAISettings(value: unknown): NovelAISettings {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? (value as Partial<NovelAISettings>) : {}
+  const promptPresets = normalizeNovelAIPromptPresets(raw.promptPresets)
+  const activePromptPresetId = sanitizeNovelAIPresetId(raw.activePromptPresetId, promptPresets[0]?.id ?? defaultNovelAIPromptPreset.id)
+  const activePromptPreset = promptPresets.find((preset) => preset.id === activePromptPresetId) ?? promptPresets[0] ?? defaultNovelAIPromptPreset
+  const negativePromptRaw = String(raw.negativePrompt ?? '').trim()
+  return {
+    ...defaultNovelAISettings,
+    ...raw,
+    enabled: raw.enabled === true,
+    apiKey: String(raw.apiKey ?? '').trim(),
+    endpoint: String(raw.endpoint ?? '').trim() || defaultNovelAISettings.endpoint,
+    cloudQueueEnabled: raw.cloudQueueEnabled === true,
+    cloudQueueUrl: String(raw.cloudQueueUrl ?? '').trim() || defaultNovelAISettings.cloudQueueUrl,
+    cloudQueueUserId: String(raw.cloudQueueUserId ?? '').trim().slice(0, 120),
+    cloudQueueGreeting: String(raw.cloudQueueGreeting ?? '').trim().slice(0, 15),
+    cloudQueuePollIntervalMs: clampInt(raw.cloudQueuePollIntervalMs, defaultNovelAISettings.cloudQueuePollIntervalMs, 500, 10000),
+    cloudQueueTimeoutMs: clampInt(raw.cloudQueueTimeoutMs, defaultNovelAISettings.cloudQueueTimeoutMs, 15000, 1800000),
+    model: String(raw.model ?? '').trim() || defaultNovelAISettings.model,
+    sampler: String(raw.sampler ?? '').trim() || defaultNovelAISettings.sampler,
+    noiseSchedule: String(raw.noiseSchedule ?? '').trim() || defaultNovelAISettings.noiseSchedule,
+    activePromptPresetId: activePromptPreset.id,
+    promptPresets,
+    fixedPositivePrompt: String(raw.fixedPositivePrompt ?? activePromptPreset.fixedPositivePrompt).slice(0, 6000),
+    fixedNegativePrompt: String(raw.fixedNegativePrompt ?? activePromptPreset.fixedNegativePrompt).slice(0, 6000),
+    promptRules: String(raw.promptRules ?? activePromptPreset.promptRules ?? defaultNovelAIPromptRules).slice(0, 12000),
+    maxPromptChars: clampInt(raw.maxPromptChars, activePromptPreset.maxPromptChars, 128, 12000),
+    negativePrompt: negativePromptRaw === legacyDefaultNovelAINegativePrompt ? '' : String(raw.negativePrompt ?? '').slice(0, 6000),
+    width: clampInt(raw.width, defaultNovelAISettings.width, 64, 4096),
+    height: clampInt(raw.height, defaultNovelAISettings.height, 64, 4096),
+    steps: clampInt(raw.steps, defaultNovelAISettings.steps, 1, 80),
+    scale: clampNumber(raw.scale, defaultNovelAISettings.scale, 0, 30),
+    cfgRescale: clampNumber(raw.cfgRescale, defaultNovelAISettings.cfgRescale, 0, 1),
+    nSamples: clampInt(raw.nSamples, defaultNovelAISettings.nSamples, 1, 8),
+    seed: clampInt(raw.seed, defaultNovelAISettings.seed, -1, 4294967295),
+    qualityToggle: raw.qualityToggle === true,
+    outputDir: String(raw.outputDir ?? '').trim() || defaultNovelAISettings.outputDir,
+  }
+}
+
 const defaultSettings: AppSettings = {
   alwaysOnTop: true,
   clickThrough: false,
@@ -317,6 +494,7 @@ const defaultSettings: AppSettings = {
   ai: defaultAISettings,
   aiProfiles: [],
   activeAiProfileId: '',
+  novelai: defaultNovelAISettings,
   // Chat profile
   chatProfile: defaultChatProfile,
   // Chat UI
@@ -350,13 +528,14 @@ function normalizeAiProfiles(value: unknown): AIProfile[] {
 
     const nameRaw = String(obj.name ?? '').trim()
     const name = nameRaw || id
+    const apiMode = normalizeAiApiMode(obj.apiMode)
     const apiKey = String(obj.apiKey ?? '').trim()
     const baseUrl = String(obj.baseUrl ?? '').trim()
     const model = String(obj.model ?? '').trim()
     const createdAt = typeof obj.createdAt === 'number' && Number.isFinite(obj.createdAt) ? Math.trunc(obj.createdAt) : now
     const updatedAt = typeof obj.updatedAt === 'number' && Number.isFinite(obj.updatedAt) ? Math.trunc(obj.updatedAt) : createdAt
 
-    out.push({ id, name, apiKey, baseUrl, model, createdAt, updatedAt })
+    out.push({ id, name, apiMode, apiKey, baseUrl, model, createdAt, updatedAt })
     if (out.length >= 20) break
   }
 
@@ -514,7 +693,23 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
     servers: normalizedServers,
   }
 
-  merged.ai = { ...defaultAISettings, ...((value?.ai ?? {}) as Partial<AISettings>) }
+  const rawAi = (value?.ai ?? {}) as Partial<AISettings> & Record<string, unknown>
+  merged.ai = { ...defaultAISettings, ...rawAi }
+  merged.ai.apiMode = normalizeAiApiMode((merged.ai as { apiMode?: unknown }).apiMode)
+  merged.ai.visionRoutingMode = normalizeVisionRoutingMode(rawAi.visionRoutingMode, rawAi.enableVision)
+  merged.ai.enableVision = merged.ai.visionRoutingMode !== 'off'
+  merged.ai.visionCapability = normalizeVisionCapability(rawAi.visionCapability)
+  merged.ai.visionFallbackModel = String(rawAi.visionFallbackModel ?? '').trim().slice(0, 300)
+  merged.ai.visionFallbackOnTransient =
+    typeof rawAi.visionFallbackOnTransient === 'boolean'
+      ? rawAi.visionFallbackOnTransient
+      : defaultAISettings.visionFallbackOnTransient
+  merged.ai.visionMaxImagesPerLook = clampInt(
+    rawAi.visionMaxImagesPerLook,
+    defaultAISettings.visionMaxImagesPerLook,
+    1,
+    8,
+  )
   merged.ai.thinkingEffort = normalizeThinkingEffortLegacy((merged.ai as { thinkingEffort?: unknown }).thinkingEffort)
   merged.ai.thinkingProvider = normalizeReasoningProvider((merged.ai as { thinkingProvider?: unknown }).thinkingProvider)
   merged.ai.openaiReasoningEffort = normalizeOpenAIReasoningEffort(
@@ -542,9 +737,14 @@ function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings
           ? normalizeThinkingEffortLegacy(resolvedThinking.claudeThinkingEffort)
           : normalizeThinkingEffortLegacy(resolvedThinking.geminiThinkingEffort)
   merged.aiProfiles = normalizeAiProfiles(value?.aiProfiles)
+  const fallbackProfileIdRaw = String(rawAi.visionFallbackProfileId ?? '').trim()
+  merged.ai.visionFallbackProfileId = merged.aiProfiles.some((p) => p.id === fallbackProfileIdRaw)
+    ? fallbackProfileIdRaw
+    : ''
   const activeProfileIdRaw = String(value?.activeAiProfileId ?? '').trim()
   const hasActive = activeProfileIdRaw && merged.aiProfiles.some((p) => p.id === activeProfileIdRaw)
   merged.activeAiProfileId = hasActive ? activeProfileIdRaw : merged.aiProfiles[0]?.id ?? ''
+  merged.novelai = normalizeNovelAISettings(value?.novelai)
   if (merged.ai.systemPrompt === legacyDefaultSystemPrompt) merged.ai.systemPrompt = ''
   if (
     Array.isArray(merged.bubble.clickPhrases) &&
@@ -625,6 +825,7 @@ const store = new Store<AppSettings>({
       if (oldAi && 'provider' in oldAi) {
         // Old format detected, migrate to new format
         const newAi: AISettings = {
+          apiMode: 'openai-compatible',
           apiKey: (oldAi.openaiApiKey as string) || '',
           baseUrl: (oldAi.openaiBaseUrl as string) || 'https://api.openai.com/v1',
           model: (oldAi.openaiModel as string) || 'gpt-4o-mini',
@@ -638,6 +839,12 @@ const store = new Store<AppSettings>({
           geminiThinkingEffort: 'disabled',
           systemPrompt: (oldAi.systemPrompt as string) || defaultAISettings.systemPrompt,
           enableVision: false,
+          visionRoutingMode: 'off',
+          visionCapability: 'auto',
+          visionFallbackProfileId: '',
+          visionFallbackModel: '',
+          visionFallbackOnTransient: true,
+          visionMaxImagesPerLook: 4,
           enableChatStreaming: false,
         }
         store.set('ai', newAi)
@@ -923,13 +1130,19 @@ const store = new Store<AppSettings>({
   },
 })
 
+// getSettings 的高频调用方（点击穿透轮询、鼠标跟踪泵等）共享同一份缓存对象，
+// 调用方必须把返回值当作只读；所有写入都必须走 setSettings 以刷新缓存。
+let settingsCache: AppSettings | null = null
+
 export function getSettings(): AppSettings {
-  return normalizeSettings(store.store)
+  if (!settingsCache) settingsCache = normalizeSettings(store.store)
+  return settingsCache
 }
 
 export function setSettings(next: Partial<AppSettings>): AppSettings {
   const current = getSettings()
   const merged: AppSettings = normalizeSettings({ ...current, ...next })
   store.store = merged
-  return normalizeSettings(store.store)
+  settingsCache = normalizeSettings(store.store)
+  return settingsCache
 }

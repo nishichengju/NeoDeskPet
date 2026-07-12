@@ -881,7 +881,7 @@
 
 .ndp-mmvector-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
 }
 
@@ -902,10 +902,12 @@
 
 .ndp-mmvector-image {
   width: 100%;
-  max-height: 180px;
+  height: auto;
+  max-height: min(52vh, 520px);
+  aspect-ratio: auto;
   border-radius: 10px;
   background: rgba(0, 0, 0, 0.35);
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .ndp-mmvector-image-hit {
@@ -923,6 +925,16 @@
   margin-top: 8px;
   display: flex;
   justify-content: flex-end;
+}
+
+.ndp-mmvector-actions-left {
+  justify-content: flex-start;
+}
+
+.ndp-tooluse-run-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
 }
 
 .ndp-btn-mini {
@@ -1011,6 +1023,21 @@
   overflow: hidden;
 }
 
+.ndp-image-viewer-canvas {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  touch-action: none;
+}
+
+.ndp-image-viewer-canvas:active {
+  cursor: grabbing;
+}
+
 .ndp-image-viewer-img {
   width: auto;
   height: auto;
@@ -1037,6 +1064,11 @@
 
 .ndp-image-viewer-nav:hover {
   background: rgba(255, 255, 255, 0.12);
+}
+
+.ndp-image-viewer-nav:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .ndp-image-viewer-tip {

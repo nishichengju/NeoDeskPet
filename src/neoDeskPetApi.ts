@@ -43,6 +43,7 @@ import type {
   ToolSettings,
   McpSettings,
   McpStateSnapshot,
+  NovelAISettings,
   ContextUsageSnapshot,
   DisplayMode,
   OrbUiState,
@@ -92,10 +93,22 @@ export type NeoDeskPetApi = {
   setLive2dIdleSwayEnabled(enabled: boolean): Promise<AppSettings>
   // AI settings
   setAISettings(aiSettings: Partial<AISettings>): Promise<AppSettings>
-  saveAIProfile(payload: { id?: string; name: string; apiKey: string; baseUrl: string; model: string }): Promise<AppSettings>
+  setNovelAISettings(patch: Partial<NovelAISettings>): Promise<AppSettings>
+  saveAIProfile(payload: {
+    id?: string
+    name: string
+    apiMode?: AISettings['apiMode']
+    apiKey: string
+    baseUrl: string
+    model: string
+  }): Promise<AppSettings>
   deleteAIProfile(id: string): Promise<AppSettings>
   applyAIProfile(id: string): Promise<AppSettings>
-  listAIModels(payload?: { apiKey?: string; baseUrl?: string }): Promise<{ ok: boolean; models: string[]; error?: string }>
+  listAIModels(payload?: {
+    apiMode?: AISettings['apiMode']
+    apiKey?: string
+    baseUrl?: string
+  }): Promise<{ ok: boolean; models: string[]; error?: string }>
   // Bubble settings
   setBubbleSettings(bubbleSettings: Partial<BubbleSettings>): Promise<AppSettings>
   // Task panel settings (M2)
@@ -185,6 +198,7 @@ export type NeoDeskPetApi = {
   // Tasks / Orchestrator (M1)
   listTasks(): Promise<TaskListResult>
   getTask(id: string): Promise<TaskRecord | null>
+  updateTaskToolRunImages(taskId: string, runId: string, imagePaths: string[]): Promise<TaskRecord | null>
   createTask(args: TaskCreateArgs): Promise<TaskRecord>
   pauseTask(id: string): Promise<TaskRecord | null>
   resumeTask(id: string): Promise<TaskRecord | null>
@@ -254,15 +268,8 @@ export type NeoDeskPetApi = {
   stopDrag(point?: { x: number; y: number }): void
   showContextMenu(): void
   setPetOverlayHover(hovering: boolean): void
-  setPetOverlayRects(
-    rects:
-      | {
-          taskPanel?:
-            | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
-            | null
-        }
-      | null,
-  ): void
+  setPetModelHover(hovering: boolean): void
+  onPetCursorProbe(listener: (payload: { x: number; y: number }) => void): () => void
   setIgnoreMouseEvents(ignore: boolean, forward: boolean): void
   onSettingsChanged(listener: SettingsChangeListener): () => void
   // Bubble message

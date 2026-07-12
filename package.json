@@ -8,8 +8,9 @@
     "dev": "set ELECTRON_RUN_AS_NODE=&& vite",
     "dev:reset": "powershell -ExecutionPolicy Bypass -File scripts/dev-reset.ps1",
     "build": "tsc && vite build && electron-builder",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "electron-builder install-app-deps && node scripts/install-playwright-browser.mjs",
     "rebuild:native": "electron-builder install-app-deps",
+    "playwright:install": "node scripts/install-playwright-browser.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
@@ -19,9 +20,11 @@
     "electron-store": "^10.0.0",
     "pixi-live2d-display": "0.4.0",
     "pixi.js": "6.5.10",
-    "playwright-core": "^1.50.1",
+    "playwright-core": "1.61.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
     "zod": "^4.3.4"
   },
   "devDependencies": {

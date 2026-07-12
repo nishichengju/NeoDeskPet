@@ -12,12 +12,6 @@ type CreateWindowDeps = {
   mainDistDir: string
 }
 
-const PET_CLICK_THROUGH_POLL_MS = 8
-// 命中区域与 Live2DView 内 model.position/scale 的近似保持一致（不是像素级命中，只做“可拖动/可点区域”）
-const PET_MODEL_OFFSET_Y = 0.06
-const PET_MODEL_RADIUS_X = 0.42
-const PET_MODEL_RADIUS_Y = 0.48
-const PET_CONTEXT_ORB_HIT_RADIUS_PX = 14
 
 // 悬浮球窗口的三种 UI 状态尺寸（与 renderer/src/orb/OrbApp.tsx 对齐）
 const ORB_BALL_SIZE = 40
@@ -139,13 +133,14 @@ export class WindowManager {
   private orbMenuWindow: BrowserWindow | null = null
   private appQuitting = false
 
-  private petClickThroughTimer: NodeJS.Timeout | null = null
   private petDragging = false
   private petOverlayHover = false
-  private petTaskPanelHitRect:
-    | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
-    | null = null
+  // 渲染进程像素级命中检测的上报结果：光标位于模型不透明像素或交互浮层上
+  private petModelHover = false
   private petIgnoreMouseEvents: boolean | null = null
+  // 低频安全看门狗：forward 鼠标钩子在 Windows 上会因特权窗口聚焦、页面刷新等
+  // 静默失效（Electron #15376/#33281/#30808），靠它兜底清理残留状态并重新武装钩子。
+  private petClickThroughWatchdog: NodeJS.Timeout | null = null
 
   private orbOverlayBaseBounds: Electron.Rectangle | null = null
   // 记住 ball 状态时的位置，以便从 bar/panel 返回时恢复到原位
@@ -218,8 +213,17 @@ export class WindowManager {
       /* ignore */
     }
 
-    // 先启用鼠标事件；clickThrough 模式由主进程轮询动态切换 ignoreMouseEvents
+    // 先启用鼠标事件；clickThrough 模式由渲染进程像素命中上报驱动切换 ignoreMouseEvents
     win.setIgnoreMouseEvents(false)
+
+    // Electron #15376：forward 鼠标钩子在页面加载/刷新后会静默失效，
+    // 每次加载完成后必须重新应用 ignoreMouseEvents 才能恢复 mousemove 转发。
+    win.webContents.on('did-finish-load', () => {
+      if (win.isDestroyed()) return
+      this.petModelHover = false
+      this.petOverlayHover = false
+      this.applyPetClickThrough(getSettings().clickThrough)
+    })
 
     this.attachPersistHandlers(win, 'pet')
     this.loadWindow(win, 'pet')
@@ -242,13 +246,14 @@ export class WindowManager {
 
     win.on('closed', () => {
       this.petWindow = null
-      if (this.petClickThroughTimer) {
-        clearInterval(this.petClickThroughTimer)
-        this.petClickThroughTimer = null
-      }
       this.petDragging = false
       this.petOverlayHover = false
+      this.petModelHover = false
       this.petIgnoreMouseEvents = null
+      if (this.petClickThroughWatchdog) {
+        clearInterval(this.petClickThroughWatchdog)
+        this.petClickThroughWatchdog = null
+      }
     })
 
     return win
@@ -414,15 +419,9 @@ export class WindowManager {
       maximizable: false,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
-        backgroundThrottling: false,
+        // Orb 不承载音频/ASR 链路（实时逻辑在 chat/pet renderer），隐藏时允许默认后台节流
       },
     })
-
-    try {
-      win.webContents.setBackgroundThrottling(false)
-    } catch {
-      // ignore
-    }
 
     this.attachPersistHandlers(win, 'orb')
     this.loadWindow(win, 'orb')
@@ -941,45 +940,9 @@ export class WindowManager {
     this.updatePetIgnoreMouseEvents()
   }
 
-  setPetOverlayRects(
-    rects:
-      | {
-          taskPanel?:
-            | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
-            | null
-        }
-      | null
-      | undefined,
-  ): void {
-    const r = rects?.taskPanel
-    if (
-      r &&
-      Number.isFinite(r.x) &&
-      Number.isFinite(r.y) &&
-      Number.isFinite(r.width) &&
-      Number.isFinite(r.height) &&
-      r.width > 0 &&
-      r.height > 0
-    ) {
-      const viewportWidth =
-        typeof r.viewportWidth === 'number' && Number.isFinite(r.viewportWidth) && r.viewportWidth > 0
-          ? Math.round(r.viewportWidth)
-          : undefined
-      const viewportHeight =
-        typeof r.viewportHeight === 'number' && Number.isFinite(r.viewportHeight) && r.viewportHeight > 0
-          ? Math.round(r.viewportHeight)
-          : undefined
-      this.petTaskPanelHitRect = {
-        x: Math.round(r.x),
-        y: Math.round(r.y),
-        width: Math.round(r.width),
-        height: Math.round(r.height),
-        viewportWidth,
-        viewportHeight,
-      }
-    } else {
-      this.petTaskPanelHitRect = null
-    }
+  setPetModelHover(hovering: boolean): void {
+    if (this.petModelHover === hovering) return
+    this.petModelHover = hovering
     this.updatePetIgnoreMouseEvents()
   }
 
@@ -998,107 +961,63 @@ export class WindowManager {
     if (!pet) return
 
     if (!enabled) {
-      if (this.petClickThroughTimer) {
-        clearInterval(this.petClickThroughTimer)
-        this.petClickThroughTimer = null
+      if (this.petClickThroughWatchdog) {
+        clearInterval(this.petClickThroughWatchdog)
+        this.petClickThroughWatchdog = null
       }
-      this.petIgnoreMouseEvents = null
+      this.petIgnoreMouseEvents = false
       pet.setIgnoreMouseEvents(false)
       return
     }
 
-    if (!this.petClickThroughTimer) {
-      // 先默认全窗穿透，避免“刚打开穿透的瞬间点击仍被挡住”
+    // 开启时先整窗穿透（forward 保持向渲染进程转发 mousemove），
+    // 渲染进程像素命中上报到来后由 updatePetIgnoreMouseEvents 恢复交互。
+    this.petIgnoreMouseEvents = true
+    pet.setIgnoreMouseEvents(true, { forward: true })
+    this.updatePetIgnoreMouseEvents()
+
+    if (!this.petClickThroughWatchdog) {
+      this.petClickThroughWatchdog = setInterval(() => this.petClickThroughPumpTick(), 80)
+      ;(this.petClickThroughWatchdog as unknown as { unref?: () => void }).unref?.()
+    }
+  }
+
+  // 探针泵：forward 鼠标转发在 Windows 上不可靠（Electron #15376/#33281 等，
+  // 特权窗口聚焦/页面刷新都会让钩子静默失效），因此穿透模式下由主进程低频推送
+  // 光标客户区坐标给渲染进程做像素命中检测。光标在窗口外时仅做廉价的边界检查。
+  private petClickThroughPumpTick(): void {
+    const settings = getSettings()
+    if (!settings.clickThrough) return
+    const pet = this.getPetWindow()
+    if (!pet || pet.isDestroyed()) return
+    if (this.petDragging) return
+
+    const pos = screen.getCursorScreenPoint()
+    const b = pet.getContentBounds()
+    const inside = pos.x >= b.x && pos.x <= b.x + b.width && pos.y >= b.y && pos.y <= b.y + b.height
+    if (!inside) {
+      // 清掉可能因 mouseleave 丢失而残留的 hover 状态
+      this.petModelHover = false
+      this.petOverlayHover = false
       if (this.petIgnoreMouseEvents !== true) {
         this.petIgnoreMouseEvents = true
         pet.setIgnoreMouseEvents(true, { forward: true })
       }
-      this.petClickThroughTimer = setInterval(() => this.updatePetIgnoreMouseEvents(), PET_CLICK_THROUGH_POLL_MS)
+      return
     }
-    this.updatePetIgnoreMouseEvents()
+
+    pet.webContents.send('pet:cursorProbe', { x: pos.x - b.x, y: pos.y - b.y })
   }
 
+  // 事件驱动：由渲染进程的像素命中上报（setPetModelHover）、浮层 hover、拖拽状态触发，
+  // 不再依赖主进程定时轮询光标位置。
   private updatePetIgnoreMouseEvents(): void {
-    const settings = getSettings()
     const pet = this.getPetWindow()
     if (!pet) return
 
-    if (!settings.clickThrough) {
-      if (this.petIgnoreMouseEvents !== false) {
-        this.petIgnoreMouseEvents = false
-        pet.setIgnoreMouseEvents(false)
-      }
-      return
-    }
-
-    if (this.petOverlayHover) {
-      if (this.petIgnoreMouseEvents !== false) {
-        this.petIgnoreMouseEvents = false
-        pet.setIgnoreMouseEvents(false)
-      }
-      return
-    }
-
-    if (this.petDragging) {
-      if (this.petIgnoreMouseEvents !== false) {
-        this.petIgnoreMouseEvents = false
-        pet.setIgnoreMouseEvents(false)
-      }
-      return
-    }
-
-    const mousePos = screen.getCursorScreenPoint()
-    const bounds = pet.getContentBounds()
-
-    const insideWindow =
-      mousePos.x >= bounds.x &&
-      mousePos.x <= bounds.x + bounds.width &&
-      mousePos.y >= bounds.y &&
-      mousePos.y <= bounds.y + bounds.height
-
-    let isInsideModel = false
-    let isInsideContextOrb = false
-    let isInsideTaskPanel = false
-    if (insideWindow) {
-      const x = mousePos.x - bounds.x
-      const y = mousePos.y - bounds.y
-
-      const centerX = bounds.width / 2
-      const centerY = bounds.height / 2 + bounds.height * PET_MODEL_OFFSET_Y
-      const radiusX = bounds.width * PET_MODEL_RADIUS_X
-      const radiusY = bounds.height * PET_MODEL_RADIUS_Y
-
-      const normalizedX = (x - centerX) / radiusX
-      const normalizedY = (y - centerY) / radiusY
-      isInsideModel = normalizedX * normalizedX + normalizedY * normalizedY <= 1
-
-      const bubble = settings.bubble
-      if (bubble?.contextOrbEnabled) {
-        const orbCenterX = (Math.max(0, Math.min(100, bubble.contextOrbX ?? 12)) / 100) * bounds.width
-        const orbCenterY = (Math.max(0, Math.min(100, bubble.contextOrbY ?? 16)) / 100) * bounds.height
-        const dx = x - orbCenterX
-        const dy = y - orbCenterY
-        isInsideContextOrb = dx * dx + dy * dy <= PET_CONTEXT_ORB_HIT_RADIUS_PX * PET_CONTEXT_ORB_HIT_RADIUS_PX
-      }
-
-      const panel = this.petTaskPanelHitRect
-      if (panel) {
-        const scaleX =
-          typeof panel.viewportWidth === 'number' && panel.viewportWidth > 0 ? bounds.width / panel.viewportWidth : 1
-        const scaleY =
-          typeof panel.viewportHeight === 'number' && panel.viewportHeight > 0 ? bounds.height / panel.viewportHeight : 1
-
-        const px = panel.x * scaleX
-        const py = panel.y * scaleY
-        const pw = panel.width * scaleX
-        const ph = panel.height * scaleY
-
-        const hitPad = 16
-        isInsideTaskPanel = x >= px - hitPad && x <= px + pw + hitPad && y >= py - hitPad && y <= py + ph + hitPad
-      }
-    }
-
-    const nextIgnore = !insideWindow || (!isInsideModel && !isInsideContextOrb && !isInsideTaskPanel)
+    const settings = getSettings()
+    const nextIgnore =
+      Boolean(settings.clickThrough) && !this.petModelHover && !this.petOverlayHover && !this.petDragging
     if (nextIgnore === this.petIgnoreMouseEvents) return
     this.petIgnoreMouseEvents = nextIgnore
     pet.setIgnoreMouseEvents(nextIgnore, { forward: true })

@@ -433,7 +433,7 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
           className="ndp-input"
           type="number"
           min={200}
-          max={200000}
+          max={10000}
           value={vectorScanLimit}
           onChange={(e) => void onSetAutoExtractSettings({ vectorScanLimit: Number(e.target.value) })}
         />

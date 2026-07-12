@@ -14,7 +14,8 @@ dist-ssr
 *.local
 dist-electron
 release
-docs/
+docs/*
+!docs/vision-routing-design.md
 
 # Env files (never commit secrets)
 .env
@@ -51,6 +52,7 @@ sky-memory-system-main/
 # 浏览器自动化临时配置目录
 .playwright-mcp/
 .tmp-pw-*/
+/playwright-browsers/
 
 # 曾误提交到根目录的临时文件
 ai_bg1.jpg

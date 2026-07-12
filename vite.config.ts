@@ -32,7 +32,12 @@ export default defineConfig({
     react(),
     electron({
       main: {
-        entry: 'electron/main.ts',
+        // vectorSearchWorker 作为独立 entry 打包成 dist-electron/vectorSearchWorker.js，
+        // 供主进程以 worker_threads 启动（见 memoryService.ts）
+        entry: {
+          main: 'electron/main.ts',
+          vectorSearchWorker: 'electron/vectorSearchWorker.ts',
+        },
         vite: {
           build: {
             rollupOptions: {

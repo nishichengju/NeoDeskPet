@@ -129,12 +129,16 @@ export type WindowBounds = {
 
 export type AIThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
 export type AICompressionApiSource = 'main' | 'profile'
+export type AIApiMode = 'openai-compatible' | 'claude'
+export type AIVisionRoutingMode = 'off' | 'auto' | 'main-only' | 'fallback-only'
+export type AIVisionCapability = 'auto' | 'supported' | 'unsupported'
 export type AIReasoningProvider = 'auto' | 'openai' | 'claude' | 'gemini'
 export type OpenAIReasoningEffort = 'disabled' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 export type ClaudeThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
 export type GeminiThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
 
 export type AISettings = {
+  apiMode: AIApiMode
   apiKey: string
   baseUrl: string
   model: string
@@ -153,17 +157,66 @@ export type AISettings = {
   claudeThinkingEffort: ClaudeThinkingEffort // Claude（兼容网关）映射为 thinking.budget_tokens
   geminiThinkingEffort: GeminiThinkingEffort // Gemini（OpenAI 兼容）映射为 reasoning_effort
   systemPrompt: string
-  enableVision: boolean // Enable image/vision capability (model-dependent)
+  enableVision: boolean // Legacy compatibility flag, derived from visionRoutingMode
+  visionRoutingMode: AIVisionRoutingMode // off / main model first / main only / fallback only
+  visionCapability: AIVisionCapability // Current main model capability override; auto = detect at runtime
+  visionFallbackProfileId: string // Saved AI profile used as the external vision model
+  visionFallbackModel: string // Optional model override; empty = use the saved profile model
+  visionFallbackOnTransient: boolean // In auto mode, allow fallback on transient main-model failures
+  visionMaxImagesPerLook: number // Maximum images consumed by one visual look request
   enableChatStreaming: boolean // Enable streaming chat output (SSE)
 }
 export type AIProfile = {
   id: string
   name: string
+  apiMode: AIApiMode
   apiKey: string
   baseUrl: string
   model: string
   createdAt: number
   updatedAt: number
+}
+
+export type NovelAIPromptPreset = {
+  id: string
+  name: string
+  fixedPositivePrompt: string
+  fixedNegativePrompt: string
+  promptRules: string
+  maxPromptChars: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type NovelAISettings = {
+  enabled: boolean
+  apiKey: string
+  endpoint: string
+  cloudQueueEnabled: boolean
+  cloudQueueUrl: string
+  cloudQueueUserId: string
+  cloudQueueGreeting: string
+  cloudQueuePollIntervalMs: number
+  cloudQueueTimeoutMs: number
+  model: string
+  sampler: string
+  noiseSchedule: string
+  activePromptPresetId: string
+  promptPresets: NovelAIPromptPreset[]
+  fixedPositivePrompt: string
+  fixedNegativePrompt: string
+  promptRules: string
+  maxPromptChars: number
+  negativePrompt: string
+  width: number
+  height: number
+  steps: number
+  scale: number
+  cfgRescale: number
+  nSamples: number
+  seed: number
+  qualityToggle: boolean
+  outputDir: string
 }
 
 export type ChatProfile = {
@@ -353,6 +406,7 @@ export type AppSettings = {
   ai: AISettings
   aiProfiles: AIProfile[]
   activeAiProfileId?: string
+  novelai: NovelAISettings
   chatProfile: ChatProfile
   chatUi: ChatUiSettings
   worldBook: WorldBookSettings
@@ -733,9 +787,24 @@ export type TaskListResult = {
   items: TaskRecord[]
 }
 
+export type VisualArtifactRef = {
+  id: string
+  path: string
+  source: 'upload' | 'image.generate' | 'screen.capture' | 'browser.screenshot' | 'legacy'
+  groupId?: string
+  index?: number
+  total?: number
+  messageId?: string
+  taskId?: string
+  runId?: string
+  createdAt?: number
+}
+
 export type TaskCreateArgs = {
   queue?: TaskQueue
   title: string
   why?: string
   steps?: Array<Pick<TaskStepRecord, 'title' | 'tool' | 'input'>>
+  visualArtifacts?: VisualArtifactRef[]
+  initialVisionIds?: string[]
 }

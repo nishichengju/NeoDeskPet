@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import type {
+  AIApiMode,
   AIReasoningProvider,
+  AIVisionCapability,
+  AIVisionRoutingMode,
   AppSettings,
   ClaudeThinkingEffort,
   GeminiThinkingEffort,
@@ -22,6 +25,7 @@ export function AISettingsTab(props: {
 }) {
   const { api, aiSettings, orchestrator, aiProfiles, activeAiProfileId } = props
 
+  const apiMode = aiSettings?.apiMode ?? 'openai-compatible'
   const apiKey = aiSettings?.apiKey ?? ''
   const baseUrl = aiSettings?.baseUrl ?? 'https://api.openai.com/v1'
   const model = aiSettings?.model ?? 'gpt-4o-mini'
@@ -46,11 +50,18 @@ export function AISettingsTab(props: {
   const claudeThinkingEffort = reasoningUi.claudeThinkingEffort
   const geminiThinkingEffort = reasoningUi.geminiThinkingEffort
   const systemPrompt = aiSettings?.systemPrompt ?? ''
-  const enableVision = aiSettings?.enableVision ?? false
+  const visionRoutingMode =
+    aiSettings?.visionRoutingMode ?? ((aiSettings?.enableVision ?? false) ? 'auto' : 'off')
+  const visionCapability = aiSettings?.visionCapability ?? 'auto'
+  const visionFallbackProfileId = String(aiSettings?.visionFallbackProfileId ?? '').trim()
+  const visionFallbackModel = String(aiSettings?.visionFallbackModel ?? '')
+  const visionFallbackOnTransient = aiSettings?.visionFallbackOnTransient ?? true
+  const visionMaxImagesPerLook = clampIntValue(aiSettings?.visionMaxImagesPerLook, 4, 1, 8)
   const enableChatStreaming = aiSettings?.enableChatStreaming ?? false
 
   const profiles = Array.isArray(aiProfiles) ? aiProfiles : []
   const activeProfile = profiles.find((p) => p.id === (activeAiProfileId ?? '')) ?? null
+  const visionFallbackProfile = profiles.find((p) => p.id === visionFallbackProfileId) ?? null
   const compressionProfile =
     autoContextCompressionApiSource === 'profile'
       ? profiles.find((p) => p.id === autoContextCompressionProfileId) ?? null
@@ -78,7 +89,7 @@ export function AISettingsTab(props: {
     const id = overwrite ? activeProfile?.id : undefined
     const fallbackName = `${baseUrl || '接口'} ${model || ''}`.trim() || '新配置'
     const name = profileName.trim() || fallbackName
-    await api.saveAIProfile({ id, name, apiKey, baseUrl, model })
+    await api.saveAIProfile({ id, name, apiMode, apiKey, baseUrl, model })
   }
 
   const deleteApiProfile = async () => {
@@ -89,6 +100,7 @@ export function AISettingsTab(props: {
   const applyApiProfile = async (id: string) => {
     if (!api || !id) return
     await api.applyAIProfile(id)
+    await api.setAISettings({ visionCapability: 'auto' })
   }
 
   const fetchModelList = async () => {
@@ -96,7 +108,7 @@ export function AISettingsTab(props: {
     setModelsLoading(true)
     setModelsError('')
     try {
-      const res = await api.listAIModels({ apiKey, baseUrl })
+      const res = await api.listAIModels({ apiMode, apiKey, baseUrl })
       if (!res.ok) {
         setModelOptions([])
         setModelsError(res.error || '拉取模型列表失败')
@@ -120,6 +132,7 @@ export function AISettingsTab(props: {
   const fetchCompressionModelList = async () => {
     if (!api) return
     const sourceProfile = compressionProfile
+    const requestApiMode = autoContextCompressionApiSource === 'profile' ? sourceProfile?.apiMode ?? 'openai-compatible' : apiMode
     const requestApiKey = autoContextCompressionApiSource === 'profile' ? sourceProfile?.apiKey ?? '' : apiKey
     const requestBaseUrl = autoContextCompressionApiSource === 'profile' ? sourceProfile?.baseUrl ?? '' : baseUrl
     const fallbackModel = autoContextCompressionApiSource === 'profile' ? sourceProfile?.model ?? '' : model
@@ -133,7 +146,7 @@ export function AISettingsTab(props: {
     setCompressionModelsLoading(true)
     setCompressionModelsError('')
     try {
-      const res = await api.listAIModels({ apiKey: requestApiKey, baseUrl: requestBaseUrl })
+      const res = await api.listAIModels({ apiMode: requestApiMode, apiKey: requestApiKey, baseUrl: requestBaseUrl })
       if (!res.ok) {
         setCompressionModelOptions([])
         setCompressionModelsError(res.error || '拉取压缩模型列表失败')
@@ -196,6 +209,27 @@ export function AISettingsTab(props: {
     void api.setAISettings({ geminiThinkingEffort: level as GeminiThinkingEffort, thinkingEffort: legacy })
   }
 
+  const switchApiMode = (nextMode: AIApiMode) => {
+    if (!api) return
+    const currentBase = baseUrl.trim()
+    const currentModel = model.trim()
+    const patch: Partial<AppSettings['ai']> = { apiMode: nextMode, visionCapability: 'auto' }
+
+    if (nextMode === 'claude') {
+      if (!currentBase || currentBase === 'https://api.openai.com/v1') patch.baseUrl = 'https://api.anthropic.com/v1'
+      if (!currentModel || currentModel === 'gpt-4o-mini') patch.model = 'claude-sonnet-4-5'
+      if (thinkingProvider === 'auto' || thinkingProvider === 'openai') patch.thinkingProvider = 'claude'
+    } else {
+      if (!currentBase || currentBase === 'https://api.anthropic.com/v1') patch.baseUrl = 'https://api.openai.com/v1'
+      if (!currentModel || currentModel.startsWith('claude-')) patch.model = 'gpt-4o-mini'
+      if (thinkingProvider === 'claude') patch.thinkingProvider = 'auto'
+    }
+
+    void api.setAISettings(patch)
+    setModelOptions([])
+    setModelsError('')
+  }
+
   // Format large numbers for display
   const formatTokens = (n: number) => {
     if (n >= 1000) return `${Math.round(n / 1000)}K`
@@ -213,7 +247,7 @@ export function AISettingsTab(props: {
             <option value="">（无）</option>
             {profiles.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name}
+                {p.name} · {p.apiMode === 'claude' ? 'Claude' : 'OpenAI'}
               </option>
             ))}
           </select>
@@ -239,6 +273,17 @@ export function AISettingsTab(props: {
         <p className="ndp-setting-hint">可在多个 API 之间快速切换，不需要重复输入 Key / Base URL / 模型。</p>
       </div>
 
+      <div className="ndp-setting-item">
+        <label>接口格式</label>
+        <select className="ndp-select" value={apiMode} onChange={(e) => switchApiMode(e.target.value as AIApiMode)}>
+          <option value="openai-compatible">OpenAI 兼容（/chat/completions）</option>
+          <option value="claude">Claude Messages（/v1/messages）</option>
+        </select>
+        <p className="ndp-setting-hint">
+          OpenAI 兼容适合 OpenAI、DeepSeek、Gemini OpenAI 网关等；Claude Messages 使用 Anthropic 原生接口头和消息格式。
+        </p>
+      </div>
+
       {/* API Key */}
       <div className="ndp-setting-item">
         <label>API Key</label>
@@ -246,7 +291,7 @@ export function AISettingsTab(props: {
           type="password"
           className="ndp-input"
           value={apiKey}
-          placeholder="sk-..."
+          placeholder={apiMode === 'claude' ? 'sk-ant-...' : 'sk-...'}
           onChange={(e) => api?.setAISettings({ apiKey: e.target.value })}
         />
         <p className="ndp-setting-hint">支持 OpenAI 兼容的 API</p>
@@ -259,8 +304,8 @@ export function AISettingsTab(props: {
           type="text"
           className="ndp-input"
           value={baseUrl}
-          placeholder="https://api.openai.com/v1"
-          onChange={(e) => api?.setAISettings({ baseUrl: e.target.value })}
+          placeholder={apiMode === 'claude' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1'}
+          onChange={(e) => api?.setAISettings({ baseUrl: e.target.value, visionCapability: 'auto' })}
         />
         <p className="ndp-setting-hint">可配置代理或其他兼容 API 地址</p>
       </div>
@@ -272,15 +317,19 @@ export function AISettingsTab(props: {
           type="text"
           className="ndp-input"
           value={model}
-          placeholder="gpt-4o-mini"
-          onChange={(e) => api?.setAISettings({ model: e.target.value })}
+          placeholder={apiMode === 'claude' ? 'claude-sonnet-4-5' : 'gpt-4o-mini'}
+          onChange={(e) => api?.setAISettings({ model: e.target.value, visionCapability: 'auto' })}
         />
         <div className="ndp-setting-actions">
           <button className="ndp-btn" onClick={() => void fetchModelList()} disabled={modelsLoading}>
             {modelsLoading ? '加载中...' : '拉取模型列表'}
           </button>
           {modelOptions.length > 0 ? (
-            <select className="ndp-select" value={model} onChange={(e) => api?.setAISettings({ model: e.target.value })}>
+            <select
+              className="ndp-select"
+              value={model}
+              onChange={(e) => api?.setAISettings({ model: e.target.value, visionCapability: 'auto' })}
+            >
               {modelOptions.map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -293,16 +342,105 @@ export function AISettingsTab(props: {
         <p className="ndp-setting-hint">可手动输入模型 ID，也可以先拉取后选择。</p>
       </div>
 
+      <h3>视觉路由</h3>
+
+      <div className="ndp-setting-item">
+        <label>视觉处理方式</label>
+        <select
+          className="ndp-select"
+          value={visionRoutingMode}
+          onChange={(e) => api?.setAISettings({ visionRoutingMode: e.target.value as AIVisionRoutingMode })}
+        >
+          <option value="auto">自动：主模型优先，必要时使用外挂视觉</option>
+          <option value="main-only">仅主模型：原图直接交给当前模型</option>
+          <option value="fallback-only">仅外挂视觉：始终使用下方视觉配置</option>
+          <option value="off">关闭视觉</option>
+        </select>
+        <p className="ndp-setting-hint">
+          “自动”会优先让当前对话模型直接看图；确认不支持或符合回退条件时，再调用外挂视觉模型提供观察结果。
+        </p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>当前主模型的视觉能力</label>
+        <select
+          className="ndp-select"
+          value={visionCapability}
+          disabled={visionRoutingMode === 'off'}
+          onChange={(e) => api?.setAISettings({ visionCapability: e.target.value as AIVisionCapability })}
+        >
+          <option value="auto">自动判断</option>
+          <option value="supported">明确支持视觉</option>
+          <option value="unsupported">明确不支持视觉</option>
+        </select>
+        <p className="ndp-setting-hint">
+          不确定时选“自动判断”。网络超时、限流和服务端故障不应被当成模型不支持视觉。
+        </p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>外挂视觉 API 配置</label>
+        <select
+          className="ndp-select"
+          value={visionFallbackProfileId}
+          disabled={visionRoutingMode === 'off' || visionRoutingMode === 'main-only'}
+          onChange={(e) => api?.setAISettings({ visionFallbackProfileId: e.target.value })}
+        >
+          <option value="">未配置外挂视觉</option>
+          {profiles.map((p) => (
+            <option key={`vision-profile-${p.id}`} value={p.id}>
+              {p.name} · {p.apiMode === 'claude' ? 'Claude' : 'OpenAI'} · {p.model || '未指定模型'}
+            </option>
+          ))}
+        </select>
+        <p className="ndp-setting-hint">
+          复用上方已保存的 API 配置。外挂模型只负责识别图片，最终回复仍由当前桌宠模型组织。
+        </p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>外挂视觉模型覆盖</label>
+        <input
+          type="text"
+          className="ndp-input"
+          value={visionFallbackModel}
+          disabled={
+            visionRoutingMode === 'off' || visionRoutingMode === 'main-only' || !visionFallbackProfileId
+          }
+          placeholder={visionFallbackProfile?.model || '留空则使用所选配置的模型'}
+          onChange={(e) => api?.setAISettings({ visionFallbackModel: e.target.value })}
+        />
+        <p className="ndp-setting-hint">留空时使用所选 API 配置中保存的模型；只需换视觉模型时可在这里覆盖。</p>
+      </div>
+
       <div className="ndp-setting-item">
         <label className="ndp-checkbox-label">
           <input
             type="checkbox"
-            checked={enableVision}
-            onChange={(e) => api?.setAISettings({ enableVision: e.target.checked })}
+            checked={visionFallbackOnTransient}
+            disabled={visionRoutingMode !== 'auto' || !visionFallbackProfileId}
+            onChange={(e) => api?.setAISettings({ visionFallbackOnTransient: e.target.checked })}
           />
-          <span>启用识图能力（发送图片）</span>
+          <span>主模型出现瞬时网络故障时允许使用外挂视觉</span>
         </label>
-        <p className="ndp-setting-hint">部分模型不支持图片输入，关闭后聊天窗口将禁用“图片”按钮</p>
+        <p className="ndp-setting-hint">关闭后，超时、限流、502/503 等只会保留图片重试，不会把图片发送给外挂 API。</p>
+      </div>
+
+      <div className="ndp-setting-item">
+        <label>单次最多查看图片数：{visionMaxImagesPerLook}</label>
+        <input
+          type="number"
+          className="ndp-input"
+          min={1}
+          max={8}
+          step={1}
+          value={visionMaxImagesPerLook}
+          disabled={visionRoutingMode === 'off'}
+          onChange={(e) =>
+            api?.setAISettings({ visionMaxImagesPerLook: clampIntValue(e.target.value, 4, 1, 8) })
+          }
+        />
+        <p className="ndp-setting-hint">限制一次“查看/比较图片”实际发送的数量，避免多图任务产生过高延迟和消耗。</p>
       </div>
 
       <div className="ndp-setting-item">
@@ -483,7 +621,7 @@ export function AISettingsTab(props: {
               <option value="">请选择已保存配置</option>
               {profiles.map((p) => (
                 <option key={`compress-profile-${p.id}`} value={p.id}>
-                  {p.name}
+                  {p.name} · {p.apiMode === 'claude' ? 'Claude' : 'OpenAI'}
                 </option>
               ))}
             </select>

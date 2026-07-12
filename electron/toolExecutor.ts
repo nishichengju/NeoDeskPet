@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { getSettings } from './store'
 import { isToolEnabled } from './toolRegistry'
@@ -8,8 +9,12 @@ import { getWindowManagerInstance } from './runtimeRefs'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
 import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
+import { captureScreenToFile, type ScreenCaptureRegion } from './screenCaptureService'
+import { generateNovelAIImages } from './novelAiImageService'
+import { resolveVisionFallbackProfile } from './visionRouter'
 import {
   getBrowserControlService,
+  type BrowserCloseOptions,
   type BrowserCloseTabsOptions,
   type BrowserExtractOptions,
   type BrowserPlaywrightAction,
@@ -50,6 +55,24 @@ function ensureStringArray(value: unknown, maxLen: number): string[] {
     if (out.length >= maxLen) break
   }
   return out
+}
+
+function normalizeScreenCaptureRegion(value: unknown): ScreenCaptureRegion | null {
+  const obj = typeof value === 'object' && value && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+  if (!obj) return null
+
+  const x = typeof obj.x === 'number' ? obj.x : Number(obj.x)
+  const y = typeof obj.y === 'number' ? obj.y : Number(obj.y)
+  const width = typeof obj.width === 'number' ? obj.width : Number(obj.width)
+  const height = typeof obj.height === 'number' ? obj.height : Number(obj.height)
+  if (![x, y, width, height].every(Number.isFinite)) return null
+  return {
+    x,
+    y,
+    width,
+    height,
+    absolute: obj.absolute === true,
+  }
 }
 
 function isPowerShellCommand(cmd: string): boolean {
@@ -136,23 +159,95 @@ function isSupportedImagePath(filePath: string): boolean {
   return ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'].includes(path.extname(filePath).toLowerCase())
 }
 
+async function collectRecentInspectableImageCandidates(userDataDir: string, limit = 6): Promise<string[]> {
+  const userDataRoot = path.resolve(userDataDir)
+  const dirs = [
+    path.join(userDataRoot, 'generated-images'),
+    path.join(userDataRoot, 'screenshots'),
+    path.join(userDataRoot, 'browser-screenshots'),
+    path.join(userDataRoot, 'task-output'),
+    path.join(userDataRoot, 'chat-attachments'),
+    path.join(userDataRoot, 'mcp-tool-images'),
+  ]
+  const seenDirs = new Set<string>()
+  const items: Array<{ filePath: string; mtimeMs: number }> = []
+
+  for (const dirRaw of dirs) {
+    const dir = path.resolve(dirRaw)
+    if (seenDirs.has(dir)) continue
+    seenDirs.add(dir)
+    let entries: Array<{ name: string; isFile: () => boolean }>
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      const filePath = path.join(dir, entry.name)
+      if (!isSupportedImagePath(filePath)) continue
+      try {
+        const st = await fs.stat(filePath)
+        if (st.isFile()) items.push({ filePath, mtimeMs: st.mtimeMs })
+      } catch {
+        // ignore disappearing files
+      }
+    }
+  }
+
+  return items
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, Math.max(0, Math.trunc(limit)))
+    .map((x) => x.filePath)
+}
+
+function isWindowsUserProfileImageLocation(filePath: string): boolean {
+  if (process.platform !== 'win32') return false
+
+  const resolved = path.resolve(filePath)
+  const parsed = path.parse(resolved)
+  const usersRoot = path.join(parsed.root, 'Users')
+  const rel = path.relative(usersRoot, resolved)
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false
+
+  const parts = rel.split(/[\\/]+/).filter(Boolean)
+  if (parts.length < 2) return false
+
+  const topFolder = parts[1]?.toLowerCase()
+  if (topFolder === 'desktop' || topFolder === 'downloads' || topFolder === 'pictures') return true
+
+  if (topFolder !== 'appdata' || parts.length < 3) return false
+  const appDataScope = parts[2]?.toLowerCase()
+  return appDataScope === 'roaming' || appDataScope === 'local' || appDataScope === 'locallow'
+}
+
 function resolveInspectableImagePath(rawPath: string, userDataDir: string): string {
   const raw = String(rawPath ?? '').trim()
   if (!raw) throw new Error('image.inspect 需要 path')
 
   const userDataRoot = path.resolve(userDataDir)
   const target = path.resolve(path.isAbsolute(raw) ? raw : path.join(userDataRoot, raw))
-  const allowedRoots = [
+  const candidateRoots = [
     userDataRoot,
     path.join(userDataRoot, 'task-output'),
     path.join(userDataRoot, 'screenshots'),
     path.join(userDataRoot, 'browser-screenshots'),
     path.join(userDataRoot, 'chat-attachments'),
     path.join(userDataRoot, 'mcp-tool-images'),
-  ].map((p) => path.resolve(p))
+    path.join(userDataRoot, 'generated-images'),
+    process.cwd(),
+    os.tmpdir(),
+    process.env.APPDATA,
+    process.env.LOCALAPPDATA,
+    path.join(os.homedir(), 'Desktop'),
+    path.join(os.homedir(), 'Downloads'),
+    path.join(os.homedir(), 'Pictures'),
+  ]
+  const allowedRoots = candidateRoots.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).map((p) => path.resolve(p))
 
-  if (!allowedRoots.some((root) => isSubPathOf(root, target))) {
-    throw new Error('image.inspect 只能读取应用数据目录中的图片')
+  if (!allowedRoots.some((root) => isSubPathOf(root, target)) && !isWindowsUserProfileImageLocation(target)) {
+    throw new Error('image.inspect 只能读取应用数据目录、工作区、Temp、AppData、桌面、下载或图片目录中的本地图片')
   }
   if (!isSupportedImagePath(target)) {
     throw new Error('image.inspect 仅支持 png/jpg/jpeg/webp/gif/bmp 图片')
@@ -639,6 +734,97 @@ export async function executeBuiltinTool(
     return JSON.stringify({ ok: true, sent: true, mode, approxChars: approx }, null, 2)
   }
 
+  if (toolName === 'screen.capture') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const targetRaw = typeof obj?.target === 'string' ? obj.target.trim() : ''
+    const target =
+      targetRaw === 'primary' || targetRaw === 'cursor' || targetRaw === 'all' || targetRaw === 'display' ? targetRaw : undefined
+
+    const displayIndexRaw = obj?.displayIndex
+    const displayIndex =
+      typeof displayIndexRaw === 'number' && Number.isFinite(displayIndexRaw)
+        ? Math.max(0, Math.trunc(displayIndexRaw))
+        : typeof displayIndexRaw === 'string' && displayIndexRaw.trim() && Number.isFinite(Number(displayIndexRaw))
+          ? Math.max(0, Math.trunc(Number(displayIndexRaw)))
+          : undefined
+
+    const displayId =
+      typeof obj?.displayId === 'string' || typeof obj?.displayId === 'number'
+        ? obj.displayId
+        : typeof obj?.displayName === 'string'
+          ? obj.displayName
+          : undefined
+
+    const rawPath =
+      typeof obj?.path === 'string' && obj.path.trim()
+        ? obj.path.trim()
+        : typeof obj?.filename === 'string' && obj.filename.trim()
+          ? path.join('screenshots', obj.filename.trim())
+          : typeof input === 'string' && input.trim()
+            ? input.trim()
+            : undefined
+
+    const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(1000, Math.min(120000, Math.trunc(obj.timeoutMs))) : 30000
+    const ac = new AbortController()
+    ctx.setCancelCurrent(() => ac.abort())
+    try {
+      const result = await captureScreenToFile({
+        userDataDir: ctx.userDataDir,
+        taskId: ctx.task.id,
+        target,
+        displayIndex,
+        displayId,
+        region: normalizeScreenCaptureRegion(obj?.region),
+        path: rawPath,
+        returnDataUrl: obj?.returnDataUrl === true || obj?.dataUrl === true,
+        timeoutMs,
+        signal: ac.signal,
+      })
+      return clampStepOutput(JSON.stringify(result, null, 2), maxStepOutputChars)
+    } finally {
+      ctx.setCancelCurrent(undefined)
+    }
+  }
+
+  if (toolName === 'image.generate') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const prompt = typeof obj?.prompt === 'string' ? obj.prompt.trim() : typeof input === 'string' ? input.trim() : ''
+    if (!prompt) throw new Error('image.generate requires prompt')
+
+    const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(5000, Math.min(600000, Math.trunc(obj.timeoutMs))) : 300000
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error('image.generate timeout')), timeoutMs)
+    ctx.setCancelCurrent(() => ac.abort(new Error('canceled')))
+    try {
+      const result = await generateNovelAIImages({
+        settings: settings.novelai,
+        userDataDir: ctx.userDataDir,
+        taskId: ctx.task.id,
+        prompt,
+        overrides: obj,
+        signal: ac.signal,
+      })
+      // 给模型的输出必须保证 paths 不被截断：完整 prompt/negativePrompt 可能长达上万字符，
+      // 若原样序列化会把排在后面的 paths 挤出 maxStepOutputChars，模型只能凭空猜路径。
+      const modelResult = {
+        ok: result.ok,
+        count: result.count,
+        paths: result.paths,
+        images: result.images.map((it) => ({ path: it.path, index: it.index, ...(it.seed !== undefined ? { seed: it.seed } : {}) })),
+        model: result.model,
+        parameters: result.parameters,
+        promptUsage: result.promptUsage,
+        ...(result.cloudQueue ? { cloudQueue: result.cloudQueue } : {}),
+        promptPreview: clampText(result.prompt, 300),
+        createdAt: result.createdAt,
+      }
+      return clampStepOutput(JSON.stringify(modelResult, null, 2), maxStepOutputChars)
+    } finally {
+      clearTimeout(timer)
+      ctx.setCancelCurrent(undefined)
+    }
+  }
+
   if (toolName === 'browser.open') {
     const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
     const url = typeof obj?.url === 'string' ? obj.url : typeof input === 'string' ? input : ''
@@ -707,7 +893,7 @@ export async function executeBuiltinTool(
     const tabs = await service.listTabs({
       profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
       channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
-      headless: obj?.headless === true,
+      headless: obj?.headless !== false,
       timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
     })
     return clampStepOutput(JSON.stringify({ ok: true, tabs }, null, 2), maxStepOutputChars)
@@ -719,7 +905,7 @@ export async function executeBuiltinTool(
     const result = await service.scan({
       profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
       channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
-      headless: obj?.headless === true,
+      headless: obj?.headless !== false,
       timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
       tabId: typeof obj?.tabId === 'string' ? obj.tabId : undefined,
       url: typeof obj?.url === 'string' ? obj.url : undefined,
@@ -739,7 +925,7 @@ export async function executeBuiltinTool(
     const result = await service.execJs({
       profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
       channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
-      headless: obj?.headless === true,
+      headless: obj?.headless !== false,
       timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
       tabId: typeof obj?.tabId === 'string' ? obj.tabId : undefined,
       url: typeof obj?.url === 'string' ? obj.url : undefined,
@@ -756,7 +942,7 @@ export async function executeBuiltinTool(
     const result = await service.screenshot({
       profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
       channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
-      headless: obj?.headless === true,
+      headless: obj?.headless !== false,
       timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
       tabId: typeof obj?.tabId === 'string' ? obj.tabId : undefined,
       path: typeof obj?.path === 'string' ? obj.path : undefined,
@@ -771,7 +957,7 @@ export async function executeBuiltinTool(
     const closeOptions: BrowserCloseTabsOptions = {
       profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
       channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
-      headless: obj?.headless === true,
+      headless: obj?.headless !== false,
       timeoutMs: typeof obj?.timeoutMs === 'number' ? obj.timeoutMs : undefined,
       tabIds: Array.isArray(obj?.tabIds) ? obj.tabIds.filter((id): id is string => typeof id === 'string') : undefined,
       closeInactive: obj?.closeInactive === true,
@@ -785,13 +971,27 @@ export async function executeBuiltinTool(
     return clampStepOutput(result, maxStepOutputChars)
   }
 
+  if (toolName === 'browser.close') {
+    const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const closeOptions: BrowserCloseOptions = {
+      profile: typeof obj?.profile === 'string' ? obj.profile : undefined,
+      channel: typeof obj?.channel === 'string' ? obj.channel : undefined,
+      headless: obj?.headless !== false,
+      allModes: obj?.allModes === true,
+      allContexts: obj?.allContexts === true,
+    }
+    const service = getBrowserControlService(ctx.userDataDir)
+    const result = await service.closeContexts(closeOptions)
+    return clampStepOutput(result, maxStepOutputChars)
+  }
+
   if (toolName === 'browser.playwright') {
     const obj = typeof input === 'object' && input && !Array.isArray(input) ? (input as Record<string, unknown>) : null
     const url = typeof obj?.url === 'string' ? obj.url : typeof input === 'string' ? input : ''
     const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(1000, Math.min(180000, Math.trunc(obj.timeoutMs))) : 45000
     const headless = obj?.headless !== false
     const channelRaw = typeof obj?.channel === 'string' ? obj.channel.trim() : ''
-    const channel = channelRaw || (process.platform === 'win32' ? 'msedge' : '')
+    const channel = channelRaw || undefined
 
     if (!url || !/^https?:\/\//i.test(url)) throw new Error(`browser.playwright 需要有效 URL（http/https），当前：${url || '(空)'}`)
 
@@ -2008,16 +2208,33 @@ export async function executeBuiltinTool(
         : '请描述这张图片的主要内容、可见文字、关键状态和可能需要用户注意的细节。'
 
     const stat = await fs.stat(imagePath).catch(() => null)
-    if (!stat || !stat.isFile()) throw new Error(`image not found: ${imagePath}`)
+    if (!stat || !stat.isFile()) {
+      const candidates = await collectRecentInspectableImageCandidates(ctx.userDataDir, 6)
+      const suffix = candidates.length > 0 ? `\nrecent image candidates:\n${candidates.map((p) => `- ${p}`).join('\n')}` : ''
+      throw new Error(`image not found: ${imagePath}${suffix}`)
+    }
     const maxImageBytes = 10 * 1024 * 1024
     if (stat.size > maxImageBytes) throw new Error(`image too large: ${stat.size} bytes（上限 ${maxImageBytes} bytes）`)
 
     const appSettings = settings
     if (appSettings.ai.enableVision === false) throw new Error('AI 设置未启用视觉能力（enableVision=false）')
 
-    const baseUrl = (typeof obj?.baseUrl === 'string' && obj.baseUrl.trim() ? obj.baseUrl.trim() : appSettings.ai.baseUrl).trim()
-    const apiKey = typeof obj?.apiKey === 'string' ? obj.apiKey : appSettings.ai.apiKey
-    const model = (typeof obj?.model === 'string' && obj.model.trim() ? obj.model.trim() : appSettings.ai.model).trim()
+    const fallbackProfile = resolveVisionFallbackProfile(appSettings)
+    const preferFallback =
+      appSettings.ai.visionRoutingMode === 'fallback-only' ||
+      (appSettings.ai.visionRoutingMode === 'auto' && appSettings.ai.visionCapability === 'unsupported')
+    const defaultVisionProfile = preferFallback && fallbackProfile ? fallbackProfile : appSettings.ai
+
+    const baseUrl = (typeof obj?.baseUrl === 'string' && obj.baseUrl.trim() ? obj.baseUrl.trim() : defaultVisionProfile.baseUrl).trim()
+    const apiKey = typeof obj?.apiKey === 'string' ? obj.apiKey : defaultVisionProfile.apiKey
+    const model = (typeof obj?.model === 'string' && obj.model.trim() ? obj.model.trim() : defaultVisionProfile.model).trim()
+    const apiModeRaw = typeof obj?.apiMode === 'string' ? obj.apiMode.trim() : ''
+    const apiMode =
+      apiModeRaw === 'claude' || apiModeRaw === 'openai-compatible'
+        ? apiModeRaw
+        : defaultVisionProfile.apiMode === 'claude'
+          ? 'claude'
+          : 'openai-compatible'
     const temperature =
       typeof obj?.temperature === 'number'
         ? Math.max(0, Math.min(2, obj.temperature))
@@ -2028,7 +2245,7 @@ export async function executeBuiltinTool(
       maxTokens: maxTokensRaw,
       settings: {
         thinkingEffort: obj?.thinkingEffort ?? appSettings.ai.thinkingEffort,
-        thinkingProvider: obj?.thinkingProvider ?? appSettings.ai.thinkingProvider,
+        thinkingProvider: apiMode === 'claude' ? 'claude' : (obj?.thinkingProvider ?? appSettings.ai.thinkingProvider),
         openaiReasoningEffort: obj?.openaiReasoningEffort ?? appSettings.ai.openaiReasoningEffort,
         claudeThinkingEffort: obj?.claudeThinkingEffort ?? appSettings.ai.claudeThinkingEffort,
         geminiThinkingEffort: obj?.geminiThinkingEffort ?? appSettings.ai.geminiThinkingEffort,
@@ -2042,62 +2259,124 @@ export async function executeBuiltinTool(
 
     const buf = await fs.readFile(imagePath)
     const mimeType = imageMimeFromExt(imagePath)
-    const dataUrl = `data:${mimeType};base64,${buf.toString('base64')}`
+    const imageBase64 = buf.toString('base64')
+    const dataUrl = `data:${mimeType};base64,${imageBase64}`
 
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(new Error('image.inspect timeout')), timeoutMs)
     ctx.setCancelCurrent(() => ac.abort(new Error('canceled')))
 
     try {
-      const url = joinUrl(baseUrl, 'chat/completions')
-      const headers: Record<string, string> = { 'content-type': 'application/json' }
-      const token = (apiKey ?? '').trim()
-      if (token) headers.authorization = `Bearer ${token}`
+      let answer = ''
 
-      const res = await fetch(url, {
-        method: 'POST',
-        signal: ac.signal,
-        headers,
-        body: JSON.stringify({
+      if (apiMode === 'claude') {
+        const url = joinUrl(baseUrl, 'messages')
+        const headers: Record<string, string> = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }
+        const token = (apiKey ?? '').trim()
+        if (token) headers['x-api-key'] = token
+
+        const body: Record<string, unknown> = {
           model,
-          temperature,
           max_tokens: maxTokens,
-          ...reasoningOptions.extra,
+          temperature,
+          system: '你是严谨的图片理解助手。只能依据图片可见内容回答；看不清或无法确认时要明确说明，不能凭空猜测。',
           messages: [
-            {
-              role: 'system',
-              content:
-                '你是严谨的图片理解助手。只能依据图片可见内容回答；看不清或无法确认时要明确说明，不能凭空猜测。',
-            },
             {
               role: 'user',
               content: [
                 { type: 'text', text: prompt },
-                { type: 'image_url', image_url: { url: dataUrl } },
+                { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
               ],
             },
           ],
-        }),
-      })
+        }
 
-      const data = (await res.json().catch(() => ({}))) as {
-        error?: { message?: string }
-        choices?: Array<{ message?: { content?: unknown } }>
-      }
-      if (!res.ok) {
-        const errMsg = data?.error?.message || `HTTP ${res.status}`
-        throw new Error(errMsg)
-      }
+        const thinking = reasoningOptions.extra.thinking
+        if (
+          thinking &&
+          typeof thinking === 'object' &&
+          !Array.isArray(thinking) &&
+          (thinking as { type?: unknown }).type === 'enabled'
+        ) {
+          body.thinking = thinking
+        }
 
-      const msg = data?.choices?.[0]?.message?.content
-      const answer = Array.isArray(msg)
-        ? msg
-            .map((p) => (p && typeof p === 'object' && typeof (p as Record<string, unknown>).text === 'string' ? String((p as Record<string, unknown>).text) : ''))
-            .filter(Boolean)
-            .join('\n')
-        : typeof msg === 'string'
+        const res = await fetch(url, {
+          method: 'POST',
+          signal: ac.signal,
+          headers,
+          body: JSON.stringify(body),
+        })
+
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string }
+          content?: unknown
+        }
+        if (!res.ok) {
+          const errMsg = data?.error?.message || `Claude Messages API HTTP ${res.status}`
+          throw new Error(errMsg)
+        }
+
+        const msg = data?.content
+        answer = Array.isArray(msg)
           ? msg
-          : ''
+              .map((p) => (p && typeof p === 'object' && typeof (p as Record<string, unknown>).text === 'string' ? String((p as Record<string, unknown>).text) : ''))
+              .filter(Boolean)
+              .join('\n')
+          : typeof msg === 'string'
+            ? msg
+            : ''
+      } else {
+        const url = joinUrl(baseUrl, 'chat/completions')
+        const headers: Record<string, string> = { 'content-type': 'application/json' }
+        const token = (apiKey ?? '').trim()
+        if (token) headers.authorization = `Bearer ${token}`
+
+        const res = await fetch(url, {
+          method: 'POST',
+          signal: ac.signal,
+          headers,
+          body: JSON.stringify({
+            model,
+            temperature,
+            max_tokens: maxTokens,
+            ...reasoningOptions.extra,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  '你是严谨的图片理解助手。只能依据图片可见内容回答；看不清或无法确认时要明确说明，不能凭空猜测。',
+              },
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: prompt },
+                  { type: 'image_url', image_url: { url: dataUrl } },
+                ],
+              },
+            ],
+          }),
+        })
+
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string }
+          choices?: Array<{ message?: { content?: unknown } }>
+        }
+        if (!res.ok) {
+          const errMsg = data?.error?.message || `OpenAI-compatible vision HTTP ${res.status}`
+          throw new Error(errMsg)
+        }
+
+        const msg = data?.choices?.[0]?.message?.content
+        answer = Array.isArray(msg)
+          ? msg
+              .map((p) => (p && typeof p === 'object' && typeof (p as Record<string, unknown>).text === 'string' ? String((p as Record<string, unknown>).text) : ''))
+              .filter(Boolean)
+              .join('\n')
+          : typeof msg === 'string'
+            ? msg
+            : ''
+      }
 
       return clampStepOutput(
         JSON.stringify(
@@ -2108,6 +2387,7 @@ export async function executeBuiltinTool(
             bytes: stat.size,
             prompt,
             model,
+            apiMode,
             answer: answer.trim() || '(空)',
           },
           null,

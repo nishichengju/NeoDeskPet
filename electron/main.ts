@@ -34,6 +34,7 @@ import {
 import type {
   AISettings,
   AIProfile,
+  AIApiMode,
   AsrSettings,
   BubbleSettings,
   DisplayMode,
@@ -43,6 +44,7 @@ import type {
   ToolSettings,
   McpSettings,
   McpStateSnapshot,
+  NovelAISettings,
   ChatMessageRecord,
   ChatProfile,
   ChatUiSettings,
@@ -150,6 +152,10 @@ function normalizeOpenAiBaseUrl(raw: string): string {
   const value = String(raw ?? '').trim()
   if (!value) return ''
   return value.replace(/\/+$/, '')
+}
+
+function normalizeAiApiMode(value: unknown): AIApiMode {
+  return value === 'claude' ? 'claude' : 'openai-compatible'
 }
 
 function extractModelIdsFromResponse(payload: unknown): string[] {
@@ -857,6 +863,8 @@ function syncAsrHotkey() {
 }
 
 let memoryService: MemoryService | null = null
+// 索引维护调度入口（whenReady 内赋值），供设置变更等处触发一次补扫
+let kickMemoryIndexMaintenance: (() => void) | null = null
 let taskService: TaskService | null = null
 let mcpManager: McpManager | null = null
 
@@ -919,6 +927,8 @@ function registerIpc() {
     const current = getSettings()
     setSettings({ memory: { ...current.memory, ...memory } })
     broadcastSettingsChanged()
+    // 开关 tag/vector/kg 后立即补一轮索引（含历史数据兜底扫描）
+    kickMemoryIndexMaintenance?.()
     return getSettings()
   })
 
@@ -968,11 +978,18 @@ function registerIpc() {
     return getSettings()
   })
 
+  ipcMain.handle('settings:setNovelAISettings', (_event, patch: Partial<NovelAISettings>) => {
+    const current = getSettings()
+    setSettings({ novelai: { ...current.novelai, ...patch } })
+    broadcastSettingsChanged()
+    return getSettings()
+  })
+
   ipcMain.handle(
     'settings:saveAIProfile',
     (
       _event,
-      payload: { id?: string; name: string; apiKey: string; baseUrl: string; model: string } | null | undefined,
+      payload: { id?: string; name: string; apiMode?: AIApiMode; apiKey: string; baseUrl: string; model: string } | null | undefined,
     ) => {
       const current = getSettings()
       const now = Date.now()
@@ -982,6 +999,7 @@ function registerIpc() {
       const nextProfile: AIProfile = {
         id,
         name,
+        apiMode: normalizeAiApiMode(payload?.apiMode),
         apiKey: String(payload?.apiKey ?? '').trim(),
         baseUrl: String(payload?.baseUrl ?? '').trim(),
         model: String(payload?.model ?? '').trim(),
@@ -1000,7 +1018,13 @@ function registerIpc() {
           : [nextProfile, ...list].slice(0, 20)
 
       setSettings({
-        ai: { ...current.ai, apiKey: nextProfile.apiKey, baseUrl: nextProfile.baseUrl, model: nextProfile.model },
+        ai: {
+          ...current.ai,
+          apiMode: nextProfile.apiMode,
+          apiKey: nextProfile.apiKey,
+          baseUrl: nextProfile.baseUrl,
+          model: nextProfile.model,
+        },
         aiProfiles: nextProfiles,
         activeAiProfileId: id,
       })
@@ -1026,6 +1050,7 @@ function registerIpc() {
         ? {
             ai: {
               ...current.ai,
+              apiMode: nextActiveProfile.apiMode,
               apiKey: nextActiveProfile.apiKey,
               baseUrl: nextActiveProfile.baseUrl,
               model: nextActiveProfile.model,
@@ -1044,15 +1069,16 @@ function registerIpc() {
     const profile = (Array.isArray(current.aiProfiles) ? current.aiProfiles : []).find((p) => p.id === id)
     if (!profile) return current
     setSettings({
-      ai: { ...current.ai, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model },
+      ai: { ...current.ai, apiMode: profile.apiMode, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model },
       activeAiProfileId: id,
     })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('ai:listModels', async (_event, payload: { apiKey?: string; baseUrl?: string } | null | undefined) => {
+  ipcMain.handle('ai:listModels', async (_event, payload: { apiMode?: AIApiMode; apiKey?: string; baseUrl?: string } | null | undefined) => {
     const current = getSettings().ai
+    const apiMode = normalizeAiApiMode(payload?.apiMode ?? current.apiMode)
     const baseUrl = normalizeOpenAiBaseUrl(String(payload?.baseUrl ?? '').trim() || current.baseUrl)
     const apiKey = String(payload?.apiKey ?? '').trim() || String(current.apiKey ?? '').trim()
     if (!baseUrl) return { ok: false, models: [] as string[], error: 'baseUrl 不能为空' }
@@ -1061,7 +1087,12 @@ function registerIpc() {
     const timer = setTimeout(() => ac.abort(), 15000)
     try {
       const headers: Record<string, string> = { Accept: 'application/json' }
-      if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+      if (apiMode === 'claude') {
+        headers['anthropic-version'] = '2023-06-01'
+        if (apiKey) headers['x-api-key'] = apiKey
+      } else if (apiKey) {
+        headers.Authorization = `Bearer ${apiKey}`
+      }
       const res = await fetch(`${baseUrl}/models`, { method: 'GET', headers, signal: ac.signal })
       if (!res.ok) {
         return { ok: false, models: [] as string[], error: `HTTP ${res.status} ${res.statusText}` }
@@ -1459,6 +1490,11 @@ function registerIpc() {
   // Tasks / Orchestrator (M1)
   ipcMain.handle('task:list', (): TaskListResult => taskService?.listTasks() ?? { items: [] })
   ipcMain.handle('task:get', (_event, id: string): TaskRecord | null => taskService?.getTask(id) ?? null)
+  ipcMain.handle(
+    'task:updateToolRunImages',
+    (_event, taskId: string, runId: string, imagePaths: string[]): TaskRecord | null =>
+      taskService?.updateToolRunImages(taskId, runId, imagePaths) ?? null,
+  )
   ipcMain.handle('task:create', (_event, args: TaskCreateArgs): TaskRecord => {
     if (!taskService) throw new Error('Task service not ready')
     return taskService.createTask(args)
@@ -2136,26 +2172,15 @@ function registerIpc() {
     windowManager.setPetOverlayHover(Boolean(hovering))
   })
 
-  ipcMain.on(
-    'pet:setOverlayRects',
-    (
-      event,
-      rects:
-        | {
-            taskPanel?:
-              | { x: number; y: number; width: number; height: number; viewportWidth?: number; viewportHeight?: number }
-              | null
-          }
-        | null
-        | undefined,
-    ) => {
-      const win = BrowserWindow.fromWebContents(event.sender)
-      const petWin = windowManager.getPetWindow()
-      if (!win || !petWin) return
-      if (win.id !== petWin.id) return
-      windowManager.setPetOverlayRects(rects)
-    },
-  )
+  // Pet model hover: 渲染进程对 Live2D 画布做像素级命中检测后上报，
+  // 主进程据此在点击穿透模式下切换 ignoreMouseEvents（事件驱动，无轮询）。
+  ipcMain.on('pet:setModelHover', (event, hovering: boolean) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const petWin = windowManager.getPetWindow()
+    if (!win || !petWin) return
+    if (win.id !== petWin.id) return
+    windowManager.setPetModelHover(Boolean(hovering))
+  })
 
   // Dynamic mouse events ignore for transparent click-through
   ipcMain.on('window:setIgnoreMouseEvents', (event, ignore: boolean, forward: boolean) => {
@@ -2315,37 +2340,46 @@ app.whenReady().then(() => {
   const maintenanceTimer = setInterval(runMemoryMaintenance, 6 * 60 * 60_000)
   ;(maintenanceTimer as unknown as { unref?: () => void }).unref?.()
 
-  // M5：Tag / Vector / KG 索引维护任务。
+  // M5：Tag / Vector / KG 索引维护任务（事件驱动）。
+  // 有新记忆入队（enqueue*Index）或记忆设置变更时带 debounce 触发；
+  // 批次跑满说明仍有积压则短延时续跑；另有低频兜底扫描收漏网（如失败重试、
+  // 中途开启 vector/kg 后的历史数据补索引）。
+  const TAG_BATCH = 80
+  const VEC_BATCH = 8
+  const KG_BATCH = 2
+
   let tagMaintRunning = false
-  const runTagMaintenance = () => {
+  const runTagMaintenance = (): boolean => {
     try {
-      if (!memoryService) return
+      if (!memoryService) return false
       const settings = getSettings()
-      if (!settings.memory.enabled) return
-      if ((settings.memory.tagEnabled ?? true) === false) return
-      if (tagMaintRunning) return
+      if (!settings.memory.enabled) return false
+      if ((settings.memory.tagEnabled ?? true) === false) return false
+      if (tagMaintRunning) return false
       tagMaintRunning = true
-      const res = memoryService.runTagMaintenance(settings.memory, { batchSize: 80 })
+      const res = memoryService.runTagMaintenance(settings.memory, { batchSize: TAG_BATCH })
       if (res.updated > 0) {
         console.info(`[Memory] TagIndex: scanned=${res.scanned} updated=${res.updated}`)
       }
+      return res.scanned >= TAG_BATCH
     } catch (err) {
       console.error('[Memory] TagIndex failed:', err)
+      return false
     } finally {
       tagMaintRunning = false
     }
   }
 
   let vectorMaintRunning = false
-  const runVectorMaintenance = async () => {
+  const runVectorMaintenance = async (): Promise<boolean> => {
     try {
-      if (!memoryService) return
+      if (!memoryService) return false
       const settings = getSettings()
-      if (!settings.memory.enabled) return
-      if (!(settings.memory.vectorEnabled ?? false)) return
-      if (vectorMaintRunning) return
+      if (!settings.memory.enabled) return false
+      if (!(settings.memory.vectorEnabled ?? false)) return false
+      if (vectorMaintRunning) return false
       vectorMaintRunning = true
-      const res = await memoryService.runVectorEmbeddingMaintenance(settings.memory, settings.ai, { batchSize: 8 })
+      const res = await memoryService.runVectorEmbeddingMaintenance(settings.memory, settings.ai, { batchSize: VEC_BATCH })
       if (res.embedded > 0 || res.skipped > 0 || res.error) {
         console.info(
           `[Memory] VectorIndex: scanned=${res.scanned} embedded=${res.embedded} skipped=${res.skipped}${
@@ -2353,47 +2387,88 @@ app.whenReady().then(() => {
           }`,
         )
       }
+      return !res.error && res.scanned >= VEC_BATCH
     } catch (err) {
       console.error('[Memory] VectorIndex failed:', err)
+      return false
     } finally {
       vectorMaintRunning = false
     }
   }
 
-  runTagMaintenance()
-  void runVectorMaintenance()
-  const tagTimer = setInterval(runTagMaintenance, 5_000)
-  const vecTimer = setInterval(() => void runVectorMaintenance(), 5_000)
-  ;(tagTimer as unknown as { unref?: () => void }).unref?.()
-  ;(vecTimer as unknown as { unref?: () => void }).unref?.()
-
   let kgMaintRunning = false
-  const runKgMaintenance = async () => {
+  const runKgMaintenance = async (): Promise<boolean> => {
     try {
-      if (!memoryService) return
+      if (!memoryService) return false
       const settings = getSettings()
-      if (!settings.memory.enabled) return
-      if (!(settings.memory.kgEnabled ?? false)) return
-      if (kgMaintRunning) return
+      if (!settings.memory.enabled) return false
+      if (!(settings.memory.kgEnabled ?? false)) return false
+      if (kgMaintRunning) return false
       kgMaintRunning = true
-      const res = await memoryService.runKgMaintenance(settings.memory, settings.ai, { batchSize: 2 })
+      const res = await memoryService.runKgMaintenance(settings.memory, settings.ai, { batchSize: KG_BATCH })
       if (res.extracted > 0 || res.error) {
         console.info(
           `[Memory] KGIndex: scanned=${res.scanned} extracted=${res.extracted} skipped=${res.skipped}${res.error ? ` error=${res.error}` : ''}`,
         )
       }
+      return !res.error && res.scanned >= KG_BATCH
     } catch (err) {
       console.error('[Memory] KGIndex failed:', err)
+      return false
     } finally {
       kgMaintRunning = false
     }
   }
 
-  void runKgMaintenance()
-  const kgTimer = setInterval(() => void runKgMaintenance(), 7_000)
-  ;(kgTimer as unknown as { unref?: () => void }).unref?.()
+  const MEMORY_INDEX_DEBOUNCE_MS = 1_500
+  const MEMORY_INDEX_DRAIN_MS = 2_000
+  const MEMORY_INDEX_SWEEP_MS = 10 * 60_000
+
+  let memoryIndexTimer: NodeJS.Timeout | null = null
+  let memoryIndexRunning = false
+
+  const scheduleMemoryIndexMaintenance = (delayMs = MEMORY_INDEX_DEBOUNCE_MS) => {
+    if (memoryIndexTimer) return
+    memoryIndexTimer = setTimeout(() => {
+      memoryIndexTimer = null
+      void runMemoryIndexMaintenance()
+    }, delayMs)
+    ;(memoryIndexTimer as unknown as { unref?: () => void }).unref?.()
+  }
+
+  const runMemoryIndexMaintenance = async () => {
+    if (memoryIndexRunning) {
+      scheduleMemoryIndexMaintenance(MEMORY_INDEX_DRAIN_MS)
+      return
+    }
+    memoryIndexRunning = true
+    let more = false
+    try {
+      more = runTagMaintenance() || more
+      more = (await runVectorMaintenance()) || more
+      more = (await runKgMaintenance()) || more
+    } finally {
+      memoryIndexRunning = false
+    }
+    if (more) scheduleMemoryIndexMaintenance(MEMORY_INDEX_DRAIN_MS)
+  }
+
+  kickMemoryIndexMaintenance = () => scheduleMemoryIndexMaintenance()
+  memoryService?.setMaintenanceKick(kickMemoryIndexMaintenance)
+  // 启动后清一遍历史积压
+  scheduleMemoryIndexMaintenance(3_000)
+  const memoryIndexSweep = setInterval(() => scheduleMemoryIndexMaintenance(0), MEMORY_INDEX_SWEEP_MS)
+  ;(memoryIndexSweep as unknown as { unref?: () => void }).unref?.()
 
   registerIpc()
+
+  // 预热聊天存储：触发 SQLite 打开与旧 JSON 数据的一次性迁移，
+  // 把迁移成本放在启动阶段而不是用户第一次打开聊天窗口时。
+  try {
+    listChatSessions()
+  } catch (err) {
+    console.error('[ChatStore] warmup failed:', err)
+  }
 
   // 启动后按 displayMode 恢复窗口形态，并在 orb 模式恢复 Orb UI 状态。
   windowManager.applyDisplayMode()

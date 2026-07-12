@@ -18,6 +18,8 @@ type Props = {
   mouthOpen?: number
   mouseTrackingEnabled?: boolean
   idleSwayEnabled?: boolean
+  /** 光标下画布像素是否命中模型（alpha > 阈值）变化时回调；用于点击穿透的像素级判定 */
+  onPixelHitChange?: (hit: boolean) => void
 }
 
 export function Live2DView(props: Props) {
@@ -29,6 +31,7 @@ export function Live2DView(props: Props) {
     windowDragging = false,
     mouseTrackingEnabled = true,
     idleSwayEnabled = true,
+    onPixelHitChange,
   } = props
 
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -52,6 +55,11 @@ export function Live2DView(props: Props) {
 
   const lastLayoutRef = useRef<{ w: number; h: number; dpr: number }>({ w: 0, h: 0, dpr: 0 })
   const syncLayoutRef = useRef<(() => void) | null>(null)
+
+  const pixelHitCallbackRef = useRef<Props['onPixelHitChange']>(undefined)
+  useEffect(() => {
+    pixelHitCallbackRef.current = onPixelHitChange
+  }, [onPixelHitChange])
 
   useEffect(() => {
     mouthOpenRef.current = Math.max(0, Math.min(1.25, mouthOpen))
@@ -314,6 +322,97 @@ export function Live2DView(props: Props) {
       mouseTargetRef.current = { x: clamp(x, -1, 1), y: clamp(y, -1, 1) }
     })
   }, [])
+
+  // 像素级命中检测：在每帧渲染完成后（UTILITY 优先级晚于 Application 的 LOW 渲染）
+  // 对光标位置 readPixels 取 alpha。窗口处于 ignoreMouseEvents(forward) 状态时
+  // 仍能收到 mousemove，因此该检测在穿透模式下持续有效。
+  useEffect(() => {
+    if (!modelLoaded) return
+    const app = appRef.current
+    const view = app?.view as HTMLCanvasElement | undefined
+    if (!app || !view || !pixelHitCallbackRef.current) return
+
+    const pointer = { x: -1, y: -1, fresh: false }
+    let lastHit = false
+    let frame = 0
+    const pixel = new Uint8Array(4)
+
+    const report = (hit: boolean) => {
+      if (hit === lastHit) return
+      lastHit = hit
+      pixelHitCallbackRef.current?.(hit)
+    }
+
+    const onMouseMove = (e: MouseEvent) => {
+      pointer.x = e.clientX
+      pointer.y = e.clientY
+      pointer.fresh = true
+    }
+    const onPointerGone = () => {
+      pointer.x = -1
+      pointer.fresh = false
+      report(false)
+    }
+
+    window.addEventListener('mousemove', onMouseMove, { passive: true })
+    document.addEventListener('mouseleave', onPointerGone)
+    window.addEventListener('blur', onPointerGone)
+
+    // 主进程探针泵：穿透模式下 forward 的 mousemove 在 Windows 上不可靠，
+    // 由主进程低频推送光标客户区坐标，与 mousemove 喂同一套指针状态。
+    const probeApi = getApi()
+    const unsubProbe =
+      probeApi && typeof probeApi.onPetCursorProbe === 'function'
+        ? probeApi.onPetCursorProbe((payload) => {
+            const x = typeof payload?.x === 'number' && Number.isFinite(payload.x) ? payload.x : -1
+            const y = typeof payload?.y === 'number' && Number.isFinite(payload.y) ? payload.y : -1
+            if (x < 0 || y < 0) return
+            pointer.x = x
+            pointer.y = y
+            pointer.fresh = true
+          })
+        : null
+
+    const sample = () => {
+      if (pointer.x < 0) return
+      frame++
+      // 光标静止时降频重采样（呼吸/摆动会让轮廓缓慢变化），移动时每帧采样
+      if (!pointer.fresh && frame % 10 !== 0) return
+      pointer.fresh = false
+      try {
+        const renderer = app.renderer as PIXI.Renderer
+        const gl = (renderer as unknown as { gl?: WebGLRenderingContext }).gl
+        if (!gl) return
+        const rect = view.getBoundingClientRect()
+        const res = renderer.resolution || 1
+        const px = Math.floor((pointer.x - rect.left) * res)
+        const py = Math.floor((pointer.y - rect.top) * res)
+        if (px < 0 || py < 0 || px >= gl.drawingBufferWidth || py >= gl.drawingBufferHeight) {
+          report(false)
+          return
+        }
+        gl.readPixels(px, gl.drawingBufferHeight - py - 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel)
+        report(pixel[3] > 8)
+      } catch {
+        // ignore
+      }
+    }
+
+    app.ticker.add(sample, undefined, PIXI.UPDATE_PRIORITY.UTILITY)
+
+    return () => {
+      try {
+        app.ticker.remove(sample)
+      } catch {
+        // ignore
+      }
+      window.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseleave', onPointerGone)
+      window.removeEventListener('blur', onPointerGone)
+      unsubProbe?.()
+      report(false)
+    }
+  }, [modelLoaded])
 
   useEffect(() => {
     const api = getApi()

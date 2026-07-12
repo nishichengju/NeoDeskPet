@@ -33,6 +33,40 @@ const REQUEST_CONNECT_TIMEOUT_MS = 20_000
 const TRANSIENT_RETRY_LIMIT = 2
 const RETRY_BASE_DELAY_MS = 500
 const RETRY_JITTER_MS = 250
+const ANTHROPIC_VERSION = '2023-06-01'
+
+type ApiMode = AISettings['apiMode']
+
+function normalizeApiMode(value: unknown): ApiMode {
+  return value === 'claude' ? 'claude' : 'openai-compatible'
+}
+
+function joinApiUrl(baseUrl: string, pathname: string): string {
+  return `${String(baseUrl ?? '').trim().replace(/\/+$/, '')}/${pathname.replace(/^\/+/, '')}`
+}
+
+function parseDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
+  const raw = String(dataUrl ?? '').trim()
+  if (!raw.startsWith('data:')) return null
+  const comma = raw.indexOf(',')
+  if (comma < 0) return null
+  const meta = raw.slice(5, comma)
+  const data = raw.slice(comma + 1)
+  const parts = meta.split(';').map((p) => p.trim())
+  const mediaType = parts[0] || 'application/octet-stream'
+  if (!parts.includes('base64') || !data) return null
+  return { mediaType, data }
+}
+
+function buildApiHeaders(apiMode: ApiMode, apiKey: string): Record<string, string> {
+  if (apiMode === 'claude') {
+    return {
+      'x-api-key': apiKey,
+      'anthropic-version': ANTHROPIC_VERSION,
+    }
+  }
+  return { Authorization: `Bearer ${apiKey}` }
+}
 
 function extractApiErrorMessage(errorData: unknown, status: number, statusText: string): string {
   const fallback = `HTTP ${status}: ${statusText}`
@@ -186,6 +220,7 @@ async function postChatCompletion(args: {
   endpoint: string
   apiKey: string
   body: Record<string, unknown>
+  headers?: Record<string, string>
   signal?: AbortSignal
   timeoutMs?: number
 }): Promise<Response> {
@@ -210,7 +245,7 @@ async function postChatCompletion(args: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${args.apiKey}`,
+        ...(args.headers ?? buildApiHeaders('openai-compatible', args.apiKey)),
       },
       body: JSON.stringify(args.body),
       signal: ac.signal,
@@ -265,6 +300,165 @@ function buildChatCompletionPayload(args: {
     basePayload.stream = true
   }
   return basePayload
+}
+
+function textFromChatContent(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content
+  return content
+    .map((part) => (part.type === 'text' ? part.text : ''))
+    .filter(Boolean)
+    .join('\n')
+}
+
+function toClaudeContentBlocks(content: ChatMessage['content']): Array<Record<string, unknown>> {
+  if (typeof content === 'string') {
+    const text = content.trim()
+    return text ? [{ type: 'text', text }] : []
+  }
+
+  const blocks: Array<Record<string, unknown>> = []
+  for (const part of content) {
+    if (part.type === 'text') {
+      if (part.text.trim()) blocks.push({ type: 'text', text: part.text })
+      continue
+    }
+
+    const url = String(part.image_url?.url ?? '').trim()
+    if (!url) continue
+    const dataUrl = parseDataUrl(url)
+    if (dataUrl) {
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: dataUrl.mediaType,
+          data: dataUrl.data,
+        },
+      })
+      continue
+    }
+    blocks.push({
+      type: 'image',
+      source: {
+        type: 'url',
+        url,
+      },
+    })
+  }
+  return blocks
+}
+
+function normalizeClaudeMessages(messages: ChatMessage[]): {
+  system: string
+  messages: Array<{ role: 'user' | 'assistant'; content: Array<Record<string, unknown>> }>
+} {
+  const systemParts: string[] = []
+  const out: Array<{ role: 'user' | 'assistant'; content: Array<Record<string, unknown>> }> = []
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      const text = textFromChatContent(message.content).trim()
+      if (text) systemParts.push(text)
+      continue
+    }
+
+    const role = message.role === 'assistant' ? 'assistant' : 'user'
+    const content = toClaudeContentBlocks(message.content)
+    if (content.length === 0) continue
+
+    const prev = out[out.length - 1]
+    if (prev?.role === role) {
+      prev.content.push(...content)
+    } else {
+      out.push({ role, content })
+    }
+  }
+
+  return { system: systemParts.join('\n\n'), messages: out }
+}
+
+function buildClaudeMessagesPayload(args: {
+  model: string
+  messages: ChatMessage[]
+  temperature: number
+  maxTokens: number
+  claudeThinkingEffort: AISettings['claudeThinkingEffort']
+  stream?: boolean
+}): Record<string, unknown> {
+  const normalized = normalizeClaudeMessages(args.messages)
+  const reasoning = buildOpenAICompatReasoningOptions({
+    model: args.model,
+    maxTokens: args.maxTokens,
+    settings: {
+      thinkingProvider: 'claude',
+      claudeThinkingEffort: args.claudeThinkingEffort,
+    },
+    claudeDisabledMinMaxTokens: 0,
+  })
+
+  const body: Record<string, unknown> = {
+    model: args.model,
+    max_tokens: reasoning.maxTokens,
+    temperature: args.temperature,
+    messages: normalized.messages,
+  }
+  if (normalized.system) body.system = normalized.system
+  if (args.stream) body.stream = true
+
+  const thinking = reasoning.extra.thinking
+  if (
+    thinking &&
+    typeof thinking === 'object' &&
+    !Array.isArray(thinking) &&
+    (thinking as { type?: unknown }).type === 'enabled'
+  ) {
+    body.thinking = thinking
+  }
+  return body
+}
+
+function extractClaudeText(payload: unknown): string {
+  const content = (payload as { content?: unknown })?.content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => {
+      if (!block || typeof block !== 'object') return ''
+      const text = (block as { text?: unknown }).text
+      return typeof text === 'string' ? text : ''
+    })
+    .filter(Boolean)
+    .join('')
+}
+
+function readClaudeUsage(payload: unknown): ChatUsage | undefined {
+  const usage = (payload as { usage?: unknown })?.usage
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return undefined
+  const inputTokens = (usage as { input_tokens?: unknown }).input_tokens
+  const outputTokens = (usage as { output_tokens?: unknown }).output_tokens
+  const promptTokens = typeof inputTokens === 'number' && Number.isFinite(inputTokens) ? inputTokens : 0
+  const completionTokens = typeof outputTokens === 'number' && Number.isFinite(outputTokens) ? outputTokens : 0
+  return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }
+}
+
+function readOpenAIUsage(payload: unknown): ChatUsage | undefined {
+  const usage = (payload as { usage?: unknown })?.usage
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return undefined
+  const promptTokensRaw = (usage as { prompt_tokens?: unknown }).prompt_tokens
+  const completionTokensRaw = (usage as { completion_tokens?: unknown }).completion_tokens
+  const totalTokensRaw = (usage as { total_tokens?: unknown }).total_tokens
+  const promptTokens = typeof promptTokensRaw === 'number' && Number.isFinite(promptTokensRaw) ? promptTokensRaw : 0
+  const completionTokens = typeof completionTokensRaw === 'number' && Number.isFinite(completionTokensRaw) ? completionTokensRaw : 0
+  const totalTokens =
+    typeof totalTokensRaw === 'number' && Number.isFinite(totalTokensRaw) ? totalTokensRaw : promptTokens + completionTokens
+  return { promptTokens, completionTokens, totalTokens }
+}
+
+function mergeUsage(prev: ChatUsage | undefined, next: ChatUsage | undefined): ChatUsage | undefined {
+  if (!next) return prev
+  const promptTokens = next.promptTokens || prev?.promptTokens || 0
+  const completionTokens = next.completionTokens || prev?.completionTokens || 0
+  const totalTokens = next.totalTokens || promptTokens + completionTokens
+  return { promptTokens, completionTokens, totalTokens }
 }
 
 /**
@@ -367,6 +561,7 @@ export class AIService {
    */
   async chat(messages: ChatMessage[], options?: { signal?: AbortSignal; systemAddon?: string }): Promise<ChatResponse> {
     const {
+      apiMode,
       apiKey,
       baseUrl,
       model,
@@ -392,19 +587,30 @@ export class AIService {
 
     // Add system prompt if not already present
     const messagesWithSystem = this.ensureSystemPrompt(messages, fullSystemPrompt)
-    const requestBody = buildChatCompletionPayload({
-      model,
-      messages: messagesWithSystem,
-      temperature,
-      maxTokens,
-      thinkingEffort,
-      thinkingProvider,
-      openaiReasoningEffort,
-      claudeThinkingEffort,
-      geminiThinkingEffort,
-    })
+    const mode = normalizeApiMode(apiMode)
+    const requestBody =
+      mode === 'claude'
+        ? buildClaudeMessagesPayload({
+            model,
+            messages: messagesWithSystem,
+            temperature,
+            maxTokens,
+            claudeThinkingEffort,
+          })
+        : buildChatCompletionPayload({
+            model,
+            messages: messagesWithSystem,
+            temperature,
+            maxTokens,
+            thinkingEffort,
+            thinkingProvider,
+            openaiReasoningEffort,
+            claudeThinkingEffort,
+            geminiThinkingEffort,
+          })
 
-    const endpoint = `${baseUrl}/chat/completions`
+    const endpoint = joinApiUrl(baseUrl, mode === 'claude' ? 'messages' : 'chat/completions')
+    const headers = buildApiHeaders(mode, apiKey)
     let bodyForAttempt = requestBody
     let didThinkingBudgetRetry = false
     const totalAttempts = TRANSIENT_RETRY_LIMIT + 1
@@ -415,6 +621,7 @@ export class AIService {
           endpoint,
           apiKey,
           body: bodyForAttempt,
+          headers,
           signal: options?.signal,
         })
 
@@ -445,20 +652,13 @@ export class AIService {
 
         const data = await response.json()
         if (options?.signal?.aborted) return { content: '', error: ABORTED_ERROR }
-        const rawContent = data.choices?.[0]?.message?.content || ''
+        const rawContent = mode === 'claude' ? extractClaudeText(data) : data.choices?.[0]?.message?.content || ''
 
         // Extract expression/motion tags
         const { cleanedText, expression, motion } = extractTags(rawContent)
 
         // 读取 API 返回的真实 token 统计
-        const usageData = data.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined
-        const usage: ChatUsage | undefined = usageData
-          ? {
-              promptTokens: usageData.prompt_tokens ?? 0,
-              completionTokens: usageData.completion_tokens ?? 0,
-              totalTokens: usageData.total_tokens ?? 0,
-            }
-          : undefined
+        const usage = mode === 'claude' ? readClaudeUsage(data) : readOpenAIUsage(data)
 
         return { content: cleanedText, expression, motion, usage }
       } catch (err) {
@@ -491,6 +691,7 @@ export class AIService {
     options?: { signal?: AbortSignal; onDelta?: (delta: string) => void; systemAddon?: string },
   ): Promise<ChatResponse> {
     const {
+      apiMode,
       apiKey,
       baseUrl,
       model,
@@ -513,20 +714,32 @@ export class AIService {
       fullSystemPrompt += `\n\n${options.systemAddon.trim()}`
     }
     const messagesWithSystem = this.ensureSystemPrompt(messages, fullSystemPrompt)
-    const requestBody = buildChatCompletionPayload({
-      model,
-      messages: messagesWithSystem,
-      temperature,
-      maxTokens,
-      thinkingEffort,
-      thinkingProvider,
-      openaiReasoningEffort,
-      claudeThinkingEffort,
-      geminiThinkingEffort,
-      stream: true,
-    })
+    const mode = normalizeApiMode(apiMode)
+    const requestBody =
+      mode === 'claude'
+        ? buildClaudeMessagesPayload({
+            model,
+            messages: messagesWithSystem,
+            temperature,
+            maxTokens,
+            claudeThinkingEffort,
+            stream: true,
+          })
+        : buildChatCompletionPayload({
+            model,
+            messages: messagesWithSystem,
+            temperature,
+            maxTokens,
+            thinkingEffort,
+            thinkingProvider,
+            openaiReasoningEffort,
+            claudeThinkingEffort,
+            geminiThinkingEffort,
+            stream: true,
+          })
 
-    const endpoint = `${baseUrl}/chat/completions`
+    const endpoint = joinApiUrl(baseUrl, mode === 'claude' ? 'messages' : 'chat/completions')
+    const headers = buildApiHeaders(mode, apiKey)
     let bodyForAttempt = requestBody
     let didThinkingBudgetRetry = false
     const totalAttempts = TRANSIENT_RETRY_LIMIT + 1
@@ -539,6 +752,7 @@ export class AIService {
           endpoint,
           apiKey,
           body: bodyForAttempt,
+          headers,
           signal: options?.signal,
         })
 
@@ -626,6 +840,38 @@ export class AIService {
               try {
                 payload = JSON.parse(dataStr)
               } catch {
+                continue
+              }
+
+              if (mode === 'claude') {
+                const payloadObj = payload as {
+                  type?: string
+                  error?: { message?: string }
+                  message?: unknown
+                  usage?: unknown
+                  delta?: { text?: unknown }
+                }
+
+                if (payloadObj.type === 'error') {
+                  throw new Error(payloadObj.error?.message || 'Claude stream error')
+                }
+
+                usage = mergeUsage(usage, readClaudeUsage(payloadObj.message ?? payloadObj))
+
+                const piece = typeof payloadObj.delta?.text === 'string' ? payloadObj.delta.text : ''
+                if (piece) {
+                  if (options?.signal?.aborted) {
+                    await reader.cancel().catch(() => undefined)
+                    return { content: '', error: ABORTED_ERROR }
+                  }
+                  rawContent += piece
+                  options?.onDelta?.(piece)
+                }
+
+                if (payloadObj.type === 'message_stop') {
+                  streamEnded = true
+                  hasMoreLines = false
+                }
                 continue
               }
 

@@ -73,6 +73,11 @@ export type BrowserCloseTabsOptions = BrowserCommonOptions & {
   keepActive?: boolean
 }
 
+export type BrowserCloseOptions = BrowserCommonOptions & {
+  allModes?: boolean
+  allContexts?: boolean
+}
+
 export type BrowserPlaywrightOptions = BrowserCommonOptions & {
   url: string
   taskId?: string
@@ -85,10 +90,14 @@ export type BrowserPlaywrightOptions = BrowserCommonOptions & {
 }
 
 type ManagedContext = {
+  key: string
   profile: string
+  headless: boolean
+  channel?: string
   context: BrowserContext
   activePage?: Page
   registeredPages: WeakSet<Page>
+  idleTimer: ReturnType<typeof setTimeout> | null
   closed: boolean
 }
 
@@ -108,6 +117,10 @@ const DEFAULT_SCAN_MAX_CHARS = 8_000
 const HARD_SCAN_MAX_CHARS = 20_000
 const DEFAULT_EXEC_MAX_CHARS = 8_000
 const ACTION_SETTLE_TIMEOUT_MS = 3_000
+const CONTEXT_IDLE_TIMEOUT_MS = 5 * 60_000
+const MANAGED_BROWSERS_DIR = 'playwright-browsers'
+
+let managedBrowsersPathConfigured = false
 
 function clampText(value: unknown, maxChars: number): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -133,10 +146,56 @@ function normalizeExtractMaxChars(value: unknown): number {
   return typeof value === 'number' ? Math.max(80, Math.min(10_000, Math.trunc(value))) : 2_000
 }
 
-function resolveChannel(raw: unknown): { channel: string | undefined; implicitDefault: boolean } {
-  if (typeof raw === 'string' && raw.trim()) return { channel: raw.trim(), implicitDefault: false }
-  if (process.platform === 'win32') return { channel: 'msedge', implicitDefault: true }
-  return { channel: undefined, implicitDefault: false }
+function resolveLaunchOptions(options: BrowserCommonOptions): { headless: boolean; channel: string | undefined } {
+  const headless = options.headless !== false
+  if (typeof options.channel === 'string' && options.channel.trim()) {
+    return { headless, channel: options.channel.trim() }
+  }
+
+  // Headless automation must use the Playwright-managed browser whose revision
+  // matches playwright-core. Branded system browsers can drift several major
+  // Chromium versions and expose their normally hidden compositor windows.
+  if (headless) return { headless, channel: undefined }
+  if (process.platform === 'win32') return { headless, channel: 'msedge' }
+  return { headless, channel: undefined }
+}
+
+function buildContextKey(profile: string, options: BrowserCommonOptions): string {
+  const { headless, channel } = resolveLaunchOptions(options)
+  return `${profile}\u0000${headless ? 'headless' : 'headed'}\u0000${channel || 'playwright-chromium'}`
+}
+
+async function configureManagedBrowsersPath(): Promise<string> {
+  const configured = String(process.env.PLAYWRIGHT_BROWSERS_PATH ?? '').trim()
+  if (managedBrowsersPathConfigured && configured) return configured
+  if (configured) {
+    managedBrowsersPathConfigured = true
+    return configured
+  }
+
+  const resourcesPath = String((process as NodeJS.Process & { resourcesPath?: string }).resourcesPath ?? '').trim()
+  const candidates = [
+    resourcesPath ? path.join(resourcesPath, MANAGED_BROWSERS_DIR) : '',
+    path.resolve(process.cwd(), MANAGED_BROWSERS_DIR),
+  ].filter(Boolean)
+
+  let selected = candidates[0] || path.resolve(process.cwd(), MANAGED_BROWSERS_DIR)
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate)
+      if (stat.isDirectory()) {
+        selected = candidate
+        break
+      }
+    } catch {
+      // The install script will create this directory. Keep the deterministic
+      // path so a missing browser produces an actionable launch error.
+    }
+  }
+
+  process.env.PLAYWRIGHT_BROWSERS_PATH = selected
+  managedBrowsersPathConfigured = true
+  return selected
 }
 
 function isHttpUrl(url: string): boolean {
@@ -345,14 +404,37 @@ export class BrowserControlService {
     await Promise.all(
       entries.map(async (contextPromise) => {
         const managed = await contextPromise.catch(() => null)
-        await managed?.context.close().catch(() => undefined)
+        if (managed) await this.closeManagedContext(managed)
       }),
     )
   }
 
+  async closeContexts(options: BrowserCloseOptions = {}): Promise<string> {
+    const profile = safeProfileName(options.profile)
+    const exactKey = buildContextKey(profile, options)
+    const entries = [...this.contexts.entries()]
+    const selected = entries.filter(([key]) => {
+      if (options.allContexts === true) return true
+      if (options.allModes === true) return key.startsWith(`${profile}\u0000`)
+      return key === exactKey
+    })
+
+    const closed: Array<{ profile: string; headless: boolean; channel: string | null }> = []
+    await Promise.all(
+      selected.map(async ([, contextPromise]) => {
+        const managed = await contextPromise.catch(() => null)
+        if (!managed) return
+        closed.push({ profile: managed.profile, headless: managed.headless, channel: managed.channel ?? null })
+        await this.closeManagedContext(managed)
+      }),
+    )
+    return JSON.stringify({ ok: true, closed }, null, 2)
+  }
+
   async listTabs(options: BrowserCommonOptions = {}): Promise<BrowserTabSummary[]> {
     const profile = safeProfileName(options.profile)
-    const managed = this.contexts.has(profile) ? await this.ensureContext(options) : null
+    const key = buildContextKey(profile, options)
+    const managed = this.contexts.has(key) ? await this.ensureContext({ ...options, profile }) : null
     if (!managed) return []
     return await this.summarizePages(managed)
   }
@@ -467,7 +549,8 @@ export class BrowserControlService {
 
   async closeTabs(options: BrowserCloseTabsOptions = {}): Promise<string> {
     const profile = safeProfileName(options.profile)
-    const managed = this.contexts.has(profile) ? await this.ensureContext({ ...options, profile }) : null
+    const key = buildContextKey(profile, options)
+    const managed = this.contexts.has(key) ? await this.ensureContext({ ...options, profile }) : null
     if (!managed) return JSON.stringify({ ok: true, closed: [], tabs: [] }, null, 2)
 
     const pages = this.openPages(managed)
@@ -556,30 +639,45 @@ export class BrowserControlService {
 
   private async ensureContext(options: BrowserCommonOptions): Promise<ManagedContext> {
     const profile = safeProfileName(options.profile)
-    const existing = this.contexts.get(profile)
+    const key = buildContextKey(profile, options)
+    const existing = this.contexts.get(key)
     if (existing) {
       const managed = await existing.catch((err) => {
-        this.contexts.delete(profile)
+        this.contexts.delete(key)
         throw err
       })
-      if (this.isContextUsable(managed)) return managed
-      this.contexts.delete(profile)
+      if (this.isContextUsable(managed)) {
+        this.touchManagedContext(managed)
+        return managed
+      }
+      this.contexts.delete(key)
     }
 
-    const promise = this.createContext(profile, options).catch((err) => {
-      this.contexts.delete(profile)
+    // Chromium does not allow two processes to use the same persistent profile
+    // directory. Release a differently configured context before switching the
+    // profile between headless/headed or browser channels.
+    const conflicts = [...this.contexts.entries()].filter(([otherKey]) => otherKey.startsWith(`${profile}\u0000`) && otherKey !== key)
+    await Promise.all(
+      conflicts.map(async ([, contextPromise]) => {
+        const managed = await contextPromise.catch(() => null)
+        if (managed) await this.closeManagedContext(managed)
+      }),
+    )
+
+    const promise = this.createContext(key, profile, options).catch((err) => {
+      this.contexts.delete(key)
       throw err
     })
-    this.contexts.set(profile, promise)
+    this.contexts.set(key, promise)
     return await promise
   }
 
-  private async createContext(profile: string, options: BrowserCommonOptions): Promise<ManagedContext> {
+  private async createContext(key: string, profile: string, options: BrowserCommonOptions): Promise<ManagedContext> {
+    const browsersPath = await configureManagedBrowsersPath()
     const pw = await import('playwright-core')
     const profileDir = path.join(this.userDataDir, 'playwright', profile)
     await fs.mkdir(profileDir, { recursive: true })
-    const headless = options.headless === true
-    const { channel, implicitDefault } = resolveChannel(options.channel)
+    const { headless, channel } = resolveLaunchOptions(options)
     let context: BrowserContext
     try {
       context = await pw.chromium.launchPersistentContext(profileDir, {
@@ -589,18 +687,30 @@ export class BrowserControlService {
         ignoreHTTPSErrors: true,
       })
     } catch (error) {
-      if (!implicitDefault) throw error
-      context = await pw.chromium.launchPersistentContext(profileDir, {
-        headless,
-        viewport: { width: 1280, height: 720 },
-        ignoreHTTPSErrors: true,
-      })
+      if (!channel) {
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new Error(`Playwright 配套 Chromium 启动失败；请运行 npm run playwright:install。浏览器目录：${browsersPath}。${reason}`)
+      }
+      throw error
     }
-    const managed: ManagedContext = { profile, context, registeredPages: new WeakSet<Page>(), closed: false }
+    const managed: ManagedContext = {
+      key,
+      profile,
+      headless,
+      channel,
+      context,
+      registeredPages: new WeakSet<Page>(),
+      idleTimer: null,
+      closed: false,
+    }
     context.once('close', () => {
       managed.closed = true
-      void this.contexts.get(profile)?.then((current) => {
-        if (current === managed) this.contexts.delete(profile)
+      if (managed.idleTimer) {
+        clearTimeout(managed.idleTimer)
+        managed.idleTimer = null
+      }
+      void this.contexts.get(key)?.then((current) => {
+        if (current === managed) this.contexts.delete(key)
       }, () => undefined)
     })
     context.on('page', (page) => {
@@ -609,7 +719,32 @@ export class BrowserControlService {
     for (const page of context.pages()) {
       this.registerPage(managed, page, !managed.activePage)
     }
+    this.touchManagedContext(managed)
     return managed
+  }
+
+  private touchManagedContext(managed: ManagedContext): void {
+    if (managed.idleTimer) clearTimeout(managed.idleTimer)
+    managed.idleTimer = setTimeout(() => {
+      managed.idleTimer = null
+      void this.closeManagedContext(managed)
+    }, CONTEXT_IDLE_TIMEOUT_MS)
+    managed.idleTimer.unref?.()
+  }
+
+  private async closeManagedContext(managed: ManagedContext): Promise<void> {
+    if (managed.idleTimer) {
+      clearTimeout(managed.idleTimer)
+      managed.idleTimer = null
+    }
+    if (managed.closed) return
+    managed.closed = true
+    const current = this.contexts.get(managed.key)
+    if (current) {
+      const resolved = await current.catch(() => null)
+      if (resolved === managed) this.contexts.delete(managed.key)
+    }
+    await managed.context.close().catch(() => undefined)
   }
 
   private async resolvePage(managed: ManagedContext, options: BrowserScanOptions | BrowserExecJsOptions | BrowserScreenshotToolOptions): Promise<Page> {

@@ -88,7 +88,7 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
         url: { type: 'string', description: 'http/https URL' },
         timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
         headless: { type: 'boolean', description: '是否无头（默认 true）' },
-        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge）' },
+        channel: { type: 'string', description: '浏览器 channel；无头模式留空以使用配套 Chromium，仅有界面登录时可传 msedge' },
         profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
         screenshot: {
           type: 'object',
@@ -131,7 +131,7 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     examples: [
       {
         title: '仅打开并截图（不提取正文）',
-        input: { url: 'https://www.bilibili.com/', channel: 'msedge', screenshot: { path: 'task-output/bili.png', fullPage: false } },
+        input: { url: 'https://www.bilibili.com/', screenshot: { path: 'browser-screenshots/bili.png', fullPage: false } },
       },
       {
         title: '打开并提取正文预览',
@@ -152,12 +152,12 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
       additionalProperties: false,
       properties: {
         profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
-        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
-        headless: { type: 'boolean', description: '是否无头（默认 false，便于用户手动登录）' },
+        channel: { type: 'string', description: '浏览器 channel；无头模式留空以使用配套 Chromium，仅有界面登录时可传 msedge' },
+        headless: { type: 'boolean', description: '是否无头（默认 true；手动登录时传 false）' },
         timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
       },
     },
-    examples: [{ title: '列出默认 profile 标签页', input: { profile: 'default', channel: 'msedge' } }],
+    examples: [{ title: '列出默认 profile 标签页', input: { profile: 'default' } }],
     risk: 'low',
     cost: 'low',
     tags: ['browser', 'tabs', 'automation'],
@@ -175,8 +175,8 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
         url: { type: 'string', description: '可选 http/https URL；传入时会打开或复用该页面' },
         tabId: { type: 'string', description: '可选标签页 ID，来自 browser.tabs/browser.scan 返回值' },
         profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
-        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
-        headless: { type: 'boolean', description: '是否无头（默认 false，便于用户手动登录）' },
+        channel: { type: 'string', description: '浏览器 channel；无头模式留空以使用配套 Chromium，仅有界面登录时可传 msedge' },
+        headless: { type: 'boolean', description: '是否无头（默认 true；手动登录时传 false）' },
         tabsOnly: { type: 'boolean', description: '只返回标签页列表，不读取页面内容' },
         textOnly: { type: 'boolean', description: '只返回可见文本摘要（默认 true）' },
         selector: { type: 'string', description: '可选 CSS selector，仅扫描该区域' },
@@ -185,7 +185,7 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
     examples: [
-      { title: '扫描 B站首页', input: { url: 'https://www.bilibili.com/', profile: 'bili', channel: 'msedge', maxChars: 8000 } },
+      { title: '扫描 B站首页', input: { url: 'https://www.bilibili.com/', profile: 'bili', maxChars: 8000 } },
       { title: '只看标签页', input: { profile: 'default', tabsOnly: true } },
     ],
     risk: 'low',
@@ -206,8 +206,8 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
         url: { type: 'string', description: '可选 http/https URL；传入时会打开或复用该页面再执行' },
         tabId: { type: 'string', description: '可选标签页 ID，来自 browser.tabs/browser.scan 返回值' },
         profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
-        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
-        headless: { type: 'boolean', description: '是否无头（默认 false，便于用户手动登录）' },
+        channel: { type: 'string', description: '浏览器 channel；无头模式留空以使用配套 Chromium，仅有界面登录时可传 msedge' },
+        headless: { type: 'boolean', description: '是否无头（默认 true；手动登录时传 false）' },
         noMonitor: { type: 'boolean', description: '纯读取时设为 true，跳过页面变化摘要' },
         maxChars: { type: 'integer', description: '输出最大字符数（默认 8000，硬上限 20000）', minimum: 200, maximum: 20000 },
         timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
@@ -221,7 +221,6 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
         input: {
           url: 'https://www.bilibili.com/',
           profile: 'bili',
-          channel: 'msedge',
           script:
             "const input = document.querySelector('input[type=search], input.nav-search-input'); input.value = '桌宠'; input.dispatchEvent(new Event('input', { bubbles: true })); input.form?.requestSubmit?.(); return location.href;",
         },
@@ -243,20 +242,67 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         tabId: { type: 'string', description: '可选标签页 ID；不传则使用 BrowserControlService 当前活动标签页' },
         profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
-        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
-        headless: { type: 'boolean', description: '是否无头（默认 false）' },
+        channel: { type: 'string', description: '浏览器 channel；无头模式留空以使用配套 Chromium，仅有界面登录时可传 msedge' },
+        headless: { type: 'boolean', description: '是否无头（默认 true）' },
         path: { type: 'string', description: '保存路径（相对 userData 或绝对）；不传则写入 task-output' },
         fullPage: { type: 'boolean', description: '是否全页截图（默认 false）' },
         timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
       },
     },
     examples: [
-      { title: '截图当前活动标签页', input: { profile: 'bili', path: 'task-output/bili-current.png' } },
+      { title: '截图当前活动标签页', input: { profile: 'bili', path: 'browser-screenshots/bili-current.png' } },
       { title: '截图指定标签页', input: { profile: 'bili', tabId: 'playwright:bili:2', fullPage: false } },
     ],
     risk: 'low',
     cost: 'medium',
     tags: ['browser', 'screenshot', 'automation'],
+    version: '1.0',
+  },
+  {
+    name: 'screen.capture',
+    callName: 'ndp_screen_capture',
+    description:
+      '截取真实桌面屏幕/显示器/区域并保存为 PNG；适合用户要求“截图当前屏幕/桌面/前台画面”。截图只登记为视觉产物，不会自动查看；需要理解画面时再调用 vision.look。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        target: {
+          type: 'string',
+          enum: ['primary', 'cursor', 'all', 'display'],
+          description: '截图目标：primary=主屏（默认），cursor=鼠标所在屏，all=全部虚拟桌面，display=指定显示器',
+        },
+        displayIndex: { type: 'integer', description: 'target=display 时按显示器序号选择（0 开始）', minimum: 0 },
+        displayId: {
+          anyOf: [{ type: 'string' }, { type: 'integer' }],
+          description: 'target=display 时按显示器名选择（例如 \\\\.\\DISPLAY1），也可传数字字符串作为序号',
+        },
+        region: {
+          type: 'object',
+          additionalProperties: false,
+          description: '可选截图区域；默认坐标相对目标左上角，absolute=true 时使用屏幕绝对坐标',
+          properties: {
+            x: { type: 'integer', description: '区域左上角 x' },
+            y: { type: 'integer', description: '区域左上角 y' },
+            width: { type: 'integer', description: '区域宽度', minimum: 1 },
+            height: { type: 'integer', description: '区域高度', minimum: 1 },
+            absolute: { type: 'boolean', description: '是否使用屏幕绝对坐标（默认 false）' },
+          },
+          required: ['x', 'y', 'width', 'height'],
+        },
+        path: { type: 'string', description: '保存路径（相对 userData 或绝对）；不传则写入 screenshots/<taskId>-<time>.png' },
+        returnDataUrl: { type: 'boolean', description: '是否同时返回 dataUrl（默认 false；通常不需要，避免输出过大）' },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 30000）', minimum: 1000, maximum: 120000 },
+      },
+    },
+    examples: [
+      { title: '截取主屏', input: { target: 'primary' } },
+      { title: '截取鼠标所在屏幕并指定保存路径', input: { target: 'cursor', path: 'screenshots/current.png' } },
+      { title: '截取主屏局部区域', input: { target: 'primary', region: { x: 100, y: 100, width: 800, height: 500 } } },
+    ],
+    risk: 'medium',
+    cost: 'low',
+    tags: ['screen', 'screenshot', 'image'],
     version: '1.0',
   },
   {
@@ -275,8 +321,8 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
         titleIncludes: { type: 'array', items: { type: 'string' }, description: '关闭标题包含这些片段的标签页' },
         keepActive: { type: 'boolean', description: '是否保留当前活动页（默认 true）' },
         profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
-        channel: { type: 'string', description: '浏览器 channel（Windows 推荐 msedge；为空则使用 Playwright 默认）' },
-        headless: { type: 'boolean', description: '是否无头（默认 false）' },
+        channel: { type: 'string', description: '浏览器 channel；无头模式留空以使用配套 Chromium，仅有界面登录时可传 msedge' },
+        headless: { type: 'boolean', description: '是否无头（默认 true）' },
         timeoutMs: { type: 'integer', description: '超时毫秒（默认 45000）', minimum: 1000, maximum: 180000 },
       },
     },
@@ -287,6 +333,31 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     risk: 'medium',
     cost: 'low',
     tags: ['browser', 'tabs', 'cleanup'],
+    version: '1.0',
+  },
+  {
+    name: 'browser.close',
+    callName: 'ndp_browser_close',
+    description:
+      '立即关闭桌宠管理的 Playwright 浏览器上下文和相关浏览器进程。默认关闭 default profile 的无头上下文；allModes 可关闭该 profile 的所有模式，allContexts 可关闭全部 profile。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        profile: { type: 'string', description: '持久化 profile 名（默认 default）' },
+        channel: { type: 'string', description: '精确关闭某 channel；无头默认模式通常留空' },
+        headless: { type: 'boolean', description: '精确关闭无头/有界面上下文（默认 true）' },
+        allModes: { type: 'boolean', description: '关闭指定 profile 的全部 headless/channel 模式' },
+        allContexts: { type: 'boolean', description: '关闭所有 profile 的全部浏览器上下文' },
+      },
+    },
+    examples: [
+      { title: '关闭默认无头浏览器', input: { profile: 'default' } },
+      { title: '关闭某 profile 的全部模式', input: { profile: 'bili', allModes: true } },
+    ],
+    risk: 'medium',
+    cost: 'low',
+    tags: ['browser', 'cleanup', 'close'],
     version: '1.0',
   },
   {
@@ -545,31 +616,113 @@ export const BUILTIN_TOOL_DEFINITIONS: ToolDefinition[] = [
     version: '1.0',
   },
   {
-    name: 'image.inspect',
-    callName: 'ndp_image_inspect',
+    name: 'image.generate',
+    callName: 'ndp_image_generate',
     description:
-      '读取应用生成目录中的本地图片并调用视觉模型描述/分析画面；适合 browser.screenshot 后看图，不依赖 filesystem MCP。',
+      '使用 NovelAI Image Generation API 根据文本提示生成图片，保存为本地 PNG 并返回 paths；仅在用户明确要求生图时调用，不用于后台批量自动生成。',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        path: { type: 'string', description: '图片路径，必须位于应用数据目录下（如 task-output 截图）' },
-        prompt: { type: 'string', description: '识图问题或描述要求（默认：描述图片内容）' },
-        maxTokens: { type: 'integer', description: '最大输出 token（默认 600）', minimum: 64, maximum: 4096 },
-        timeoutMs: { type: 'integer', description: '超时毫秒（默认 60000）', minimum: 2000, maximum: 180000 },
-        baseUrl: { type: 'string', description: '可选覆盖 baseUrl（需支持 vision 输入）' },
-        apiKey: { type: 'string', description: '可选覆盖 apiKey' },
-        model: { type: 'string', description: '可选覆盖 model（需支持 vision 输入）' },
-        temperature: { type: 'number', description: '温度（默认使用 AI 设置）', minimum: 0, maximum: 2 },
+        prompt: { type: 'string', description: '正向提示词；可由 AI 先整理成 NovelAI tags 后传入' },
+        negativePrompt: { type: 'string', description: '可选临时额外反向提示词；会拼接到固定负面提示词后面，通常不用传' },
+        promptPresetId: { type: 'string', description: '可选覆盖：使用设置页保存的提示词预设 ID' },
+        fixedPositivePrompt: { type: 'string', description: '可选覆盖：临时固定正面提示词，会拼接到 prompt 前面' },
+        fixedNegativePrompt: { type: 'string', description: '可选覆盖：临时固定负面提示词，会拼接到 negativePrompt 前面' },
+        maxPromptChars: { type: 'integer', description: '可选覆盖：提示词占用显示上限', minimum: 128, maximum: 12000 },
+        model: { type: 'string', description: '可选覆盖模型 ID，例如 nai-diffusion-4-5-curated' },
+        sampler: { type: 'string', description: '可选覆盖采样器，例如 k_euler_ancestral' },
+        noiseSchedule: { type: 'string', description: '可选覆盖噪点表/noise schedule，例如 karras' },
+        width: { type: 'integer', description: '宽度，自动按 64 像素对齐', minimum: 64, maximum: 4096 },
+        height: { type: 'integer', description: '高度，自动按 64 像素对齐', minimum: 64, maximum: 4096 },
+        steps: { type: 'integer', description: '步数', minimum: 1, maximum: 80 },
+        scale: { type: 'number', description: 'Prompt Guidance', minimum: 0, maximum: 30 },
+        cfgRescale: { type: 'number', description: 'Prompt Guidance Rescale', minimum: 0, maximum: 1 },
+        nSamples: { type: 'integer', description: '生成张数；会增加 NovelAI Anlas 消耗', minimum: 1, maximum: 8 },
+        seed: { type: 'integer', description: '种子；-1 或不传表示由服务端随机', minimum: -1, maximum: 4294967295 },
+        outputDir: { type: 'string', description: '相对 userData 的输出目录，默认 generated-images' },
+        cloudQueueEnabled: { type: 'boolean', description: '可选覆盖：是否通过 NovelAI 云端队列协调同一个 key 的共享使用' },
+        cloudQueueUrl: { type: 'string', description: '可选覆盖：云端队列服务地址，例如 https://st-chatu-novelai-queue.hf.space' },
+        cloudQueueUserId: { type: 'string', description: '可选覆盖：队列用户 ID；不传则使用设置或本机匿名 ID' },
+        cloudQueueGreeting: { type: 'string', description: '可选覆盖：队列个性语，服务端限制 15 字符' },
+        cloudQueuePollIntervalMs: { type: 'integer', description: '可选覆盖：排队轮询间隔毫秒', minimum: 500, maximum: 10000 },
+        cloudQueueTimeoutMs: { type: 'integer', description: '可选覆盖：最长排队等待毫秒', minimum: 15000, maximum: 1800000 },
+        extraParams: {
+          type: 'object',
+          description: '高级 NovelAI parameters 覆盖口，例如 v4_prompt、reference_image、skip_cfg_above_sigma 等；MVP 不提供 UI。',
+          additionalProperties: true,
+        },
+        timeoutMs: { type: 'integer', description: '超时毫秒，默认 300000', minimum: 5000, maximum: 600000 },
       },
-      required: ['path'],
+      required: ['prompt'],
     },
     examples: [
       {
-        title: '分析浏览器截图',
-        input: { path: 'task-output/demo-shot.png', prompt: '描述画面里正在播放什么', maxTokens: 500 },
+        title: '生成一张默认尺寸图片',
+        input: { prompt: '1girl, solo, blue eyes, white dress, soft lighting', width: 1024, height: 1024 },
+      },
+      {
+        title: '指定种子和张数',
+        input: { prompt: 'landscape, floating island, sunset, detailed', nSamples: 2, seed: 123456789 },
       },
     ],
+    risk: 'medium',
+    cost: 'high',
+    tags: ['image', 'generation', 'novelai'],
+    version: '1.0',
+  },
+  {
+    name: 'vision.look',
+    callName: 'ndp_vision_look',
+    description:
+      '查看当前会话视觉目录中的一张或多张图片。只在确实需要依据图片内容回答时调用；用户只是称赞、闲聊、要求继续但没有要求看图时不要调用。artifactIds 必须逐字复制视觉目录中的 ID，可按用户指定顺序查看或比较。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        artifactIds: {
+          type: 'array',
+          description: '要查看的视觉产物 ID，按需要查看/比较的顺序填写',
+          items: { type: 'string' },
+          minItems: 1,
+          maxItems: 8,
+        },
+        question: {
+          type: 'string',
+          description: '希望从图片中确认的问题；比较多图时写清比较维度',
+        },
+      },
+      required: ['artifactIds'],
+    },
+    examples: [
+      { title: '查看第二张图', input: { artifactIds: ['vis_example_run_2'], question: '描述这张图的主体、姿势和服装' } },
+      {
+        title: '比较两张图',
+        input: { artifactIds: ['vis_example_run_1', 'vis_example_run_3'], question: '比较构图、光线和角色姿势' },
+      },
+    ],
+    risk: 'low',
+    cost: 'high',
+    tags: ['image', 'vision', 'inspect'],
+    version: '1.0',
+  },
+  {
+    name: 'image.inspect',
+    callName: 'ndp_image_inspect',
+    description:
+      '兼容性的本地图片识别工具，供手动任务或旧流程使用。对当前会话里已经登记的图片应优先调用 vision.look，不要猜测本地路径。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string', description: '图片路径；支持应用数据目录、工作区、Temp、AppData、桌面、下载或图片目录中的本地图片' },
+        prompt: { type: 'string', description: '识图问题或描述要求（默认：描述图片内容）' },
+        maxTokens: { type: 'integer', description: '最大输出 token（默认 600）', minimum: 64, maximum: 4096 },
+        timeoutMs: { type: 'integer', description: '超时毫秒（默认 60000）', minimum: 2000, maximum: 180000 },
+      },
+      required: ['path'],
+    },
+    examples: [],
     risk: 'low',
     cost: 'high',
     tags: ['image', 'vision', 'inspect'],
@@ -741,7 +894,9 @@ export function getBuiltinToolDefinitions(): ToolDefinition[] {
 export function getDefaultAgentToolDefinitions(): ToolDefinition[] {
   // Agent 自己就是 LLM，因此默认不把 llm.* 暴露为可调用工具，避免“套娃调用”导致延迟与成本飙升
   // cli.exec 仅保留给内部兼容路径；对 Agent 默认只暴露流式版本 cli.exec_stream，避免交互脚本长时间阻塞且拿不到中途输出
-  return BUILTIN_TOOL_DEFINITIONS.filter((t) => !t.name.startsWith('llm.') && t.name !== 'cli.exec')
+  return BUILTIN_TOOL_DEFINITIONS.filter(
+    (t) => !t.name.startsWith('llm.') && t.name !== 'cli.exec' && t.name !== 'image.inspect',
+  )
 }
 
 export function getToolGroupId(toolName: string): string {

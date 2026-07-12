@@ -17,7 +17,8 @@ import { readLive2dModelMetadata } from './live2dModelMetadata'
 import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
-import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, TaskStatus } from './types'
+import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, TaskStatus, VisualArtifactRef } from './types'
+import { classifyVisionError, decideVisionRoute, resolveVisionFallbackProfile } from './visionRouter'
 
 type TaskStoreState = {
   version: 1
@@ -305,7 +306,7 @@ function normalizeTaskRecord(value: unknown): TaskRecord | null {
             | 'running'
             | 'done'
             | 'error',
-          inputPreview: typeof r.inputPreview === 'string' ? clampText(r.inputPreview, 500) : undefined,
+          inputPreview: typeof r.inputPreview === 'string' ? clampText(r.inputPreview, 6000) : undefined,
           outputPreview: typeof r.outputPreview === 'string' ? clampText(r.outputPreview, 800) : undefined,
           imagePaths: Array.isArray(r.imagePaths)
             ? (r.imagePaths as unknown[])
@@ -469,7 +470,7 @@ function extractImageRefsFromToolText(text: string): string[] {
 
   const out = new Set<string>()
   const add = (value: unknown) => {
-    const s = String(value ?? '').trim()
+    const s = canonicalizeImageRef(value)
     if (!s) return
     if (!isLikelyImageRef(s)) return
     out.add(s)
@@ -488,8 +489,32 @@ function extractImageRefsFromToolText(text: string): string[] {
     for (const x of Object.values(v as Record<string, unknown>)) walk(x)
   }
 
+  const collectPreferredRefs = (v: unknown): string[] => {
+    const preferred = new Set<string>()
+    const addPreferred = (value: unknown) => {
+      const s = canonicalizeImageRef(value)
+      if (!s || !isLikelyImageRef(s)) return
+      preferred.add(s)
+    }
+    const obj = v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+    if (!obj) return []
+    addPreferred(obj.path)
+    if (Array.isArray(obj.paths)) {
+      for (const p of obj.paths) addPreferred(p)
+    }
+    if (Array.isArray(obj.images)) {
+      for (const item of obj.images) {
+        const imageObj = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : null
+        addPreferred(imageObj?.path)
+      }
+    }
+    return Array.from(preferred).slice(0, 8)
+  }
+
   try {
     const parsed = JSON.parse(raw) as unknown
+    const preferred = collectPreferredRefs(parsed)
+    if (preferred.length > 0) return preferred
     walk(parsed)
   } catch {
     // ignore
@@ -502,13 +527,23 @@ function extractImageRefsFromToolText(text: string): string[] {
   return Array.from(out).slice(0, 8)
 }
 
+// 工具输出常见“JSON 转义残留”路径（C:\\Users\\...）：与正常形态（C:\Users\...）指向同一文件，
+// 必须折叠成同一字符串，否则字符串级去重会把同一张图当成两张（重复注入 vision、挤占数量上限）。
+function canonicalizeImageRef(value: unknown): string {
+  const s = String(value ?? '').trim()
+  if (!s) return ''
+  if (/^[a-zA-Z]:[\\/]/.test(s)) return s.replace(/\\{2,}/g, '\\')
+  if (s.startsWith('\\\\')) return `\\${s.replace(/\\{2,}/g, '\\')}` // UNC：保留头部双反斜杠
+  return s
+}
+
 function normalizeImagePathList(values: unknown[], limit = 8): string[] {
   const max = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 8
   if (!Array.isArray(values) || max <= 0) return []
   const out: string[] = []
   const seen = new Set<string>()
   for (const value of values) {
-    const s = String(value ?? '').trim()
+    const s = canonicalizeImageRef(value)
     if (!s || seen.has(s)) continue
     seen.add(s)
     out.push(s)
@@ -517,9 +552,104 @@ function normalizeImagePathList(values: unknown[], limit = 8): string[] {
   return out
 }
 
+const VISION_RESULT_TOOL_NAMES = new Set(['image.generate', 'screen.capture', 'browser.screenshot'])
+
+type TaskVisualContext = {
+  artifacts: Map<string, VisualArtifactRef>
+  initialVisionIds: string[]
+}
+
+function normalizeVisualArtifacts(values: unknown, limit = 24): VisualArtifactRef[] {
+  if (!Array.isArray(values)) return []
+  const out: VisualArtifactRef[] = []
+  const seen = new Set<string>()
+  for (const raw of values) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const value = raw as Record<string, unknown>
+    const id = String(value.id ?? '').trim()
+    const imagePath = canonicalizeImageRef(value.path)
+    if (!id || !imagePath || seen.has(id)) continue
+    const sourceRaw = String(value.source ?? '').trim()
+    const source: VisualArtifactRef['source'] =
+      sourceRaw === 'upload' ||
+      sourceRaw === 'image.generate' ||
+      sourceRaw === 'screen.capture' ||
+      sourceRaw === 'browser.screenshot'
+        ? sourceRaw
+        : 'legacy'
+    const optionalString = (key: string): string | undefined => {
+      const text = String(value[key] ?? '').trim()
+      return text || undefined
+    }
+    const optionalInt = (key: string): number | undefined => {
+      const n = Number(value[key])
+      return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : undefined
+    }
+    seen.add(id)
+    out.push({
+      id,
+      path: imagePath,
+      source,
+      groupId: optionalString('groupId'),
+      messageId: optionalString('messageId'),
+      taskId: optionalString('taskId'),
+      runId: optionalString('runId'),
+      index: optionalInt('index'),
+      total: optionalInt('total'),
+      createdAt: optionalInt('createdAt'),
+    })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+// agent.run 是“对话代理”的编排壳：真实工具调用由其内部 upsertToolRun 逐条记录。
+// 壳 step 自身不能再记入 toolRuns，否则纯聊天也会在气泡/聊天里渲染一张 agent.run 工具卡。
+function shouldRecordStepToolRun(tool: unknown): tool is string {
+  const name = typeof tool === 'string' ? tool.trim() : ''
+  return name.length > 0 && name !== 'agent.run'
+}
+
+function imageMimeFromPath(filePath: string): string {
+  const ext = path.extname(String(filePath ?? '')).toLowerCase()
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.bmp') return 'image/bmp'
+  return 'image/png'
+}
+
+async function localImagePathToDataUrl(filePath: string): Promise<string | null> {
+  const raw = String(filePath ?? '').trim()
+  if (!raw || /^data:image\//i.test(raw) || /^https?:\/\//i.test(raw)) return raw || null
+  if (!path.isAbsolute(raw)) return null
+  try {
+    const st = await fs.promises.stat(raw)
+    if (!st.isFile() || st.size > 10 * 1024 * 1024) return null
+    const buf = await fs.promises.readFile(raw)
+    if (!buf.length) return null
+    return `data:${imageMimeFromPath(raw)};base64,${buf.toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
+async function imageUrlPartsFromLocalPaths(paths: string[], limit = 4): Promise<Array<Record<string, unknown>>> {
+  const parts: Array<Record<string, unknown>> = []
+  for (const p of normalizeImagePathList(paths, limit)) {
+    const url = await localImagePathToDataUrl(p)
+    if (!url) continue
+    parts.push({ type: 'image_url', image_url: { url } })
+    if (parts.length >= limit) break
+  }
+  return parts
+}
+
 export class TaskService {
   private readonly store: Store<TaskStoreState>
   private readonly runtime = new Map<string, TaskRuntime>()
+  private readonly visualContextByTask = new Map<string, TaskVisualContext>()
+  private readonly visionCapabilityCache = new Map<string, 'supported' | 'unsupported'>()
   private readonly onChanged: () => void
   private readonly userDataDir: string
   private readonly mcpManager: McpManager | null
@@ -568,6 +698,25 @@ export class TaskService {
     return state.tasks.find((t) => t.id === tid) ?? null
   }
 
+  // 用户对 image.generate 结果“重新生成”后，把新图写回原任务的 toolRun，
+  // 保持任务存档（工具卡显示、消息附件、AI 看图收集）与用户看到的图一致
+  updateToolRunImages(taskId: string, runId: string, imagePaths: string[]): TaskRecord | null {
+    const tid = (taskId ?? '').trim()
+    const rid = (runId ?? '').trim()
+    const paths = normalizeImagePathList(Array.isArray(imagePaths) ? imagePaths : [], 8)
+    if (!tid || !rid || paths.length === 0) return this.getTask(tid)
+    this.writeState((draft) => {
+      const it = draft.tasks.find((x) => x.id === tid)
+      if (!it) return
+      const runs = Array.isArray(it.toolRuns) ? it.toolRuns : []
+      const idx = runs.findIndex((r) => r?.id === rid)
+      if (idx < 0) return
+      it.toolRuns = [...runs.slice(0, idx), { ...runs[idx], imagePaths: paths }, ...runs.slice(idx + 1)]
+      it.updatedAt = now()
+    })
+    return this.getTask(tid)
+  }
+
   createTask(args: TaskCreateArgs): TaskRecord {
     const title = clampText(args.title, 120)
     if (!title) throw new Error('任务标题不能为空')
@@ -601,6 +750,18 @@ export class TaskService {
       steps,
       currentStepIndex: 0,
       toolsUsed: [],
+    }
+
+    const visualArtifacts = normalizeVisualArtifacts(args.visualArtifacts, 24)
+    if (visualArtifacts.length > 0) {
+      const artifactMap = new Map(visualArtifacts.map((artifact) => [artifact.id, artifact]))
+      const initialVisionIds = Array.isArray(args.initialVisionIds)
+        ? args.initialVisionIds
+            .map((value) => String(value ?? '').trim())
+            .filter((value, index, list) => value.length > 0 && artifactMap.has(value) && list.indexOf(value) === index)
+            .slice(0, 8)
+        : []
+      this.visualContextByTask.set(id, { artifacts: artifactMap, initialVisionIds })
     }
 
     this.writeState((draft) => {
@@ -1044,20 +1205,57 @@ export class TaskService {
     const system = typeof settings.ai.systemPrompt === 'string' ? settings.ai.systemPrompt.trim() : ''
     const extraContext = typeof obj?.context === 'string' ? obj.context.trim() : ''
 
-    const readStringArray = (v: unknown, max: number): string[] => {
-      if (!Array.isArray(v)) return []
-      const out: string[] = []
-      for (const it of v) {
-        if (typeof it !== 'string') continue
-        const s = it.trim()
-        if (!s) continue
-        out.push(s)
-        if (out.length >= max) break
+    const maxVisionImages = clampInt(settings.ai.visionMaxImagesPerLook, 4, 1, 8)
+    const visualContext = this.visualContextByTask.get(task.id) ?? { artifacts: new Map<string, VisualArtifactRef>(), initialVisionIds: [] }
+    const legacyVisionImagePaths = normalizeImagePathList(
+      Array.isArray(obj?.imagePaths) ? (obj.imagePaths as unknown[]) : [],
+      maxVisionImages,
+    )
+    for (let index = 0; index < legacyVisionImagePaths.length; index += 1) {
+      const id = `legacy_${task.id}_${index + 1}`
+      if (!visualContext.artifacts.has(id)) {
+        visualContext.artifacts.set(id, {
+          id,
+          path: legacyVisionImagePaths[index],
+          source: 'legacy',
+          groupId: `legacy:${task.id}`,
+          index: index + 1,
+          total: legacyVisionImagePaths.length,
+          taskId: task.id,
+          createdAt: task.createdAt,
+        })
+      }
+      if (!visualContext.initialVisionIds.includes(id)) visualContext.initialVisionIds.push(id)
+    }
+    const listVisualArtifacts = (): VisualArtifactRef[] => Array.from(visualContext.artifacts.values()).slice(-24)
+    const resolveVisualArtifacts = (ids: unknown): VisualArtifactRef[] => {
+      if (!Array.isArray(ids)) return []
+      const out: VisualArtifactRef[] = []
+      const seen = new Set<string>()
+      for (const raw of ids) {
+        const id = String(raw ?? '').trim()
+        const artifact = visualContext.artifacts.get(id)
+        if (!artifact || seen.has(id)) continue
+        seen.add(id)
+        out.push(artifact)
+        if (out.length >= maxVisionImages) break
       }
       return out
     }
-
-    const visionImagePaths = readStringArray(obj?.imagePaths, 4)
+    const initialVisionArtifacts = resolveVisualArtifacts(visualContext.initialVisionIds)
+    const fallbackProfile = resolveVisionFallbackProfile(settings)
+    const mainVisionCapabilityKey = [settings.ai.apiMode, settings.ai.baseUrl, settings.ai.model]
+      .map((value) => String(value ?? '').trim().toLowerCase())
+      .join('|')
+    const effectiveMainVisionCapability =
+      settings.ai.visionCapability === 'auto'
+        ? (this.visionCapabilityCache.get(mainVisionCapabilityKey) ?? 'auto')
+        : settings.ai.visionCapability
+    const rememberMainVisionCapability = (capability: 'supported' | 'unsupported') => {
+      if (settings.ai.visionCapability === 'auto' && mainVisionCapabilityKey.replace(/\|/g, '').length > 0) {
+        this.visionCapabilityCache.set(mainVisionCapabilityKey, capability)
+      }
+    }
 
     type ToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } }
     type RawToolCall = Record<string, unknown>
@@ -1069,9 +1267,15 @@ export class TaskService {
       function_call?: unknown
     }
 
-    const builtinDefs = getDefaultAgentToolDefinitions()
+    const builtinDefs = getDefaultAgentToolDefinitions().filter(
+      (definition) => definition.name !== 'vision.look' || settings.ai.visionRoutingMode !== 'off',
+    )
     const mcpDefs = this.mcpManager?.getToolDefinitions() ?? []
     const toolDefs = filterToolDefinitionsBySettings([...builtinDefs, ...mcpDefs], settings.tools)
+    if (settings.ai.visionRoutingMode !== 'off' && !toolDefs.some((definition) => definition.name === 'vision.look')) {
+      const visionLook = builtinDefs.find((definition) => definition.name === 'vision.look')
+      if (visionLook) toolDefs.push(visionLook)
+    }
     const tools: OpenAIFunctionToolSpec[] = toOpenAITools(toolDefs)
 
     const toolByName = new Map<string, ToolDefinition>()
@@ -1208,6 +1412,85 @@ export class TaskService {
       deferredSkillLogs.push(`[Skill] setup skipped: ${clampText(msg, 160)}`)
     }
 
+    const visionAttachLogs: string[] = []
+    const readInspectAnswer = (raw: string): string => {
+      const text = String(raw ?? '').trim()
+      const first = text.indexOf('{')
+      const last = text.lastIndexOf('}')
+      if (first >= 0 && last > first) {
+        try {
+          const parsed = JSON.parse(text.slice(first, last + 1)) as { answer?: unknown }
+          if (typeof parsed.answer === 'string' && parsed.answer.trim()) return parsed.answer.trim()
+        } catch {
+          // Fall through to the raw text. The fallback model output is still useful evidence.
+        }
+      }
+      return text || '(外挂视觉未返回观察结果)'
+    }
+    const inspectArtifactsWithFallback = async (artifacts: VisualArtifactRef[], question: string): Promise<string> => {
+      if (!fallbackProfile) throw new Error('未配置可用的外挂视觉 Profile')
+      const observations: string[] = []
+      for (const artifact of artifacts.slice(0, maxVisionImages)) {
+        const raw = await this.executeToolByName(
+          'image.inspect',
+          {
+            path: artifact.path,
+            prompt:
+              `${question.trim() || '客观描述图片中可见的主体、文字、构图和关键细节。'}\n` +
+              '只输出可见事实；不扮演桌宠人设，不替用户或主助手下结论。',
+            apiMode: fallbackProfile.apiMode,
+            apiKey: fallbackProfile.apiKey,
+            baseUrl: fallbackProfile.baseUrl,
+            model: fallbackProfile.model,
+            maxTokens: 800,
+          },
+          task,
+          rt,
+        )
+        observations.push(`- ${artifact.id}：${readInspectAnswer(raw)}`)
+      }
+      return observations.join('\n')
+    }
+    const formatVisualCatalog = (): string => {
+      const artifacts = listVisualArtifacts()
+      if (artifacts.length === 0) return ''
+      const lines = artifacts.map((artifact) => {
+        const position = artifact.index && artifact.total ? `，组内 ${artifact.index}/${artifact.total}` : ''
+        return `- ${artifact.id}（来源 ${artifact.source}${position}）`
+      })
+      return [
+        '【近期视觉目录】以下只是可选图片的安全 ID 和来源，图片内容尚未注入，你现在看不到它们。',
+        ...lines,
+        '只有当回答确实需要图片内容时才调用 vision.look；用户只是称赞、闲聊、说“继续”或明确说不要看图时不要调用。',
+        '需要查看第几张或比较多张时，只选择对应 artifactIds，并保持用户指定顺序。禁止猜测 ID、文件路径或图片内容。',
+      ].join('\n')
+    }
+
+    const initialRoute =
+      initialVisionArtifacts.length > 0
+        ? decideVisionRoute({
+            routingMode: settings.ai.visionRoutingMode,
+            capability: effectiveMainVisionCapability,
+            hasFallback: Boolean(fallbackProfile),
+            mainAvailable: Boolean(String(settings.ai.baseUrl ?? '').trim() && String(settings.ai.model ?? '').trim()),
+          })
+        : 'off'
+    let mainVisionArtifacts = initialRoute === 'main' ? initialVisionArtifacts : []
+    let initialFallbackObservation = ''
+    if (initialRoute === 'fallback') {
+      try {
+        initialFallbackObservation = await inspectArtifactsWithFallback(initialVisionArtifacts, effectiveAgentRequest)
+        visionAttachLogs.push(`[Vision] 外挂 ${initialVisionArtifacts.length}`)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        visionAttachLogs.push(`[Vision] 外挂失败：${clampText(msg, 160)}`)
+      }
+    } else if (initialRoute === 'main') {
+      visionAttachLogs.push(`[Vision] 主模型 ${initialVisionArtifacts.length}`)
+    } else if (initialVisionArtifacts.length > 0) {
+      visionAttachLogs.push('[Vision] 不支持或未配置可用视觉路由')
+    }
+
     const messages: Array<Record<string, unknown>> = []
     if (system) messages.push({ role: 'system', content: system })
     if (extraContext) messages.push({ role: 'system', content: extraContext })
@@ -1225,6 +1508,37 @@ export class TaskService {
       content:
         '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
     })
+    const visualCatalog = formatVisualCatalog()
+    if (visualCatalog) messages.push({ role: 'system', content: visualCatalog })
+    const visionImageParts =
+      mainVisionArtifacts.length > 0
+        ? await imageUrlPartsFromLocalPaths(
+            mainVisionArtifacts.map((artifact) => artifact.path),
+            maxVisionImages,
+          )
+        : []
+    let visionSystemMsg: Record<string, unknown> | null = null
+    if (visionImageParts.length > 0) {
+      visionSystemMsg = {
+        role: 'system',
+        content:
+          `本轮用户直接上传的图片已通过主模型视觉注入，对应 ID：${mainVisionArtifacts.map((artifact) => artifact.id).join('、')}。` +
+          '可以直接依据这些图片回答，不要再对同一批图片调用 vision.look。其他目录图片仍未注入。',
+      }
+      messages.push(visionSystemMsg)
+    } else if (mainVisionArtifacts.length > 0) {
+      visionAttachLogs.push('[Vision] 图片失效或读取失败')
+      mainVisionArtifacts = []
+    }
+    if (initialFallbackObservation) {
+      messages.push({
+        role: 'system',
+        content:
+          '用户本轮直接上传了图片。主助手当前没有直接读取原图；以下是外挂视觉模型返回的客观观察。' +
+          '请由你继续按桌宠人设理解用户意图并组织最终回复，不要冒充外挂模型，也不要声称自己直接看到了未注入的原图。\n' +
+          initialFallbackObservation,
+      })
+    }
     if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
     // 注入历史对话（history），让 agent 能够理解对话上下文，避免答非所问
@@ -1246,54 +1560,41 @@ export class TaskService {
         : ''
     const hasSameTailUserRequest = Boolean(requestText) && lastHistoryUserText === requestText
 
-    if (visionImagePaths.length > 0) {
-      const mimeFromExt = (p: string): string => {
-        const ext = path.extname(p).toLowerCase()
-        if (ext === '.png') return 'image/png'
-        if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-        if (ext === '.webp') return 'image/webp'
-        if (ext === '.gif') return 'image/gif'
-        return 'image/png'
-      }
-
-      const fileToDataUrl = async (filePath: string): Promise<string | null> => {
-        try {
-          const buf = await fs.promises.readFile(filePath)
-          const b64 = buf.toString('base64')
-          if (!b64) return null
-          return `data:${mimeFromExt(filePath)};base64,${b64}`
-        } catch {
-          return null
-        }
-      }
-
-      type VisionPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
-      const parts: VisionPart[] = []
+    if (visionImageParts.length > 0) {
+      const parts: Array<Record<string, unknown>> = []
       if (effectiveAgentRequest.trim()) parts.push({ type: 'text', text: effectiveAgentRequest })
-      for (const p of visionImagePaths) {
-        const url = await fileToDataUrl(p)
-        if (!url) continue
-        parts.push({ type: 'image_url', image_url: { url } })
-      }
-      if (parts.length === 0) {
-        if (!hasSameTailUserRequest) messages.push({ role: 'user', content: effectiveAgentRequest })
-      } else {
-        messages.push({ role: 'user', content: parts })
-      }
+      parts.push(...visionImageParts)
+      messages.push({ role: 'user', content: parts })
     } else {
       if (!hasSameTailUserRequest) messages.push({ role: 'user', content: effectiveAgentRequest })
     }
 
-    const userMsgRef = messages.find((m) => m.role === 'user') as Record<string, unknown> | undefined
     let visionStripped = false
     const stripVisionFromUserMessage = (): boolean => {
       if (visionStripped) return false
-      const m = userMsgRef
-      if (!m) return false
-      if (!Array.isArray(m.content)) return false
-      m.content = effectiveAgentRequest
-      visionStripped = true
-      return true
+      let changed = false
+      for (const m of messages) {
+        const rec = m as Record<string, unknown>
+        if (rec.role !== 'user' || !Array.isArray(rec.content)) continue
+        const text = rec.content
+          .map((part) => {
+            if (!part || typeof part !== 'object' || Array.isArray(part)) return ''
+            const value = (part as { text?: unknown }).text
+            return typeof value === 'string' ? value : ''
+          })
+          .filter(Boolean)
+          .join('\n')
+          .trim()
+        rec.content = text || '[image omitted: model rejected vision input]'
+        changed = true
+      }
+      if (changed && visionSystemMsg) {
+        // 同步撤销“已附带图片”的系统提示，否则剥离图片重试后模型仍会被诱导编造图片内容
+        visionSystemMsg.content =
+          '注意：本轮原图输入已被移除。除非下方另有外挂视觉观察，否则你现在看不到图片，禁止描述或编造图片内容。'
+      }
+      visionStripped = changed
+      return changed
     }
 
     const logs: string[] = []
@@ -1343,8 +1644,55 @@ export class TaskService {
       updateProgress(force)
     }
     for (const line of deferredSkillLogs) pushLog(line, true)
+    for (const line of visionAttachLogs) pushLog(line, true)
+
+    let mainVisionFallbackApplied = false
+    const recoverFromMainVisionError = async (err: unknown, status?: number): Promise<boolean> => {
+      if (visionImageParts.length === 0 || visionStripped) return false
+      const failureKind = classifyVisionError(err, status)
+      const fallbackRoute = decideVisionRoute({
+        routingMode: settings.ai.visionRoutingMode,
+        capability: effectiveMainVisionCapability,
+        hasFallback: Boolean(fallbackProfile),
+        mainFailedKind: failureKind,
+        fallbackOnTransient: settings.ai.visionFallbackOnTransient,
+      })
+
+      if (fallbackRoute === 'fallback' && !mainVisionFallbackApplied) {
+        try {
+          const observation = await inspectArtifactsWithFallback(mainVisionArtifacts, effectiveAgentRequest)
+          if (!stripVisionFromUserMessage()) return false
+          mainVisionFallbackApplied = true
+          if (failureKind === 'unsupported') rememberMainVisionCapability('unsupported')
+          if (visionSystemMsg) {
+            visionSystemMsg.content =
+              `主模型视觉请求失败，已改用外挂视觉（${failureKind === 'transient' ? '主网络失败→外挂' : '主模型不支持→外挂'}）。` +
+              '以下是外挂模型的客观观察；请由你按桌宠人设组织回复，不要声称自己直接读取了原图。\n' +
+              observation
+          }
+          pushLog(
+            failureKind === 'transient'
+              ? `[Vision] 主网络失败→外挂 ${mainVisionArtifacts.length}`
+              : `[Vision] 主模型不支持→外挂 ${mainVisionArtifacts.length}`,
+            true,
+          )
+          return true
+        } catch (fallbackErr) {
+          const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+          pushLog(`[Vision] 外挂失败：${clampText(fallbackMsg, 160)}`, true)
+        }
+      }
+
+      if (failureKind === 'unsupported' && stripVisionFromUserMessage()) {
+        rememberMainVisionCapability('unsupported')
+        pushLog('[Vision] 主模型明确不支持图片输入，已移除原图后重试', true)
+        return true
+      }
+      return false
+    }
 
     const toolPreview = (v: unknown, max: number) => clampText(typeof v === 'string' ? v : JSON.stringify(v ?? ''), max)
+    const toolInputPreview = (toolName: string, v: unknown) => toolPreview(v, toolName === 'image.generate' ? 6000 : 500)
 
     const upsertToolRun = (patch: {
       id: string
@@ -1413,6 +1761,10 @@ export class TaskService {
     const baseUrl = readString(apiOverride, 'baseUrl') || prefer.baseUrl || ''
     const apiKey = readString(apiOverride, 'apiKey') || prefer.apiKey || ''
     const model = readString(apiOverride, 'model') || prefer.model || ''
+    const apiMode =
+      readString(apiOverride, 'apiMode') === 'claude' || (baseAi as { apiMode?: unknown }).apiMode === 'claude'
+        ? 'claude'
+        : 'openai-compatible'
 
     const tempOverride = readNumber(apiOverride, 'temperature')
     const temperature = Math.max(0, Math.min(2, tempOverride ?? prefer.temperature))
@@ -1427,7 +1779,10 @@ export class TaskService {
       maxTokens: maxTokensRaw,
       settings: {
         thinkingEffort: thinkingEffortOverride || (baseAi as { thinkingEffort?: unknown }).thinkingEffort,
-        thinkingProvider: readString(apiOverride, 'thinkingProvider') || (baseAi as { thinkingProvider?: unknown }).thinkingProvider,
+        thinkingProvider:
+          apiMode === 'claude'
+            ? 'claude'
+            : readString(apiOverride, 'thinkingProvider') || (baseAi as { thinkingProvider?: unknown }).thinkingProvider,
         openaiReasoningEffort:
           readString(apiOverride, 'openaiReasoningEffort') || (baseAi as { openaiReasoningEffort?: unknown }).openaiReasoningEffort,
         claudeThinkingEffort:
@@ -1509,12 +1864,132 @@ export class TaskService {
     if (!baseUrl || !model) throw new Error('未配置工具 LLM baseUrl/model（设置 → AI 设置 → 工具/Agent 或 AI 设置）')
 
     const join = (b: string, p: string) => `${b.replace(/\/+$/, '')}/${p.replace(/^\/+/, '')}`
-    const endpoint = join(baseUrl, 'chat/completions')
+    const endpoint = join(baseUrl, apiMode === 'claude' ? 'messages' : 'chat/completions')
     const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (apiKey) headers.authorization = `Bearer ${apiKey}`
+    if (apiMode === 'claude') {
+      headers['anthropic-version'] = '2023-06-01'
+      if (apiKey) headers['x-api-key'] = apiKey
+    } else if (apiKey) {
+      headers.authorization = `Bearer ${apiKey}`
+    }
 
     // 使用任务ID作为sessionId，让API代理可以缓存和复用签名
     const sessionId = task.id
+
+    const textFromMessageContent = (content: unknown): string => {
+      if (typeof content === 'string') return content
+      if (!Array.isArray(content)) return ''
+      return content
+        .map((part) => {
+          if (part && typeof part === 'object' && !Array.isArray(part)) {
+            const text = (part as { text?: unknown }).text
+            if (typeof text === 'string') return text
+          }
+          return ''
+        })
+        .filter(Boolean)
+        .join('\n')
+    }
+
+    const parseClaudeDataUrl = (url: string): { mediaType: string; data: string } | null => {
+      const raw = String(url ?? '').trim()
+      if (!raw.startsWith('data:')) return null
+      const comma = raw.indexOf(',')
+      if (comma < 0) return null
+      const meta = raw.slice(5, comma)
+      const data = raw.slice(comma + 1)
+      const parts = meta.split(';').map((p) => p.trim())
+      const mediaType = parts[0] || 'application/octet-stream'
+      if (!parts.includes('base64') || !data) return null
+      return { mediaType, data }
+    }
+
+    const toClaudeContentBlocks = (content: unknown): Array<Record<string, unknown>> => {
+      if (typeof content === 'string') return content.trim() ? [{ type: 'text', text: content }] : []
+      if (!Array.isArray(content)) return []
+      const blocks: Array<Record<string, unknown>> = []
+      for (const part of content) {
+        if (!part || typeof part !== 'object' || Array.isArray(part)) continue
+        const rec = part as Record<string, unknown>
+        if (rec.type === 'text') {
+          const text = typeof rec.text === 'string' ? rec.text : ''
+          if (text.trim()) blocks.push({ type: 'text', text })
+          continue
+        }
+        if (rec.type === 'image_url') {
+          const image = rec.image_url && typeof rec.image_url === 'object' ? (rec.image_url as Record<string, unknown>) : null
+          const url = typeof image?.url === 'string' ? image.url.trim() : ''
+          if (!url) continue
+          const dataUrl = parseClaudeDataUrl(url)
+          blocks.push(
+            dataUrl
+              ? { type: 'image', source: { type: 'base64', media_type: dataUrl.mediaType, data: dataUrl.data } }
+              : { type: 'image', source: { type: 'url', url } },
+          )
+        }
+      }
+      return blocks
+    }
+
+    const buildClaudeTextPayload = (stream: boolean): Record<string, unknown> => {
+      const systemParts: string[] = []
+      const outMessages: Array<{ role: 'user' | 'assistant'; content: Array<Record<string, unknown>> }> = []
+      for (const m of messages) {
+        const rec = m as Record<string, unknown>
+        const roleRaw = typeof rec.role === 'string' ? rec.role : 'user'
+        if (roleRaw === 'system') {
+          const text = textFromMessageContent(rec.content).trim()
+          if (text) systemParts.push(text)
+          continue
+        }
+        const role = roleRaw === 'assistant' ? 'assistant' : 'user'
+        const content = toClaudeContentBlocks(rec.content)
+        if (!content.length) continue
+        const prev = outMessages[outMessages.length - 1]
+        if (prev?.role === role) prev.content.push(...content)
+        else outMessages.push({ role, content })
+      }
+
+      const body: Record<string, unknown> = {
+        model,
+        max_tokens: maxTokens,
+        temperature,
+        messages: outMessages,
+        stream,
+      }
+      if (systemParts.length) body.system = systemParts.join('\n\n')
+      const thinking = reasoningOptions.extra.thinking
+      if (
+        thinking &&
+        typeof thinking === 'object' &&
+        !Array.isArray(thinking) &&
+        (thinking as { type?: unknown }).type === 'enabled'
+      ) {
+        body.thinking = thinking
+      }
+      return body
+    }
+
+    const readClaudeUsage = (payload: unknown): { promptTokens: number; completionTokens: number; totalTokens: number } | undefined => {
+      const usage = (payload as { usage?: unknown })?.usage
+      if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return undefined
+      const input = (usage as { input_tokens?: unknown }).input_tokens
+      const output = (usage as { output_tokens?: unknown }).output_tokens
+      const promptTokens = typeof input === 'number' && Number.isFinite(input) ? input : 0
+      const completionTokens = typeof output === 'number' && Number.isFinite(output) ? output : 0
+      return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }
+    }
+
+    const mergeLlmUsage = (
+      prev: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined,
+      next: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined,
+    ): { promptTokens: number; completionTokens: number; totalTokens: number } | undefined => {
+      if (!next) return prev
+      const promptTokens = next.promptTokens || prev?.promptTokens || 0
+      const completionTokens = next.completionTokens || prev?.completionTokens || 0
+      const totalTokens = next.totalTokens || promptTokens + completionTokens
+      return { promptTokens, completionTokens, totalTokens }
+    }
 
     const callLlmNative = async (
       visionRetryAttempt = 0,
@@ -1823,18 +2298,17 @@ export class TaskService {
           if (parsed.contentText.trim() || parsed.toolCalls.length > 0 || parsed.rawToolCalls.length > 0) {
             emittedAnyOutput = true
           }
+          if (mainVisionArtifacts.length > 0 && !visionStripped) rememberMainVisionCapability('supported')
           return parsed
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
             throw new Error('canceled')
           }
-          if (visionRetryAttempt === 0 && stripVisionFromUserMessage()) {
-            pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
+          const status = readErrorStatus(err)
+          if (visionRetryAttempt === 0 && (await recoverFromMainVisionError(err, status ?? undefined))) {
             return callLlmNative(1, opts)
           }
-
-          const status = readErrorStatus(err)
           if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, err, status)) {
             const delayMs = transientRetryDelayMs(transientAttempt)
             pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
@@ -2009,19 +2483,24 @@ export class TaskService {
         let emittedAnyOutput = false
 
         try {
+          const requestBody =
+            apiMode === 'claude'
+              ? buildClaudeTextPayload(true)
+              : {
+                  model,
+                  temperature,
+                  max_tokens: maxTokens,
+                  ...reasoningOptions.extra,
+                  messages,
+                  sessionId,
+                  stream: true,
+                }
+
           const res = await fetch(endpoint, {
             method: 'POST',
             signal: ac.signal,
             headers,
-            body: JSON.stringify({
-              model,
-              temperature,
-              max_tokens: maxTokens,
-              ...reasoningOptions.extra,
-              messages,
-              sessionId,
-              stream: true,
-            }),
+            body: JSON.stringify(requestBody),
           })
 
           if (!res.ok) {
@@ -2071,22 +2550,42 @@ export class TaskService {
 
               try {
                 const payload = JSON.parse(dataStr) as {
+                  type?: string
+                  error?: { message?: string }
+                  message?: unknown
+                  delta?: { text?: unknown }
                   choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
                   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
                 }
 
-                // Extract usage from stream (some APIs include it in the last chunk)
-                if (payload.usage) {
-                  usage = {
-                    promptTokens: payload.usage.prompt_tokens ?? 0,
-                    completionTokens: payload.usage.completion_tokens ?? 0,
-                    totalTokens: payload.usage.total_tokens ?? 0,
+                let delta = ''
+                if (apiMode === 'claude') {
+                  if (payload.type === 'error') {
+                    const err = new Error(payload.error?.message || 'Claude stream error') as Error & { streamFatal?: boolean }
+                    err.streamFatal = true
+                    throw err
                   }
+                  usage = mergeLlmUsage(usage, readClaudeUsage(payload.message ?? payload))
+                  delta = typeof payload.delta?.text === 'string' ? payload.delta.text : ''
+                  if (payload.type === 'message_stop') {
+                    streamDone = true
+                    hasMoreLines = false
+                  }
+                } else {
+                  // Extract usage from stream (some APIs include it in the last chunk)
+                  if (payload.usage) {
+                    usage = {
+                      promptTokens: payload.usage.prompt_tokens ?? 0,
+                      completionTokens: payload.usage.completion_tokens ?? 0,
+                      totalTokens: payload.usage.total_tokens ?? 0,
+                    }
+                  }
+
+                  // Extract content delta
+                  const choice = payload.choices?.[0]
+                  delta = choice?.delta?.content ?? choice?.message?.content ?? ''
                 }
 
-                // Extract content delta
-                const choice = payload.choices?.[0]
-                const delta = choice?.delta?.content ?? choice?.message?.content ?? ''
                 if (delta) {
                   throwIfCanceled()
                   emittedAnyOutput = true
@@ -2106,7 +2605,8 @@ export class TaskService {
 
                   opts?.onDelta?.(delta)
                 }
-              } catch {
+              } catch (err) {
+                if ((err as { streamFatal?: unknown })?.streamFatal === true) throw err
                 // Ignore parse errors for individual chunks
               }
             }
@@ -2121,18 +2621,17 @@ export class TaskService {
           }
 
           const assistantMsgRaw: AssistantMessage = { role: 'assistant', content: contentText }
+          if (mainVisionArtifacts.length > 0 && !visionStripped) rememberMainVisionCapability('supported')
           return { contentText, assistantMsgRaw, usage }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
             throw new Error('canceled')
           }
-          if (visionRetryAttempt === 0 && stripVisionFromUserMessage()) {
-            pushLog(`[Agent] LLM 不支持图片输入，已改为纯文本重试：${clampText(msg, 120)}`, true)
+          const status = readErrorStatus(err)
+          if (visionRetryAttempt === 0 && (await recoverFromMainVisionError(err, status ?? undefined))) {
             return callLlmText(1, opts)
           }
-
-          const status = readErrorStatus(err)
           if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, err, status)) {
             const delayMs = transientRetryDelayMs(transientAttempt)
             pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
@@ -2236,9 +2735,18 @@ export class TaskService {
       lines.push('你可以通过下面的兼容工具调用格式来调用工具。')
       lines.push('重要：用户仅说“打开/进入某网站”且不需要后续搜索、点击、截图、提取时，才用 browser.open。browser.open 打开的是系统浏览器，不能继续自动化；只要任务包含搜索、点击、打开结果、截图或读取页面状态，必须使用 browser.playwright/browser.scan/browser.exec_js/browser.screenshot。')
       lines.push('重要：连续操作同一动态网页时，先用 browser.tabs/browser.scan 获取 tabId，后续 browser.scan/browser.exec_js/browser.screenshot 都绑定同一个 tabId；不要为了“当前页提取/截图”重复调用带 url 的 browser.playwright。')
+      lines.push('重要：无头浏览器默认不要传 channel，使用与 Playwright 版本匹配的内置 Chromium；只有明确需要用户手动登录/观察时才传 headless=false，并可在 Windows 使用 channel=msedge。')
+      lines.push('重要：screen.capture 才是系统桌面/显示器截图；browser.screenshot 只截桌宠内置 Playwright 标签页，不等于用户当前前台屏幕。')
       lines.push('重要：点击或搜索后如果工具结果显示 activePageChanged/newTabs，说明页面已跳转或新标签已打开，不要误判“没反应”；继续使用返回的 tabId/活动页操作。')
       lines.push('重要：单页目标任务完成并确认目标页已打开后，可用 browser.close_tabs 关闭非活动旧标签，避免 persistent profile 下历史标签反复恢复。')
-      lines.push('重要：需要理解截图/图片内容时，优先使用 image.inspect 读取应用生成图片；不要为了看图要求 filesystem MCP。')
+      lines.push('重要：一次性无头网页任务完成且不再需要后续操作时，调用 browser.close 关闭对应 profile 的浏览器进程；浏览器服务也会自动回收长期空闲上下文。')
+      lines.push('重要：screen.capture/browser.screenshot/image.generate 产出的图片只会登记为视觉产物，不会自动查看。工具结果会给出安全 artifact ID；确实需要依据画面回答时才调用 vision.look。')
+      lines.push('重要：用户只是称赞、闲聊、要求继续或明确说不要看图时，不要调用 vision.look；需要看第几张或比较多张时，仅选择对应 artifactIds 并保持用户指定顺序。')
+      lines.push('重要：只有用户明确要求生图/画图/NovelAI 生成图片时，才调用 image.generate；不要后台循环或批量自动生图。')
+      if (settings.novelai?.promptRules?.trim()) {
+        lines.push('NovelAI 文生图规则：')
+        lines.push(settings.novelai.promptRules.trim().slice(0, 2400))
+      }
       lines.push('重要：这里的“当前页”仅指桌宠内置 Playwright profile 的活动标签页，不等于系统浏览器前台页；若返回 about:blank，先用 browser.tabs 确认实际 tabId。')
       lines.push('重要：Windows 下执行带空格/引号/管道的命令时，优先用 cmd+args 形式调用 powershell -NoProfile -Command；运行 .py 必须写 python "脚本.py"，不要用 & "脚本.py" 直接执行；不要用 cmd.exe line 字符串拼接复杂路径。修改 UTF-8 文件时优先用 file.write 或 PowerShell 明确 -Encoding UTF8，不要用 sed 盲替换。')
       lines.push('重要：如果用户点名“用 grok 搜索/查”，先用 skill.read 读取 grok-x-search-skill 并按技能运行脚本；不要先用 browser.fetch/mcp.fetch.fetch 抓搜索引擎页面。')
@@ -2268,10 +2776,18 @@ export class TaskService {
       return lines.join('\n')
     }
 
+    type AgentToolExecution = {
+      output: string
+      modelOutput?: string
+      images: Array<{ mimeType: string; data: string }>
+      imagePaths: string[]
+      visionParts?: Array<Record<string, unknown>>
+    }
+
     const executeTextToolCall = async (
       toolNameRaw: string,
       input: ToolInput,
-    ): Promise<{ output: string; images: Array<{ mimeType: string; data: string }>; imagePaths: string[] }> => {
+    ): Promise<AgentToolExecution> => {
       const resolvedTool = resolveTextToolName(toolNameRaw)
       const def = resolvedTool.def
       if (!def) {
@@ -2306,20 +2822,19 @@ export class TaskService {
         const imagePaths = await this.resolveToolImagePaths(task.id, out, res.images)
         const exec = { output: out, images: res.images, imagePaths }
         executedCalls.set(key, exec)
-        executedCallOrder.push({ toolName: def.name, input, output: out })
         return exec
       }
 
       const out = await this.executeToolByName(def.name, input, task, rt)
-      const exec = { output: out, images: [] as Array<{ mimeType: string; data: string }>, imagePaths: [] as string[] }
+      const imagePaths = await this.resolveToolImagePaths(task.id, out, [])
+      const exec = { output: out, images: [] as Array<{ mimeType: string; data: string }>, imagePaths }
       executedCalls.set(key, exec)
-      executedCallOrder.push({ toolName: def.name, input, output: out })
       return exec
     }
 
     pushLog(`[Agent] request: ${clampText(request, 120)}`, true)
 
-    const executedCalls = new Map<string, { output: string; images: Array<{ mimeType: string; data: string }>; imagePaths: string[] }>()
+    const executedCalls = new Map<string, AgentToolExecution>()
     const executedCallOrder: Array<{ toolName: string; input: ToolInput; output: string }> = []
 
     const stableStringify = (v: unknown): string => {
@@ -2356,6 +2871,97 @@ export class TaskService {
 
     const hasAnyFinishedToolRun = (): boolean => Array.isArray(toolRuns) && toolRuns.some((r) => r.status === 'done' || r.status === 'error')
 
+    const registerToolVisualArtifacts = (toolName: string, runId: string, imagePaths: string[]): VisualArtifactRef[] => {
+      if (!VISION_RESULT_TOOL_NAMES.has(toolName)) return []
+      const paths = normalizeImagePathList(imagePaths, 8)
+      const total = paths.length
+      const groupId = `${task.id}:${runId}`
+      return paths.map((imagePath, index) => {
+        const artifact: VisualArtifactRef = {
+          id: `vis_${task.id}_${runId}_${index + 1}`,
+          path: imagePath,
+          source: toolName as VisualArtifactRef['source'],
+          groupId,
+          index: index + 1,
+          total,
+          taskId: task.id,
+          runId,
+          createdAt: now(),
+        }
+        visualContext.artifacts.set(artifact.id, artifact)
+        return artifact
+      })
+    }
+
+    const sanitizeToolOutputForModel = (raw: string, artifacts: VisualArtifactRef[]): string => {
+      if (artifacts.length === 0) return String(raw ?? '')
+      return (
+        `[工具执行成功；视觉产物已登记，但尚未查看图片内容]\n` +
+        artifacts
+          .map((artifact) => `- ${artifact.id}（${artifact.index ?? 1}/${artifact.total ?? artifacts.length}）`)
+          .join('\n') +
+        '\n只有确实需要图片内容时才调用 vision.look；不要根据生成提示词、文件名或路径猜测成图。'
+      )
+    }
+
+    const executeVisionLook = async (input: ToolInput): Promise<AgentToolExecution> => {
+      const value = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+      const artifacts = resolveVisualArtifacts(value?.artifactIds)
+      if (artifacts.length === 0) throw new Error('vision.look 未收到当前会话中有效的 artifactIds')
+      const requestedIds = Array.isArray(value?.artifactIds)
+        ? value.artifactIds.map((id) => String(id ?? '').trim()).filter(Boolean)
+        : []
+      if (artifacts.length !== Math.min(requestedIds.length, maxVisionImages)) {
+        throw new Error('vision.look 包含未知、重复或超出上限的 artifactId')
+      }
+      const question = typeof value?.question === 'string' ? value.question.trim() : ''
+      const route = decideVisionRoute({
+        routingMode: settings.ai.visionRoutingMode,
+        capability: effectiveMainVisionCapability,
+        hasFallback: Boolean(fallbackProfile),
+        mainFailedKind: mainVisionFallbackApplied ? 'unsupported' : null,
+        fallbackOnTransient: settings.ai.visionFallbackOnTransient,
+      })
+
+      if (route === 'main') {
+        const visionParts = await imageUrlPartsFromLocalPaths(
+          artifacts.map((artifact) => artifact.path),
+          maxVisionImages,
+        )
+        if (visionParts.length === 0) throw new Error('所选图片不存在、过大或无法读取')
+        mainVisionArtifacts = artifacts
+        pushLog(`[Vision] 主模型 ${visionParts.length}`, true)
+        return {
+          output: JSON.stringify({ ok: true, route: 'main-native', artifactIds: artifacts.map((artifact) => artifact.id) }),
+          modelOutput: `已按顺序附带 ${visionParts.length} 张所选图片；请直接依据图片回答问题：${question || '客观查看图片内容'}`,
+          images: [],
+          imagePaths: [],
+          visionParts,
+        }
+      }
+
+      if (route === 'fallback') {
+        const observation = await inspectArtifactsWithFallback(artifacts, question)
+        pushLog(`[Vision] 外挂 ${artifacts.length}`, true)
+        return {
+          output: JSON.stringify({
+            ok: true,
+            route: 'fallback-observation',
+            artifactIds: artifacts.map((artifact) => artifact.id),
+            observation,
+          }),
+          modelOutput:
+            '以下内容来自外挂视觉模型的客观观察。请由你按桌宠人设组织最终回复，不要把外挂模型当成说话者，也不要声称主模型直接读取了原图。\n' +
+            observation,
+          images: [],
+          imagePaths: [],
+        }
+      }
+
+      if (route === 'off') throw new Error('视觉路由已关闭')
+      throw new Error('当前没有可用的视觉提供方；请检查主模型能力或外挂视觉 Profile')
+    }
+
     const normalizeUrl = (raw: string): string => {
       const u = (raw ?? '').trim()
       if (!u) return ''
@@ -2369,14 +2975,14 @@ export class TaskService {
 
     const sanitizeInternalToolNames = (text: string): string => {
       // UI 会展示 ToolUse，最终回复不要暴露内部调用名
-      return text.replace(/\b(?:mcp|cli|browser|file|llm|delay)\.[A-Za-z0-9_:\-./]+/g, '').replace(/[ \t]{2,}/g, ' ')
+      return text.replace(/\b(?:mcp|cli|browser|file|llm|delay|vision|image)\.[A-Za-z0-9_:\-./]+/g, '').replace(/[ \t]{2,}/g, ' ')
     }
 
     const validateFinalText = (finalText: string): { ok: true } | { ok: false; reason: string } => {
       const text = (finalText ?? '').trim()
       if (!text) return { ok: true }
 
-      const internalNameHit = /\b(?:mcp|cli|browser|file|llm|delay)\.[A-Za-z0-9_:\-./]+/g.test(text)
+      const internalNameHit = /\b(?:mcp|cli|browser|file|llm|delay|vision|image)\.[A-Za-z0-9_:\-./]+/g.test(text)
       if (internalNameHit) return { ok: false, reason: '最终回复包含工具内部名（如 cli.exec/browser.open/mcp.*）' }
 
       if (!hasAnyFinishedToolRun() && finalTextClaimsToolAction(text)) {
@@ -2480,6 +3086,7 @@ export class TaskService {
         }
 
         pushLog(`[Agent] tool_calls: ${toolCalls.map((c) => c.function.name).join(', ')}`)
+        const pendingVisionMessages: Array<Record<string, unknown>> = []
 
         for (const call of toolCalls) {
           await this.waitIfPaused(task.id)
@@ -2513,38 +3120,47 @@ export class TaskService {
             id: call.id,
             toolName: def.name,
             status: 'running',
-            inputPreview: toolPreview(toolInput, 500),
+            inputPreview: toolInputPreview(def.name, toolInput),
             startedAt: now(),
           })
 
           let toolOut = ''
           let toolImagePaths: string[] = []
+          let toolExec: AgentToolExecution | null = null
           try {
             const key = makeCallKey(def.name, toolInput)
             const cached = executedCalls.get(key)
             if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${def.name} skip duplicate`, true)
+              toolExec = cached
               toolOut = cached.output
               toolImagePaths = Array.isArray(cached.imagePaths) ? cached.imagePaths : []
             } else {
-              if (def.name.startsWith('mcp.') && this.mcpManager) {
+              if (def.name === 'vision.look') {
+                toolExec = await executeVisionLook(toolInput)
+                toolOut = toolExec.output
+                toolImagePaths = []
+                executedCalls.set(key, toolExec)
+              } else if (def.name.startsWith('mcp.') && this.mcpManager) {
                 const res = await this.mcpManager.callToolDetailed(def.name, toolInput)
                 toolOut = res.text
                 toolImagePaths = await this.resolveToolImagePaths(task.id, toolOut, res.images)
-                executedCalls.set(key, { output: toolOut, images: res.images, imagePaths: toolImagePaths })
+                toolExec = { output: toolOut, images: res.images, imagePaths: toolImagePaths }
+                executedCalls.set(key, toolExec)
               } else {
                 toolOut = await this.executeToolByName(def.name, toolInput, task, rt)
-                executedCalls.set(key, { output: toolOut, images: [], imagePaths: [] })
+                toolImagePaths = await this.resolveToolImagePaths(task.id, toolOut, [])
+                toolExec = { output: toolOut, images: [], imagePaths: toolImagePaths }
+                executedCalls.set(key, toolExec)
               }
-              executedCallOrder.push({ toolName: def.name, input: toolInput, output: toolOut })
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             toolOut = `[error] ${msg}`
             const key = makeCallKey(def.name, toolInput)
             if (!executedCalls.has(key)) {
-              executedCalls.set(key, { output: toolOut, images: [], imagePaths: [] })
-              executedCallOrder.push({ toolName: def.name, input: toolInput, output: toolOut })
+              toolExec = { output: toolOut, images: [], imagePaths: [] }
+              executedCalls.set(key, toolExec)
             }
             upsertToolRun({
               id: call.id,
@@ -2557,7 +3173,13 @@ export class TaskService {
             })
           }
 
-          const toolMsg = clampText(toolOut, 4000) || '(空)'
+          const artifacts = registerToolVisualArtifacts(def.name, call.id, toolImagePaths)
+          const modelToolOutput =
+            toolExec?.modelOutput ?? (artifacts.length > 0 ? sanitizeToolOutputForModel(toolOut, artifacts) : toolOut)
+          if (!executedCallOrder.some((entry) => entry.toolName === def.name && stableStringify(entry.input) === stableStringify(toolInput))) {
+            executedCallOrder.push({ toolName: def.name, input: toolInput, output: modelToolOutput })
+          }
+          const toolMsg = clampText(modelToolOutput, 4000) || '(空)'
           pushLog(`[Tool] ${def.name} done`)
           upsertToolRun({
             id: call.id,
@@ -2568,7 +3190,15 @@ export class TaskService {
             endedAt: now(),
           })
           messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: toolMsg })
+          const visionParts = toolExec?.visionParts ?? []
+          if (visionParts.length > 0) {
+            pendingVisionMessages.push({
+              role: 'user',
+              content: [{ type: 'text', text: toolMsg }, ...visionParts],
+            })
+          }
         }
+        if (pendingVisionMessages.length > 0) messages.push(...pendingVisionMessages)
       }
 
       pushLog('[Agent] reach maxTurns, stop', true)
@@ -2640,33 +3270,34 @@ export class TaskService {
             id: runId,
             toolName: c.toolName,
             status: 'running',
-            inputPreview: toolPreview(c.input ?? {}, 500),
+            inputPreview: toolInputPreview(c.toolName, c.input ?? {}),
             startedAt: now(),
           })
 
           let toolOut = ''
           let toolImagePaths: string[] = []
+          let toolExec: AgentToolExecution | null = null
           try {
             const key = makeCallKey(c.toolName, c.input ?? {})
             const cached = executedCalls.get(key)
             if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${c.toolName} skip duplicate`, true)
+              toolExec = cached
               toolOut = cached.output
               toolImagePaths = Array.isArray(cached.imagePaths) ? cached.imagePaths : []
             } else {
-              const exec = await executeTextToolCall(c.toolName, c.input)
-              toolOut = exec.output
-              toolImagePaths = Array.isArray(exec.imagePaths) ? exec.imagePaths : []
-              executedCalls.set(key, exec)
-              executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: toolOut })
+              toolExec = c.toolName === 'vision.look' ? await executeVisionLook(c.input) : await executeTextToolCall(c.toolName, c.input)
+              toolOut = toolExec.output
+              toolImagePaths = Array.isArray(toolExec.imagePaths) ? toolExec.imagePaths : []
+              executedCalls.set(key, toolExec)
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             toolOut = `[error] ${msg}`
             const key = makeCallKey(c.toolName, c.input ?? {})
             if (!executedCalls.has(key)) {
-              executedCalls.set(key, { output: toolOut, images: [], imagePaths: [] })
-              executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: toolOut })
+              toolExec = { output: toolOut, images: [], imagePaths: [] }
+              executedCalls.set(key, toolExec)
             }
             upsertToolRun({
               id: runId,
@@ -2679,7 +3310,13 @@ export class TaskService {
             })
           }
 
-          const toolMsg = clampText(toolOut, 4000) || '(空)'
+          const artifacts = registerToolVisualArtifacts(c.toolName, runId, toolImagePaths)
+          const modelToolOutput =
+            toolExec?.modelOutput ?? (artifacts.length > 0 ? sanitizeToolOutputForModel(toolOut, artifacts) : toolOut)
+          if (!executedCallOrder.some((entry) => entry.toolName === c.toolName && stableStringify(entry.input) === stableStringify(c.input ?? {}))) {
+            executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: modelToolOutput })
+          }
+          const toolMsg = clampText(modelToolOutput, 4000) || '(空)'
           pushLog(`[Tool] ${c.toolName} done`)
           upsertToolRun({
             id: runId,
@@ -2697,11 +3334,11 @@ export class TaskService {
             TOOL_RESULT_END,
           ].join('\n')
 
-          const images = executedCalls.get(makeCallKey(c.toolName, c.input ?? {}))?.images ?? []
-          if (images.length > 0) {
+          const visionParts = toolExec?.visionParts ?? []
+          if (visionParts.length > 0) {
             messages.push({
               role: 'user',
-              content: [{ type: 'text', text: toolResultBlock }, ...toImageUrlParts(images)],
+              content: [{ type: 'text', text: toolResultBlock }, ...visionParts],
             })
           } else {
             messages.push({ role: 'user', content: toolResultBlock })
@@ -2713,6 +3350,10 @@ export class TaskService {
       return finalize('已达到最大回合，停止执行（可能需要你补充信息或换一种说法）。')
     }
 
+    if (apiMode === 'claude') {
+      if (mode !== 'text') pushLog('[Agent] Claude Messages API uses text tool protocol for compatibility', true)
+      return runText()
+    }
     if (mode === 'text') return runText()
     if (mode === 'native') return runNative()
 
@@ -2744,9 +3385,32 @@ export class TaskService {
         content:
           '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
       })
+      if (visualCatalog) messages.push({ role: 'system', content: visualCatalog })
+      if (visionSystemMsg) messages.push({ ...visionSystemMsg })
+      if (initialFallbackObservation && !mainVisionFallbackApplied) {
+        messages.push({
+          role: 'system',
+          content:
+            '以下是外挂视觉模型对用户本轮上传图片的客观观察；请由你按桌宠人设组织回复。\n' +
+            initialFallbackObservation,
+        })
+      }
       if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
-      messages.push({ role: 'user', content: effectiveAgentRequest })
+      const fallbackVisionParts =
+        !visionStripped && mainVisionArtifacts.length > 0
+          ? await imageUrlPartsFromLocalPaths(
+              mainVisionArtifacts.map((artifact) => artifact.path),
+              maxVisionImages,
+            )
+          : []
+      messages.push({
+        role: 'user',
+        content:
+          fallbackVisionParts.length > 0
+            ? [{ type: 'text', text: effectiveAgentRequest }, ...fallbackVisionParts]
+            : effectiveAgentRequest,
+      })
 
       if (executedCallOrder.length > 0) {
         messages.push({
@@ -2778,6 +3442,7 @@ export class TaskService {
 
         const idx = t.currentStepIndex
         const step = t.steps[idx]
+        const directRunId = `step-${step?.id || idx}`
         if (!step) {
           this.writeState((draft) => {
             const it = draft.tasks.find((x) => x.id === id)
@@ -2803,6 +3468,19 @@ export class TaskService {
           if (s.tool && !it.toolsUsed.includes(s.tool)) {
             it.toolsUsed = [...it.toolsUsed, s.tool].slice(0, 80)
           }
+          if (shouldRecordStepToolRun(s.tool)) {
+            const prev = Array.isArray(it.toolRuns) ? it.toolRuns.filter((r) => r.id !== directRunId) : []
+            it.toolRuns = [
+              ...prev,
+              {
+                id: directRunId,
+                toolName: s.tool,
+                status: 'running' as const,
+                inputPreview: clampText(s.input || '{}', s.tool === 'image.generate' ? 6000 : 500),
+                startedAt: s.startedAt ?? now(),
+              },
+            ].slice(0, 80)
+          }
         })
 
         await this.waitIfPaused(id)
@@ -2810,6 +3488,7 @@ export class TaskService {
 
         const toolInput = parseToolInput(step.input)
         const output = await this.runTool(step.tool, toolInput, t, rt)
+        const imagePaths = step.tool ? await this.resolveToolImagePaths(id, output, []) : []
 
         await this.waitIfPaused(id)
         if (rt.canceled) return
@@ -2823,6 +3502,23 @@ export class TaskService {
           s.endedAt = now()
           s.output = clampStepOutput(output || '完成')
           it.currentStepIndex += 1
+          if (shouldRecordStepToolRun(s.tool)) {
+            const prev = Array.isArray(it.toolRuns) ? it.toolRuns : []
+            const base = prev.find((r) => r.id === directRunId)
+            it.toolRuns = [
+              ...prev.filter((r) => r.id !== directRunId),
+              {
+                id: directRunId,
+                toolName: s.tool,
+                status: 'done' as const,
+                inputPreview: base?.inputPreview ?? clampText(s.input || '{}', s.tool === 'image.generate' ? 6000 : 500),
+                outputPreview: clampText(output, 800),
+                imagePaths: normalizeImagePathList(imagePaths, 8),
+                startedAt: base?.startedAt ?? s.startedAt ?? now(),
+                endedAt: now(),
+              },
+            ].slice(0, 80)
+          }
           it.updatedAt = now()
         })
       }
@@ -2841,11 +3537,29 @@ export class TaskService {
           s.status = 'failed'
           s.error = it.lastError
           s.endedAt = now()
+          if (shouldRecordStepToolRun(s.tool)) {
+            const runId = `step-${s.id || it.currentStepIndex}`
+            const prev = Array.isArray(it.toolRuns) ? it.toolRuns : []
+            const base = prev.find((r) => r.id === runId)
+            it.toolRuns = [
+              ...prev.filter((r) => r.id !== runId),
+              {
+                id: runId,
+                toolName: s.tool,
+                status: 'error' as const,
+                inputPreview: base?.inputPreview ?? clampText(s.input || '{}', s.tool === 'image.generate' ? 6000 : 500),
+                error: it.lastError,
+                startedAt: base?.startedAt ?? s.startedAt ?? now(),
+                endedAt: now(),
+              },
+            ].slice(0, 80)
+          }
         }
       })
     } finally {
       rt.cancelCurrent = undefined
       this.runtime.delete(id)
+      this.visualContextByTask.delete(id)
       this.kickScheduler()
     }
   }
@@ -2857,14 +3571,3 @@ export class TaskService {
     this.onChanged()
   }
 }
-    const toImageUrlParts = (images: Array<{ mimeType: string; data: string }>): Array<Record<string, unknown>> => {
-      const parts: Array<Record<string, unknown>> = []
-      for (const it of images) {
-        const mime = (it?.mimeType ?? '').trim() || 'image/png'
-        const raw = (it?.data ?? '').trim()
-        if (!raw) continue
-        const url = raw.startsWith('data:') ? raw : `data:${mime};base64,${raw}`
-        parts.push({ type: 'image_url', image_url: { url } })
-      }
-      return parts
-    }

@@ -14,6 +14,7 @@ import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, getAIService, type ChatMessage } from '../services/aiService'
 import { MarkdownMessage } from '../components/MarkdownMessage'
 import { stripToolProtocolDisplayArtifacts } from '../utils/toolProtocolDisplay'
+import { filterVisibleToolRuns, isAgentShellToolName } from '../utils/chatMessages'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
 type PopoverKind = 'menu' | 'history'
@@ -836,7 +837,8 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       const rawText = String((isTaskFinal(t) ? (t.finalReply ?? t.draftReply ?? t.lastError) : (t.draftReply ?? t.lastError ?? t.finalReply)) ?? '')
       const displayText = normalizeInterleavedTextSegment(rawText)
 
-      const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
+      // agent.run 壳 run 只是任务外壳，不是用户可感知的工具调用（兜旧存档/旧主进程写入的脏数据）
+      const runs = filterVisibleToolRuns(Array.isArray(t.toolRuns) ? t.toolRuns : [])
       const runIdsNow = runs.map((r) => String(r.id ?? '').trim()).filter(Boolean)
 
       let split = taskToolUseSplitRef.current.get(t.id) ?? { runIds: [], segments: [''], lastDisplay: '' }
@@ -1931,8 +1933,9 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       const t = tasksById.get(taskId)
       if (!t) return <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: ToolUse（任务未加载</div>
 
-      const runs = Array.isArray(t.toolRuns) ? t.toolRuns : []
-      const steps = Array.isArray(t.steps) ? t.steps : []
+      // agent.run 壳 run/step 不渲染为工具卡（旧存档里可能已写入）
+      const runs = filterVisibleToolRuns(Array.isArray(t.toolRuns) ? t.toolRuns : [])
+      const steps = (Array.isArray(t.steps) ? t.steps : []).filter((s) => !isAgentShellToolName((s as { tool?: unknown })?.tool))
 
       const renderRun = (r: (typeof runs)[number], idx: number) => {
         const progress = runs.length > 1 ? `${idx + 1}/${runs.length}` : ''
@@ -2045,9 +2048,11 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         )
       }
 
-      if (runId && runs.length > 0) {
+      if (runId) {
+        // runId 精确指向某一次真实工具调用；匹配不到时（例如旧存档里 agent.run 壳 run 的 block）
+        // 直接不渲染，避免 fallback 把全部 runs 重复渲染一遍。
         const idx = runs.findIndex((r) => String(r.id ?? '') === runId)
-        if (idx >= 0) return renderRun(runs[idx], idx)
+        return idx >= 0 ? renderRun(runs[idx], idx) : null
       }
 
       if (runs.length > 0) return <>{runs.map((r, idx) => renderRun(r, idx))}</>
@@ -2073,7 +2078,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
             ? (() => {
               const taskId = String(m.taskId ?? '').trim()
               const t = taskId ? tasksById.get(taskId) : null
-              const runs = Array.isArray(t?.toolRuns) ? (t?.toolRuns ?? []) : []
+              const runs = filterVisibleToolRuns(Array.isArray(t?.toolRuns) ? (t?.toolRuns ?? []) : [])
               if (runs.length === 0) return [{ type: 'text', text: String(m.content ?? '') }]
               return [{ type: 'text', text: String(m.content ?? '') }, { type: 'tool_use', taskId }]
             })()

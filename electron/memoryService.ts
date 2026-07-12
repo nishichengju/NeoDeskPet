@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { createHash, randomUUID } from 'node:crypto'
+import { Worker } from 'node:worker_threads'
+import type { VectorSearchHit, VectorSearchResponse } from './vectorSearchWorker'
 import type {
   AISettings,
   MemoryDeleteArgs,
@@ -388,11 +390,18 @@ function formatTs(ts: number): string {
 
 export class MemoryService {
   private db: DatabaseHandle
+  private dbPath: string
   private pendingTagRowids = new Set<number>()
   private pendingEmbeddingRowids = new Set<number>()
   private pendingKgRowids = new Set<number>()
   private embeddingCache = new Map<string, Float32Array>()
   private chatIngestRedirect = new Map<string, number>()
+  private vectorWorker: Worker | null = null
+  private vectorWorkerSeq = 0
+  private vectorWorkerPending = new Map<
+    number,
+    { resolve: (hits: VectorSearchHit[]) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+  >()
 
   constructor(userDataDir: string) {
     const require = createRequire(import.meta.url)
@@ -400,6 +409,7 @@ export class MemoryService {
     const Database = (mod.default ?? mod) as unknown as { new (file: string): DatabaseHandle }
     const dbPath = path.join(userDataDir, 'neodeskpet-memory.sqlite3')
     this.db = new Database(dbPath)
+    this.dbPath = dbPath
 
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('synchronous = NORMAL')
@@ -412,7 +422,67 @@ export class MemoryService {
   }
 
   close(): void {
+    this.disposeVectorWorker(new Error('memory service closed'))
     this.db.close()
+  }
+
+  private disposeVectorWorker(reason: Error): void {
+    const worker = this.vectorWorker
+    this.vectorWorker = null
+    for (const pending of this.vectorWorkerPending.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(reason)
+    }
+    this.vectorWorkerPending.clear()
+    if (worker) void worker.terminate()
+  }
+
+  private getVectorWorker(): Worker {
+    if (this.vectorWorker) return this.vectorWorker
+    const worker = new Worker(path.join(__dirname, 'vectorSearchWorker.js'), {
+      workerData: { dbPath: this.dbPath },
+    })
+    // 空闲 worker 不阻止应用退出
+    worker.unref()
+    worker.on('message', (msg: VectorSearchResponse) => {
+      const pending = this.vectorWorkerPending.get(msg.id)
+      if (!pending) return
+      this.vectorWorkerPending.delete(msg.id)
+      clearTimeout(pending.timer)
+      if ('error' in msg) pending.reject(new Error(msg.error))
+      else pending.resolve(msg.hits)
+    })
+    worker.on('error', (err) => {
+      if (this.vectorWorker === worker) this.disposeVectorWorker(err instanceof Error ? err : new Error(String(err)))
+    })
+    worker.on('exit', (code) => {
+      if (this.vectorWorker === worker) this.disposeVectorWorker(new Error(`vector worker exited (code ${code})`))
+    })
+    this.vectorWorker = worker
+    return worker
+  }
+
+  private vectorSearchInWorker(args: {
+    model: string
+    personaId: string
+    includeShared: boolean
+    scanLimit: number
+    minScore: number
+    topK: number
+    query: Float32Array
+  }): Promise<VectorSearchHit[]> {
+    const worker = this.getVectorWorker()
+    const id = ++this.vectorWorkerSeq
+    return new Promise<VectorSearchHit[]>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.vectorWorkerPending.delete(id)
+        // 超时大概率是 worker 卡死，丢弃实例，下次检索重新拉起
+        this.disposeVectorWorker(new Error('vector search timeout'))
+        reject(new Error('向量检索超时（15s）'))
+      }, 15000)
+      this.vectorWorkerPending.set(id, { resolve, reject, timer })
+      worker.postMessage({ id, ...args })
+    })
   }
 
   private rememberChatIngestRedirect(key: string, rowid: number): void {
@@ -992,22 +1062,32 @@ export class MemoryService {
     return out
   }
 
+  private maintenanceKick: (() => void) | null = null
+
+  /** 注册"有新索引工作入队"的通知回调（debounce 由调用方负责） */
+  setMaintenanceKick(cb: (() => void) | null): void {
+    this.maintenanceKick = cb
+  }
+
   private enqueueTagIndex(rowid: number): void {
     const id = clampInt(rowid, 0, 1, 2_000_000_000)
     if (id <= 0) return
     this.pendingTagRowids.add(id)
+    this.maintenanceKick?.()
   }
 
   private enqueueEmbeddingIndex(rowid: number): void {
     const id = clampInt(rowid, 0, 1, 2_000_000_000)
     if (id <= 0) return
     this.pendingEmbeddingRowids.add(id)
+    this.maintenanceKick?.()
   }
 
   private enqueueKgIndex(rowid: number): void {
     const id = clampInt(rowid, 0, 1, 2_000_000_000)
     if (id <= 0) return
     this.pendingKgRowids.add(id)
+    this.maintenanceKick?.()
   }
 
   private getMemoryByRowid(rowid: number): MemoryRecord | null {
@@ -3184,7 +3264,7 @@ export class MemoryService {
       const model = (memSettings.vectorEmbeddingModel ?? '').trim()
       const minScore = clampFloat(memSettings.vectorMinScore, 0.35, 0, 1)
       const topK = clampInt(memSettings.vectorTopK, 20, 1, 100)
-      const scanLimit = clampInt(memSettings.vectorScanLimit, 2000, 200, 200000)
+      const scanLimit = clampInt(memSettings.vectorScanLimit, 2000, 200, 10000)
 
       const useCustom = memSettings.vectorUseCustomAi ?? false
       const apiKey = (useCustom ? memSettings.vectorAiApiKey : aiSettings.apiKey) ?? ''
@@ -3218,52 +3298,45 @@ export class MemoryService {
               norm = Math.sqrt(norm) || 1
               for (let i = 0; i < q.length; i++) q[i] = q[i] / norm
 
-              const embedRows = this.db
-                .prepare(
-                  `
-                  SELECT
-                    m.rowid as rowid,
-                    m.role as role,
-                    m.content as content,
-                    m.created_at as createdAt,
-                    m.importance as importance,
-                    m.strength as strength,
-                    m.access_count as accessCount,
-                    m.last_accessed_at as lastAccessedAt,
-                    m.status as status,
-                    m.pinned as pinned,
-                    e.embedding as embedding
-                  FROM memory_embedding e
-                  JOIN memory m ON m.rowid = e.memory_rowid
-                  WHERE e.model = ?
-                    AND (
-                      m.persona_id = ?
-                      ${includeShared ? 'OR m.persona_id IS NULL' : ''}
-                    )
-                    AND COALESCE(m.status, 'active') <> 'deleted'
-                  ORDER BY m.pinned DESC, m.retention DESC, m.importance DESC, m.updated_at DESC
-                  LIMIT ?
-                  `,
-                )
-                .all(model, personaId, scanLimit) as Array<CandidateRow & { embedding: Buffer }>
+              // 余弦评分在 worker 线程进行（只扫 rowid+embedding），主进程仅按 topK rowid 回表
+              const hits = await this.vectorSearchInWorker({
+                model,
+                personaId,
+                includeShared,
+                scanLimit,
+                minScore,
+                topK,
+                query: q,
+              })
 
-              const scored: Array<CandidateRow & { sim: number }> = []
-              for (const r of embedRows) {
-                const buf = r.embedding
-                if (!buf || buf.byteLength < 8 * 4) continue
-                const dim = Math.floor(buf.byteLength / 4)
-                if (dim !== q.length) continue
-                const v = new Float32Array(buf.buffer, buf.byteOffset, dim)
-                let dot = 0
-                for (let i = 0; i < dim; i++) dot += q[i] * v[i]
-                if (!Number.isFinite(dot)) continue
-                if (dot < minScore) continue
-                scored.push({ ...r, sim: dot })
-              }
+              if (hits.length > 0) {
+                const placeholders = hits.map(() => '?').join(',')
+                const rows = this.db
+                  .prepare(
+                    `
+                    SELECT
+                      rowid as rowid,
+                      role as role,
+                      content as content,
+                      created_at as createdAt,
+                      importance as importance,
+                      strength as strength,
+                      access_count as accessCount,
+                      last_accessed_at as lastAccessedAt,
+                      status as status,
+                      pinned as pinned
+                    FROM memory
+                    WHERE rowid IN (${placeholders})
+                    `,
+                  )
+                  .all(...hits.map((h) => h.rowid)) as CandidateRow[]
 
-              scored.sort((a, b) => b.sim - a.sim || b.createdAt - a.createdAt || b.rowid - a.rowid)
-              for (const r of scored.slice(0, topK)) {
-                upsert(r, { vecRel: clampFloat(r.sim, 0, 0, 1) })
+                const byRowid = new Map(rows.map((r) => [r.rowid, r]))
+                for (const h of hits) {
+                  const row = byRowid.get(h.rowid)
+                  if (!row) continue
+                  upsert(row, { vecRel: clampFloat(h.sim, 0, 0, 1) })
+                }
               }
             } else {
               vectorError = 'embeddings 返回为空或维度过小'
