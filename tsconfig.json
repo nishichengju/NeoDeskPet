@@ -20,7 +20,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", "electron"],
+  "include": ["src", "electron", "tests"],
   "exclude": [
     "electron/rerankerService.ts",
     "electron/semanticGroupManager.ts",

@@ -1,8 +1,15 @@
 import { memo, useEffect, useMemo, useState, type ImgHTMLAttributes } from 'react'
-import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { splitThinkSegments } from '../utils/splitThinkSegments'
 import { getApi } from '../neoDeskPetApi'
+import {
+  applyMarkdownLocalImagePathCompat,
+  decodeLocalPathCompat,
+  isAbsoluteLocalPath,
+  markdownMediaUrlTransform,
+  toLocalMediaSrc,
+} from '../utils/markdownMedia'
 
 const localAttachmentUrlCache = new Map<string, string>()
 
@@ -17,62 +24,6 @@ function applyCjkMarkdownCompat(input: string): string {
     /(\*\*[^*\n]*?[)\]）】》」』〉〕】!?！？。，、；：:,.])\*\*(?=[\u4E00-\u9FFFA-Za-z0-9])/gu,
     '$1**&#8203;',
   )
-}
-
-function applyMarkdownLocalImagePathCompat(input: string): string {
-  const text = String(input ?? '')
-  if (!text.includes('![')) return text
-
-  // 兼容 `![alt](C:\path\to\img.png)`：
-  // Markdown 会把反斜杠当转义，导致 src 失真。这里在渲染前把 Windows 路径规范成正斜杠。
-  return text.replace(/(!\[[^\]]*]\()([^)]+)(\))/g, (_m, prefix: string, rawPath: string, suffix: string) => {
-    const dest = String(rawPath ?? '').trim()
-    if (!dest) return `${prefix}${rawPath}${suffix}`
-
-    // 已经是 URL / data / file 协议时不改
-    if (/^(https?:|data:|blob:|file:)/i.test(dest)) return `${prefix}${dest}${suffix}`
-
-    if (/^[a-zA-Z]:\\/.test(dest)) {
-      const normalized = dest.replace(/\\/g, '/').replace(/ /g, '%20')
-      return `${prefix}${normalized}${suffix}`
-    }
-
-    if (/^\\\\/.test(dest)) {
-      const normalized = dest.replace(/\\/g, '/').replace(/ /g, '%20')
-      return `${prefix}${normalized}${suffix}`
-    }
-
-    return `${prefix}${dest}${suffix}`
-  })
-}
-
-function decodeLocalPathCompat(raw: string): string {
-  const text = String(raw ?? '').trim()
-  if (!text) return ''
-  if (!/%[0-9A-Fa-f]{2}/.test(text)) return text
-  if (!isAbsoluteLocalPath(text)) return text
-  try {
-    return decodeURI(text)
-  } catch {
-    return text
-  }
-}
-
-function toLocalMediaSrc(mediaPath: string): string {
-  const p = String(mediaPath ?? '').trim()
-  if (!p) return ''
-  if (/^(https?:|file:|data:|blob:)/i.test(p)) return p
-  if (/^[a-zA-Z]:[\\/]/.test(p)) return `file:///${p.replace(/\\/g, '/')}`
-  if (p.startsWith('\\\\')) return `file:${p.replace(/\\/g, '/')}`
-  if (p.startsWith('/')) return `file://${p}`
-  return p
-}
-
-function isAbsoluteLocalPath(raw: string): boolean {
-  const p = String(raw ?? '').trim()
-  if (!p) return false
-  if (/^(https?:|file:|data:|blob:)/i.test(p)) return false
-  return /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') || p.startsWith('/')
 }
 
 type MarkdownImageProps = ImgHTMLAttributes<HTMLImageElement> & {
@@ -128,19 +79,6 @@ function MarkdownImage(props: MarkdownImageProps) {
   return <img {...rest} className={mergedClassName} src={finalSrc} alt={alt ?? ''} loading="lazy" />
 }
 
-function markdownUrlTransform(url: string): string {
-  const raw = String(url ?? '').trim()
-  if (!raw) return ''
-
-  // react-markdown 默认会把 `C:/...` 判定成不安全协议，导致 src 变成空字符串。
-  // 这里保留本地绝对路径，再交给 MarkdownImage 做本地文件 URL 映射。
-  if (/^[a-zA-Z]:[\\/]/.test(raw)) return raw.replace(/\\/g, '/')
-  if (/^\\\\/.test(raw)) return raw.replace(/\\/g, '/')
-  if (raw.startsWith('/') && !raw.startsWith('//')) return raw
-
-  return defaultUrlTransform(raw)
-}
-
 function MarkdownMessageInner(props: { text: string; className?: string }) {
   const normalizedText = applyMarkdownLocalImagePathCompat(applyCjkMarkdownCompat(props.text))
   const segments = splitThinkSegments(normalizedText)
@@ -166,7 +104,7 @@ function MarkdownMessageInner(props: { text: string; className?: string }) {
                   remarkPlugins={[remarkGfm]}
                   skipHtml
                   components={components}
-                  urlTransform={markdownUrlTransform}
+                  urlTransform={markdownMediaUrlTransform}
                 >
                   {seg.content}
                 </ReactMarkdown>
@@ -181,7 +119,7 @@ function MarkdownMessageInner(props: { text: string; className?: string }) {
             remarkPlugins={[remarkGfm]}
             skipHtml
             components={components}
-            urlTransform={markdownUrlTransform}
+            urlTransform={markdownMediaUrlTransform}
           >
             {seg.content}
           </ReactMarkdown>

@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：待审核，未授权实施
+- 状态：P0-0 已完成，等待下一阶段口令
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -100,6 +100,32 @@ flowchart TD
 
 - 本阶段原则上不改变运行时行为。
 - 如果测试依赖与 Electron/Vite 冲突，应先缩小到 Node 侧纯函数测试，不强行引入复杂 E2E 框架。
+
+### P0-0 实施记录（2026-07-13）
+
+- 已使用 Vitest 建立 `npm test` 和 `npm run test:watch`。
+- 已新增迁移选择、设置 normalize、媒体路径、IPC 权限、Markdown 本地路径和聊天消息处理测试。
+- 已新增 `npm run ui:baseline`，构建后自动生成以下默认尺寸截图：
+  - Chat：420 x 560
+  - Settings：420 x 520
+  - Memory：560 x 720
+  - Orb panel：560 x 720
+- 截图与布局报告输出到 `artifacts/ui-baseline/`，该目录不进入 Git。
+- P0-0 只建立边界与验证能力；迁移版本不一致的实际修复仍属于 P0-1。
+- Windows unpacked 打包已通过；验证命令临时关闭 EXE 签名/元数据编辑，以绕过当前机器缺少符号链接权限的问题，未修改项目打包配置。
+
+### 用户数据备份与恢复基线
+
+执行 P0-1、P0-2 或 P0-4 前必须完全退出 NeoDeskPet，并备份整个 Electron `app.getPath('userData')` 目录。最小备份范围包括：
+
+- `neodeskpet-settings.json`
+- `neodeskpet-chat.sqlite3` 及可能存在的 `-wal`、`-shm`
+- `neodeskpet-memory.sqlite3` 及可能存在的 `-wal`、`-shm`
+- `neodeskpet-tasks.json`
+- `chat-attachments/`
+- 任务输出、视频分析缓存和 debug 日志（按排障需要保留）
+
+备份必须写到 `userData` 目录之外，并使用带时间戳的独立目录或压缩包。恢复时保持应用关闭，先另存失败现场，再整体替换备份文件；不得只恢复 SQLite 主文件而遗漏同一时刻的 WAL/SHM。
 
 ## 5. P0-1：修复应用版本与配置迁移
 

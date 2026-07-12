@@ -637,7 +637,7 @@ function normalizeWorldBookSettings(value: unknown): WorldBookSettings {
   }
 }
 
-function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings {
+export function normalizeSettings(value: Partial<AppSettings> | undefined): AppSettings {
   const merged: AppSettings = { ...defaultSettings, ...(value ?? {}) } as AppSettings
 
   // Live2D mouse tracking defaults to enabled
