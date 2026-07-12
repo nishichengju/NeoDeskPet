@@ -25,6 +25,7 @@ const DEBUG_LOG_MAX_QUEUE_LINES = 2000
 const DEBUG_LOG_MAX_QUEUE_BYTES = 2 * 1024 * 1024
 const DEBUG_LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 const DEBUG_LOG_ROTATE_KEEP_FILES = 3
+const REDACTED_LOG_VALUE = '[REDACTED]'
 
 function now(): number {
   return Date.now()
@@ -76,6 +77,60 @@ function ensureInitialized(): void {
   if (!enabled) return
   ensureDir(baseDir)
   void cleanupRotatedLogFiles()
+}
+
+function isSensitiveLogKey(key: string, value: unknown): boolean {
+  const normalized = String(key ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (!normalized) return false
+  if (normalized.includes('apikey')) return true
+  if (normalized.includes('authorization')) return true
+  if (normalized.includes('password')) return true
+  if (normalized.includes('cookie')) return true
+  if (normalized.includes('secret')) return true
+  if (normalized.includes('credential')) return true
+  return typeof value === 'string' && normalized.includes('token')
+}
+
+function redactSensitiveText(raw: string): string {
+  return String(raw ?? '')
+    .replace(
+      /([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret)=)[^&#\s]*/gi,
+      `$1${REDACTED_LOG_VALUE}`,
+    )
+    .replace(
+      /((?:api[_-]?key|authorization|password|cookie|access[_-]?token|refresh[_-]?token|secret)\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?[^,;&\s]+/gi,
+      `$1${REDACTED_LOG_VALUE}`,
+    )
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED_LOG_VALUE}`)
+}
+
+export function redactSensitiveLogData(data: unknown): unknown {
+  const seen = new WeakMap<object, unknown>()
+
+  const visit = (value: unknown, key = ''): unknown => {
+    if (isSensitiveLogKey(key, value)) return REDACTED_LOG_VALUE
+    if (typeof value === 'string') return redactSensitiveText(value)
+    if (typeof value === 'number' || typeof value === 'boolean' || value == null) return value
+    if (Array.isArray(value)) {
+      const clone: unknown[] = []
+      seen.set(value, clone)
+      for (const item of value) clone.push(visit(item))
+      return clone
+    }
+    if (typeof value !== 'object') return String(value)
+
+    const existing = seen.get(value)
+    if (existing) return '[Circular]'
+
+    const clone: Record<string, unknown> = {}
+    seen.set(value, clone)
+    for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+      clone[entryKey] = visit(entryValue, entryKey)
+    }
+    return clone
+  }
+
+  return visit(data)
 }
 
 export function initDebugLog(opts: { userDataDir: string; enabled?: boolean; filePathOverride?: string }): void {
@@ -282,7 +337,7 @@ export function appendDebugLog(scope: string, event: string, data?: unknown): vo
     pid: process.pid,
     scope: scopeKey,
     event: String(event ?? '').trim() || 'unknown',
-    data,
+    data: redactSensitiveLogData(data),
   }
 
   try {

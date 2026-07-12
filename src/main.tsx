@@ -12,7 +12,3 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>,
 )
-
-window.neoDeskPet?.onSettingsChanged((settings) => {
-  console.log('[NeoDeskPet] settings changed', settings)
-})

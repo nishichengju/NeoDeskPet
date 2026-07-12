@@ -304,6 +304,13 @@ renderer: attachmentId / artifactId
 - 向非设置窗口返回脱敏配置，只保留 `hasApiKey`。
 - 设置页保存 Key 时使用独立 IPC，不通过设置广播回传明文。
 
+### P0-4A 实施进度（2026-07-13）
+
+- 已移除 renderer 启动入口对完整 settings 对象的控制台输出。
+- Debug log 已增加递归敏感字段脱敏，覆盖 `apiKey`、`authorization`、`password`、Cookie、secret、credential 和字符串 token；同时清洗 Bearer/Basic 凭证及 URL 查询参数中的密钥。
+- 数值型 token 用量（例如 `promptTokens`、`completion_tokens`）仍正常保留，便于排障和上下文统计。
+- 非设置窗口 settings 脱敏与独立密钥 IPC 仍需和主进程 AI 请求代理同步落地；当前 Chat 仍直接执行流式模型请求，提前移除 Key 会破坏聊天功能。
+
 ### P0-4B：完整改造
 
 - 使用 Electron `safeStorage` 加密密钥。
