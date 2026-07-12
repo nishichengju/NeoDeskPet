@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, screen } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen } from 'electron'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -6,7 +6,8 @@ import { createReadStream } from 'node:fs'
 import * as http from 'node:http'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
-import { getSettings, setSettings } from './store'
+import { getSettings, initializeSettingsStore, setSettings } from './store'
+import { SettingsMigrationProtectionError } from './settingsMigrationSafety'
 import { createTray } from './tray'
 import { WindowManager } from './windowManager'
 import { setWindowManagerInstance } from './runtimeRefs'
@@ -197,6 +198,25 @@ function extractModelIdsFromResponse(payload: unknown): string[] {
 }
 if (!app.requestSingleInstanceLock()) {
   app.quit()
+} else {
+  try {
+    const settingsInitialization = initializeSettingsStore({
+      userDataDir: app.getPath('userData'),
+      targetVersion: app.getVersion(),
+    })
+    if (settingsInitialization.backupPath) {
+      console.info(`[Store] user data backup created at ${settingsInitialization.backupPath}`)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const backupPath = error instanceof SettingsMigrationProtectionError ? error.backupPath : null
+    const recovery = backupPath
+      ? `\n\n原始数据已保留，完整备份位于：\n${backupPath}`
+      : '\n\n程序未改写原始配置，请检查安装版本或配置文件。'
+    dialog.showErrorBox('NeoDeskPet 配置升级失败', `${message}${recovery}`)
+    app.exit(1)
+    throw error
+  }
 }
 
 const windowManager = new WindowManager({

@@ -1,4 +1,7 @@
 import Store from 'electron-store'
+import { randomUUID } from 'node:crypto'
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import type {
   AISettings,
   AIApiMode,
@@ -30,6 +33,12 @@ import {
   normalizeThinkingEffortLegacy,
   resolveReasoningUiState,
 } from './reasoningConfig'
+import { compareExactSemver, selectPendingMigrationVersions } from './settingsMigrationPlan'
+import {
+  SETTINGS_FILE_NAME,
+  runProtectedSettingsInitialization,
+  type SettingsMigrationAssessment,
+} from './settingsMigrationSafety'
 
 const defaultAISettings: AISettings = {
   // OpenAI compatible API settings
@@ -507,6 +516,10 @@ const defaultSettings: AppSettings = {
   asr: defaultAsrSettings,
 }
 
+export function createDefaultSettings(): AppSettings {
+  return structuredClone(defaultSettings)
+}
+
 function normalizeAiProfiles(value: unknown): AIProfile[] {
   const list = Array.isArray(value) ? value : []
   const out: AIProfile[] = []
@@ -801,51 +814,51 @@ export function normalizeSettings(value: Partial<AppSettings> | undefined): AppS
   return merged
 }
 
-function safeJsonDeserialize(raw: string): AppSettings {
+export function deserializeSettings(raw: string): AppSettings {
   const cleaned = String(raw ?? '').replace(/^\uFEFF/, '')
-  try {
-    return JSON.parse(cleaned) as AppSettings
-  } catch (err) {
-    // JSON 解析失败时回退 defaults，避免启动阶段崩溃
-    console.error('[Store] invalid JSON in neodeskpet-settings, fallback to defaults:', err)
-    return {} as AppSettings
-  }
+  return JSON.parse(cleaned) as AppSettings
 }
 
-const store = new Store<AppSettings>({
-  name: 'neodeskpet-settings',
-  defaults: defaultSettings,
-  clearInvalidConfig: true,
-  deserialize: safeJsonDeserialize,
-  // Migration: handle old AI settings format
-  migrations: {
+type SettingsMigrationStore = {
+  get: (key: string) => unknown
+  set: (key: string, value: unknown) => void
+}
+
+export const settingsMigrations: Record<string, (store: SettingsMigrationStore) => void> = {
     '0.2.0': (store) => {
       // Migrate from old multi-provider format to new unified format
       const oldAi = store.get('ai') as Record<string, unknown> | undefined
       if (oldAi && 'provider' in oldAi) {
+        const stringOr = (key: string, fallback: string) =>
+          typeof oldAi[key] === 'string' ? (oldAi[key] as string) : fallback
+        const numberOr = (key: string, fallback: number) =>
+          typeof oldAi[key] === 'number' && Number.isFinite(oldAi[key]) ? (oldAi[key] as number) : fallback
+        const booleanOr = (key: string, fallback: boolean) =>
+          typeof oldAi[key] === 'boolean' ? (oldAi[key] as boolean) : fallback
+        const enableVision = booleanOr('enableVision', defaultAISettings.enableVision)
         // Old format detected, migrate to new format
         const newAi: AISettings = {
           apiMode: 'openai-compatible',
-          apiKey: (oldAi.openaiApiKey as string) || '',
-          baseUrl: (oldAi.openaiBaseUrl as string) || 'https://api.openai.com/v1',
-          model: (oldAi.openaiModel as string) || 'gpt-4o-mini',
-          temperature: (oldAi.temperature as number) || 0.7,
-          maxTokens: 64000,
-          maxContextTokens: 128000,
+          apiKey: stringOr('openaiApiKey', defaultAISettings.apiKey),
+          baseUrl: stringOr('openaiBaseUrl', defaultAISettings.baseUrl),
+          model: stringOr('openaiModel', defaultAISettings.model),
+          temperature: numberOr('temperature', defaultAISettings.temperature),
+          maxTokens: numberOr('maxTokens', defaultAISettings.maxTokens),
+          maxContextTokens: numberOr('maxContextTokens', defaultAISettings.maxContextTokens),
           thinkingEffort: 'disabled',
           thinkingProvider: 'auto',
           openaiReasoningEffort: 'disabled',
           claudeThinkingEffort: 'disabled',
           geminiThinkingEffort: 'disabled',
-          systemPrompt: (oldAi.systemPrompt as string) || defaultAISettings.systemPrompt,
-          enableVision: false,
-          visionRoutingMode: 'off',
+          systemPrompt: stringOr('systemPrompt', defaultAISettings.systemPrompt),
+          enableVision,
+          visionRoutingMode: enableVision ? 'auto' : 'off',
           visionCapability: 'auto',
           visionFallbackProfileId: '',
           visionFallbackModel: '',
           visionFallbackOnTransient: true,
           visionMaxImagesPerLook: 4,
-          enableChatStreaming: false,
+          enableChatStreaming: booleanOr('enableChatStreaming', defaultAISettings.enableChatStreaming),
         }
         store.set('ai', newAi)
       }
@@ -1127,22 +1140,179 @@ const store = new Store<AppSettings>({
       if (typeof tts.playbackRegex !== 'string') store.set('tts.playbackRegex', defaultTtsSettings.playbackRegex)
       if (typeof tts.playbackRegexFlags !== 'string') store.set('tts.playbackRegexFlags', defaultTtsSettings.playbackRegexFlags)
     },
-  },
-})
+}
+
+export const SETTINGS_MIGRATION_VERSIONS = Object.freeze(Object.keys(settingsMigrations).sort(compareExactSemver))
+
+type PersistedSettings = AppSettings & {
+  __internal__: {
+    migrations: {
+      version: string
+    }
+  }
+}
+
+class InMemorySettingsMigrationStore implements SettingsMigrationStore {
+  private readonly value: Record<string, unknown>
+
+  constructor(value: Record<string, unknown>) {
+    this.value = structuredClone(value)
+  }
+
+  get(key: string): unknown {
+    return key.split('.').reduce<unknown>((current, part) => {
+      if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined
+      return (current as Record<string, unknown>)[part]
+    }, this.value)
+  }
+
+  set(key: string, value: unknown): void {
+    const parts = key.split('.')
+    let current = this.value
+    for (const part of parts.slice(0, -1)) {
+      const next = current[part]
+      if (!next || typeof next !== 'object' || Array.isArray(next)) current[part] = {}
+      current = current[part] as Record<string, unknown>
+    }
+    current[parts.at(-1) ?? key] = structuredClone(value)
+  }
+
+  toObject(): Record<string, unknown> {
+    return structuredClone(this.value)
+  }
+}
+
+export function applySettingsMigrations(options: {
+  value: Record<string, unknown>
+  previousVersion: string
+  targetVersion: string
+  onMigration?: (version: string) => void
+}): { settings: PersistedSettings; appliedVersions: string[] } {
+  const migrationStore = new InMemorySettingsMigrationStore(options.value)
+  const appliedVersions = selectPendingMigrationVersions(
+    SETTINGS_MIGRATION_VERSIONS,
+    options.previousVersion,
+    options.targetVersion,
+  )
+
+  for (const version of appliedVersions) {
+    settingsMigrations[version]?.(migrationStore)
+    options.onMigration?.(version)
+  }
+
+  const migratedValue = migrationStore.toObject()
+  const normalized = normalizeSettings(migratedValue as Partial<AppSettings>)
+  const existingInternal =
+    migratedValue.__internal__ && typeof migratedValue.__internal__ === 'object' && !Array.isArray(migratedValue.__internal__)
+      ? (migratedValue.__internal__ as Record<string, unknown>)
+      : {}
+  const existingMigrationMetadata =
+    existingInternal.migrations &&
+    typeof existingInternal.migrations === 'object' &&
+    !Array.isArray(existingInternal.migrations)
+      ? (existingInternal.migrations as Record<string, unknown>)
+      : {}
+
+  return {
+    settings: {
+      ...normalized,
+      __internal__: {
+        ...existingInternal,
+        migrations: {
+          ...existingMigrationMetadata,
+          version: options.targetVersion,
+        },
+      },
+    } as PersistedSettings,
+    appliedVersions,
+  }
+}
+
+function prepareSettingsFile(userDataDir: string, assessment: SettingsMigrationAssessment): void {
+  if (assessment.status === 'current') return
+  if (assessment.status === 'invalid') throw new SyntaxError(`Invalid settings file: ${assessment.error}`)
+  if (assessment.status === 'downgrade') throw new Error('Downgrade must be rejected before settings preparation')
+
+  const settingsPath = path.join(userDataDir, SETTINGS_FILE_NAME)
+  const rawValue =
+    assessment.status === 'fresh'
+      ? {}
+      : (deserializeSettings(readFileSync(settingsPath, 'utf8')) as unknown as Record<string, unknown>)
+  const previousVersion = assessment.previousVersion ?? '0.0.0'
+  const migrated = applySettingsMigrations({
+    value: rawValue,
+    previousVersion,
+    targetVersion: assessment.targetVersion,
+    onMigration: (version) => console.info(`[Store] migrating settings to ${version}`),
+  })
+  const temporaryPath = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`
+  writeFileSync(temporaryPath, JSON.stringify(migrated.settings, null, '\t'), 'utf8')
+  renameSync(temporaryPath, settingsPath)
+}
+
+export type SettingsStoreInitializationResult = {
+  assessment: SettingsMigrationAssessment
+  backupPath: string | null
+}
+
+let store: Store<AppSettings> | null = null
+let initializationResult: SettingsStoreInitializationResult | null = null
+
+export function initializeSettingsStore(options: {
+  userDataDir: string
+  targetVersion: string
+}): SettingsStoreInitializationResult {
+  if (store && initializationResult) return initializationResult
+
+  const latestMigrationVersion = SETTINGS_MIGRATION_VERSIONS.at(-1)
+  if (!latestMigrationVersion || compareExactSemver(options.targetVersion, latestMigrationVersion) !== 0) {
+    throw new Error(
+      `Application version ${options.targetVersion} must match latest settings migration ${latestMigrationVersion ?? 'missing'}`,
+    )
+  }
+
+  const protectedInitialization = runProtectedSettingsInitialization({
+    userDataDir: options.userDataDir,
+    targetVersion: options.targetVersion,
+    initialize: (assessment) => {
+      prepareSettingsFile(options.userDataDir, assessment)
+      return new Store<AppSettings>({
+        name: 'neodeskpet-settings',
+        cwd: options.userDataDir,
+        defaults: createDefaultSettings(),
+        clearInvalidConfig: false,
+        deserialize: deserializeSettings,
+      })
+    },
+  })
+
+  store = protectedInitialization.value
+  initializationResult = {
+    assessment: protectedInitialization.assessment,
+    backupPath: protectedInitialization.backup?.directory ?? null,
+  }
+  return initializationResult
+}
+
+function requireStore(): Store<AppSettings> {
+  if (!store) throw new Error('Settings store must be initialized before use')
+  return store
+}
 
 // getSettings 的高频调用方（点击穿透轮询、鼠标跟踪泵等）共享同一份缓存对象，
 // 调用方必须把返回值当作只读；所有写入都必须走 setSettings 以刷新缓存。
 let settingsCache: AppSettings | null = null
 
 export function getSettings(): AppSettings {
-  if (!settingsCache) settingsCache = normalizeSettings(store.store)
+  if (!settingsCache) settingsCache = normalizeSettings(requireStore().store)
   return settingsCache
 }
 
 export function setSettings(next: Partial<AppSettings>): AppSettings {
   const current = getSettings()
   const merged: AppSettings = normalizeSettings({ ...current, ...next })
-  store.store = merged
-  settingsCache = normalizeSettings(store.store)
+  const currentStore = requireStore()
+  currentStore.store = merged
+  settingsCache = normalizeSettings(currentStore.store)
   return settingsCache
 }

@@ -23,13 +23,14 @@ describe('settings migration planning', () => {
     expect(selectPendingMigrationVersions(versions, '0.3.0', '0.10.0')).toEqual(['0.10.0'])
   })
 
-  it('records migrations currently deferred by the application version', () => {
+  it('keeps the application version aligned with the latest migration', () => {
     const versions = readDeclaredMigrationVersions()
     const deferred = selectDeferredMigrationVersions(versions, packageJson.version)
 
     expect(versions[0]).toBe('0.2.0')
     expect(versions.at(-1)).toBe('0.21.0')
-    expect(selectPendingMigrationVersions(versions, '0.0.0', packageJson.version)).toEqual([])
-    expect(deferred).toEqual(versions)
+    expect(packageJson.version).toBe(versions.at(-1))
+    expect(selectPendingMigrationVersions(versions, '0.0.0', packageJson.version)).toEqual(versions)
+    expect(deferred).toEqual([])
   })
 })
