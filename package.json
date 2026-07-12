@@ -15,11 +15,13 @@
     "test:watch": "vitest",
     "ui:baseline": "vite build && node scripts/capture-ui-baseline.mjs",
     "media:smoke": "node scripts/verify-local-media.mjs",
+    "ipc:smoke": "node scripts/verify-ipc-security.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@pixi/unsafe-eval": "^6.5.10",
     "better-sqlite3": "^12.5.0",
     "electron-store": "^10.0.0",
     "pixi-live2d-display": "0.4.0",

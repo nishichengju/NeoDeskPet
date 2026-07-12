@@ -47,21 +47,29 @@ try {
   app = await electron.launch({ executablePath, args, timeout: 30_000 })
   const firstWindow = await app.firstWindow({ timeout: 30_000 })
   await firstWindow.waitForFunction(() => Boolean(window.neoDeskPet), null, { timeout: 30_000 })
-  await firstWindow.evaluate(() => {
+  const chatWindowPromise = app.waitForEvent('window', { timeout: 30_000 })
+  await firstWindow.evaluate(() => window.neoDeskPet.openChat())
+  const chatWindow = await chatWindowPromise
+  await chatWindow.waitForFunction(
+    () => window.location.hash === '#/chat' && Boolean(window.neoDeskPet?.getChatAttachmentUrl),
+    null,
+    { timeout: 30_000 },
+  )
+  await chatWindow.evaluate(() => {
     const input = document.createElement('input')
     input.id = 'local-media-smoke-file'
     input.type = 'file'
     document.body.appendChild(input)
   })
-  await firstWindow.locator('#local-media-smoke-file').setInputFiles(outsideImage)
-  const selectedFileResult = await firstWindow.evaluate(async () => {
+  await chatWindow.locator('#local-media-smoke-file').setInputFiles(outsideImage)
+  const selectedFileResult = await chatWindow.evaluate(async () => {
     const input = document.querySelector('#local-media-smoke-file')
     const file = input?.files?.[0]
     if (!file) throw new Error('Playwright did not populate the selected file')
     return window.neoDeskPet.saveChatAttachmentFile(file, 'image', file.name)
   })
 
-  const ipcResult = await firstWindow.evaluate(
+  const ipcResult = await chatWindow.evaluate(
     async ({ imagePath, videoPath, outsidePath }) => {
       const api = window.neoDeskPet
       const image = await api.getChatAttachmentUrl(imagePath)

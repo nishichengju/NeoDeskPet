@@ -41,6 +41,21 @@ const modelMetadataCache = new Map<string, Partial<Live2DModelInfo>>()
 
 export const defaultModelJsonUrl = '/live2d/Haru/Haru.model3.json'
 
+export function resolveLive2dModelUrl(modelJsonUrl: string, baseUrl?: string): string {
+  const raw = String(modelJsonUrl ?? '').trim()
+  if (!raw) return raw
+  if (/^(?:https?:|data:|blob:)/i.test(raw)) return raw
+
+  const currentBase =
+    baseUrl ?? (typeof window !== 'undefined' && window.location?.href ? window.location.href : 'http://localhost/')
+  try {
+    const documentBase = new URL('.', currentBase)
+    return new URL(raw.replace(/^\/+/, ''), documentBase).toString()
+  } catch {
+    return raw
+  }
+}
+
 /**
  * Convert ScannedModel to Live2DModelInfo
  */
@@ -102,13 +117,14 @@ export function getDefaultModel(): Live2DModelInfo | undefined {
  * Parse model3.json to extract expressions and motions
  */
 export async function parseModelMetadata(modelJsonUrl: string): Promise<Partial<Live2DModelInfo>> {
+  const resolvedModelJsonUrl = resolveLive2dModelUrl(modelJsonUrl)
   // Check cache first
-  if (modelMetadataCache.has(modelJsonUrl)) {
-    return modelMetadataCache.get(modelJsonUrl)!
+  if (modelMetadataCache.has(resolvedModelJsonUrl)) {
+    return modelMetadataCache.get(resolvedModelJsonUrl)!
   }
 
   try {
-    const response = await fetch(modelJsonUrl)
+    const response = await fetch(resolvedModelJsonUrl)
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`)
     }
@@ -151,7 +167,7 @@ export async function parseModelMetadata(modelJsonUrl: string): Promise<Partial<
     }
 
     // Cache the result
-    modelMetadataCache.set(modelJsonUrl, metadata)
+    modelMetadataCache.set(resolvedModelJsonUrl, metadata)
 
     return metadata
   } catch (err) {

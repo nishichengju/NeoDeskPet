@@ -1,7 +1,8 @@
-import { BrowserWindow, screen } from 'electron'
+import { BrowserWindow, screen, shell } from 'electron'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { DisplayMode, OrbUiState, WindowBounds, WindowType } from './types'
+import { isTrustedApplicationUrl } from './ipcPermissions'
 import { getSettings, setSettings } from './store'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -123,6 +124,10 @@ function devUrlWithHash(devUrl: string, windowType: WindowType): string {
   return `${normalized}#/${windowType}`
 }
 
+function windowTypeArgument(windowType: WindowType): string {
+  return `--neodeskpet-window-type=${windowType}`
+}
+
 export class WindowManager {
   private readonly deps: CreateWindowDeps
   private petWindow: BrowserWindow | null = null
@@ -131,6 +136,7 @@ export class WindowManager {
   private memoryWindow: BrowserWindow | null = null
   private orbWindow: BrowserWindow | null = null
   private orbMenuWindow: BrowserWindow | null = null
+  private readonly trustedWebContents = new Map<number, WindowType>()
   private appQuitting = false
 
   private petDragging = false
@@ -181,6 +187,20 @@ export class WindowManager {
     return this.memoryWindow && !this.memoryWindow.isDestroyed() ? this.memoryWindow : null
   }
 
+  getWindowTypeByWebContentsId(webContentsId: number): WindowType | null {
+    return this.trustedWebContents.get(webContentsId) ?? null
+  }
+
+  getExpectedWindowUrl(type: WindowType): string {
+    if (this.deps.rendererDevUrl) return devUrlWithHash(this.deps.rendererDevUrl, type)
+    const rendererEntry = pathToFileURL(path.join(this.deps.rendererDistDir, 'index.html')).toString()
+    return `${rendererEntry}#/${type}`
+  }
+
+  isTrustedWindowUrl(rawUrl: string, type: WindowType): boolean {
+    return isTrustedApplicationUrl(rawUrl, this.getExpectedWindowUrl(type))
+  }
+
   ensurePetWindow(): BrowserWindow {
     if (this.petWindow && !this.petWindow.isDestroyed()) return this.petWindow
 
@@ -200,6 +220,10 @@ export class WindowManager {
       maximizable: false,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        additionalArguments: [windowTypeArgument('pet')],
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
         backgroundThrottling: false,
         autoplayPolicy: 'no-user-gesture-required',
       },
@@ -278,6 +302,10 @@ export class WindowManager {
       autoHideMenuBar: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        additionalArguments: [windowTypeArgument('chat')],
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
         backgroundThrottling: false,
         autoplayPolicy: 'no-user-gesture-required',
       },
@@ -334,6 +362,10 @@ export class WindowManager {
       autoHideMenuBar: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        additionalArguments: [windowTypeArgument('settings')],
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
       },
     })
 
@@ -364,6 +396,10 @@ export class WindowManager {
       autoHideMenuBar: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        additionalArguments: [windowTypeArgument('memory')],
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
       },
     })
 
@@ -419,6 +455,10 @@ export class WindowManager {
       maximizable: false,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        additionalArguments: [windowTypeArgument('orb')],
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
         // Orb 不承载音频/ASR 链路（实时逻辑在 chat/pet renderer），隐藏时允许默认后台节流
       },
     })
@@ -480,6 +520,10 @@ export class WindowManager {
       maximizable: false,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
+        additionalArguments: [windowTypeArgument('orb-menu')],
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
       },
     })
 
@@ -1087,11 +1131,43 @@ export class WindowManager {
   }
 
   private loadWindow(win: BrowserWindow, type: WindowType): void {
-    if (this.deps.rendererDevUrl) {
-      win.loadURL(devUrlWithHash(this.deps.rendererDevUrl, type))
-      return
+    this.registerTrustedWindow(win, type)
+    void win.loadURL(this.getExpectedWindowUrl(type))
+  }
+
+  private registerTrustedWindow(win: BrowserWindow, type: WindowType): void {
+    const webContentsId = win.webContents.id
+    this.trustedWebContents.set(webContentsId, type)
+
+    const openExternal = (rawUrl: string) => {
+      try {
+        const url = new URL(rawUrl)
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return
+        void shell.openExternal(url.toString()).catch((error) => {
+          console.warn('[WindowSecurity] Failed to open external URL:', error)
+        })
+      } catch {
+        // Invalid URLs are denied below.
+      }
     }
 
-    win.loadFile(path.join(this.deps.rendererDistDir, 'index.html'), { hash: `/${type}` })
+    const guardNavigation = (event: Electron.Event, targetUrl: string) => {
+      if (this.isTrustedWindowUrl(targetUrl, type)) return
+      event.preventDefault()
+      openExternal(targetUrl)
+      console.warn(`[WindowSecurity] Blocked navigation: type=${type}; url=${targetUrl}`)
+    }
+
+    win.webContents.on('will-navigate', guardNavigation)
+    win.webContents.on('will-redirect', guardNavigation)
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      openExternal(url)
+      console.warn(`[WindowSecurity] Blocked child window: type=${type}; url=${url}`)
+      return { action: 'deny' }
+    })
+
+    win.webContents.once('destroyed', () => {
+      this.trustedWebContents.delete(webContentsId)
+    })
   }
 }

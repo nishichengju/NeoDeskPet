@@ -54,6 +54,7 @@ import type {
   LocalMediaDataUrlResult,
 } from './types'
 import type { TtsOptions } from './ttsOptions'
+import { parsePreloadWindowType, pickPreloadApi } from './preloadPermissions'
 
 export type SettingsChangeListener = (settings: AppSettings) => void
 export type Live2DExpressionListener = (expressionName: string) => void
@@ -76,7 +77,7 @@ export type TtsUtteranceFailedListener = (payload: TtsUtteranceFailedPayload) =>
 export type TtsStopAllListener = () => void
 export type TasksChangedListener = (payload: TaskListResult) => void
 
-contextBridge.exposeInMainWorld('neoDeskPet', {
+const neoDeskPetApi = {
   // Debug log：用于复现后回放定位“消息回退/工具卡堆叠”等问题
   getDebugLogPath: (): Promise<string> => ipcRenderer.invoke('debug:getPath'),
   clearDebugLog: (): Promise<{ ok: true; path: string }> => ipcRenderer.invoke('debug:clear'),
@@ -488,10 +489,10 @@ contextBridge.exposeInMainWorld('neoDeskPet', {
     ipcRenderer.on('tts:httpStreamError', handler)
     return () => ipcRenderer.off('tts:httpStreamError', handler)
   },
-})
+}
 
 // 单独暴露“记忆 API”，方便未来做模块化/插件化（只包含记忆相关能力）
-contextBridge.exposeInMainWorld('neoDeskPetMemory', {
+const neoDeskPetMemoryApi = {
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   setMemorySettings: (memory: Partial<MemorySettings>): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:setMemorySettings', memory),
@@ -538,4 +539,12 @@ contextBridge.exposeInMainWorld('neoDeskPetMemory', {
   deleteManyMemory: (args: MemoryDeleteManyArgs): Promise<{ deleted: number }> => ipcRenderer.invoke('memory:deleteMany', args),
   deleteMemoryByFilter: (args: MemoryDeleteByFilterArgs): Promise<{ deleted: number }> =>
     ipcRenderer.invoke('memory:deleteByFilter', args),
-})
+}
+
+const preloadWindowType = parsePreloadWindowType(process.argv)
+if (preloadWindowType) {
+  contextBridge.exposeInMainWorld('neoDeskPet', pickPreloadApi(neoDeskPetApi, preloadWindowType))
+  if (preloadWindowType === 'memory') {
+    contextBridge.exposeInMainWorld('neoDeskPetMemory', pickPreloadApi(neoDeskPetMemoryApi, preloadWindowType))
+  }
+}

@@ -1,7 +1,7 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import * as PIXI from 'pixi.js'
 import { Live2DModel } from 'pixi-live2d-display'
-import { defaultModelJsonUrl } from './live2dModels'
+import { defaultModelJsonUrl, resolveLive2dModelUrl } from './live2dModels'
 import {
   createLive2dParamAccessor,
   createLive2dParamScriptEngine,
@@ -95,7 +95,10 @@ export function Live2DView(props: Props) {
     idleSwayEnabledRef.current = idleSwayEnabled !== false
   }, [idleSwayEnabled])
 
-  const selectedModelUrl = useMemo(() => modelJsonUrl ?? defaultModelJsonUrl, [modelJsonUrl])
+  const selectedModelUrl = useMemo(
+    () => resolveLive2dModelUrl(modelJsonUrl ?? defaultModelJsonUrl),
+    [modelJsonUrl],
+  )
 
   useEffect(() => {
     if (!containerRef.current) return

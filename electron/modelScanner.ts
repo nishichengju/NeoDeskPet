@@ -11,12 +11,11 @@ import type { ScannedModel } from './types'
 /**
  * Get the live2d directory path
  * In development: public/live2d
- * In production: resources/app.asar.unpacked/dist/live2d or similar
+ * In production: app.asar/dist/live2d (Electron fs APIs understand ASAR paths)
  */
 function getLive2dDir(): string {
   if (app.isPackaged) {
-    // Production: look in the app resources
-    return path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'live2d')
+    return path.join(app.getAppPath(), 'dist', 'live2d')
   } else {
     // Development: look in public folder
     return path.join(app.getAppPath(), 'public', 'live2d')

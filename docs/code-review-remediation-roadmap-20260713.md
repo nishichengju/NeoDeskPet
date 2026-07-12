@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P0-2 已完成，下一阶段为 P0-3
+- 状态：P0-3 已完成，下一阶段为 P0-4
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -274,6 +274,19 @@ renderer: attachmentId / artifactId
 - 外部链接不会在带 preload 的 Electron 子窗口中打开。
 - 非法 sender 调用会返回统一错误并记录安全日志。
 - 正常的 Pet、Chat、Settings、Memory 和 Orb 工作流不受影响。
+
+### P0-3 实施记录（2026-07-13）
+
+- 已为 Pet、Chat、Settings、Memory、Orb 和 Orb Menu 建立可信 `webContents.id -> WindowType` 注册表，窗口销毁时同步撤销身份。
+- 118 个 `ipcMain.handle/on` 入口已全部改由统一包装器注册；每次调用都会校验已登记窗口、主 frame、frame URL、当前 webContents URL 和通道白名单，非法调用统一返回 `IpcSecurityError` 并写入安全日志。
+- 已建立完整 IPC 权限矩阵和覆盖检查；测试会扫描 `electron/main.ts`，阻止新增未声明通道、重复通道或绕过统一包装器的直接注册。
+- preload 会读取主进程注入的窗口类型参数，并按 Pet、Chat、Settings、Memory、Orb、Orb Menu 分别裁剪 API；测试会扫描各窗口源码，防止正常工作流所需方法被遗漏。
+- 所有窗口已显式启用 `contextIsolation`、关闭 `nodeIntegration` 并启用 renderer sandbox；未知窗口参数不再暴露 NeoDeskPet API。
+- 已设置 `will-navigate`、`will-redirect` 和 `setWindowOpenHandler`：非应用导航被阻止，HTTP/HTTPS 外链交给系统浏览器，Electron 子窗口始终拒绝创建。
+- 已增加严格 CSP；Pixi 通过 `@pixi/unsafe-eval@6.5.10` 的无动态代码生成兼容实现运行，不需要在 CSP 中放开 `'unsafe-eval'`。
+- 打包验证同时修复了 Live2D 根路径在 `file://` 环境解析到磁盘根目录、生产模型扫描指向不存在的 `app.asar.unpacked` 等问题；默认模型可在 ASAR 包内正常加载。
+- `npm test`、`npm run lint`、`npx tsc --noEmit`、Vite/Electron/preload 构建、Windows unpacked 打包、`npm run media:smoke` 和 `npm run ui:baseline` 均通过。
+- 新增 `npm run ipc:smoke`：真实启动打包后的 Electron，验证五类主窗口 API 表、无运行时错误、路由伪装拒绝、非法导航阻止和子窗口阻止。
 
 ## 8. P0-4：密钥存储与网络请求边界
 

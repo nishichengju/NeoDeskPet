@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  Menu,
+  screen,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
+} from 'electron'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -89,6 +99,12 @@ import type {
 import { MemoryService } from './memoryService'
 import { McpManager } from './mcpManager'
 import { appendDebugLog, clearDebugLog, getDebugLogPath, initDebugLog, isDebugLogEnabled } from './debugLog'
+import {
+  assertTrustedIpcSender,
+  getIpcWindowPermission,
+  IpcSecurityError,
+  type IpcChannel,
+} from './ipcPermissions'
 
 // Keep renderer active when windows are occluded to avoid audio/link throttling.
 // These switches must be applied before app is ready.
@@ -841,38 +857,103 @@ function broadcastMcpChanged(payload?: McpStateSnapshot) {
   }
 }
 
+type TrustedIpcEvent = IpcMainInvokeEvent | IpcMainEvent
+
+function assertIpcEventTrusted(channel: IpcChannel, event: TrustedIpcEvent): void {
+  const senderWindowType = windowManager.getWindowTypeByWebContentsId(event.sender.id)
+  const senderFrame = event.senderFrame
+  const frameUrl = senderFrame?.url ?? ''
+  const webContentsUrl = event.sender.getURL()
+
+  try {
+    assertTrustedIpcSender({
+      channel,
+      senderWindowType,
+      allowed: getIpcWindowPermission(channel),
+      isMainFrame: senderFrame != null && senderFrame === event.sender.mainFrame,
+      isFrameUrlTrusted: senderWindowType != null && windowManager.isTrustedWindowUrl(frameUrl, senderWindowType),
+      isWebContentsUrlTrusted:
+        senderWindowType != null && windowManager.isTrustedWindowUrl(webContentsUrl, senderWindowType),
+    })
+  } catch (error) {
+    const securityError =
+      error instanceof IpcSecurityError
+        ? error
+        : new IpcSecurityError(channel, senderWindowType, 'unknown-sender')
+    const details = {
+      channel,
+      reason: securityError.reason,
+      senderWindowType: senderWindowType ?? 'unknown',
+      webContentsId: event.sender.id,
+      frameUrl,
+      webContentsUrl,
+    }
+    try {
+      appendDebugLog('security', 'ipc.denied', details)
+    } catch {
+      // Security rejection must not depend on debug logging.
+    }
+    console.warn('[IPC Security] Request denied:', details)
+    throw securityError
+  }
+}
+
+function handleIpc<Args extends unknown[], Result>(
+  channel: IpcChannel,
+  listener: (event: IpcMainInvokeEvent, ...args: Args) => Result,
+): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    assertIpcEventTrusted(channel, event)
+    return listener(event, ...(args as Args))
+  })
+}
+
+function onIpc<Args extends unknown[]>(
+  channel: IpcChannel,
+  listener: (event: IpcMainEvent, ...args: Args) => void,
+): void {
+  ipcMain.on(channel, (event, ...args) => {
+    try {
+      assertIpcEventTrusted(channel, event)
+    } catch {
+      return
+    }
+    listener(event, ...(args as Args))
+  })
+}
+
 function registerIpc() {
   // Debug log：导出调试日志路径并支持清空
-  ipcMain.handle('debug:getPath', () => getDebugLogPath())
-  ipcMain.handle('debug:clear', () => {
+  handleIpc('debug:getPath', () => getDebugLogPath())
+  handleIpc('debug:clear', () => {
     clearDebugLog()
     return { ok: true, path: getDebugLogPath() }
   })
-  ipcMain.on('debug:append', (_event, payload: unknown) => {
+  onIpc('debug:append', (_event, payload: unknown) => {
     const p = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
     const event = typeof p.event === 'string' ? p.event : 'unknown'
     appendDebugLog('renderer', event, p.data)
   })
 
-  ipcMain.handle('settings:get', () => getSettings())
-  ipcMain.handle('settings:setAlwaysOnTop', (_event, value: boolean) => {
+  handleIpc('settings:get', () => getSettings())
+  handleIpc('settings:setAlwaysOnTop', (_event, value: boolean) => {
     windowManager.setAlwaysOnTop(value)
     broadcastSettingsChanged()
     return getSettings()
   })
-  ipcMain.handle('settings:setClickThrough', (_event, value: boolean) => {
+  handleIpc('settings:setClickThrough', (_event, value: boolean) => {
     windowManager.setClickThrough(value)
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setActivePersonaId', (_event, personaId: string) => {
+  handleIpc('settings:setActivePersonaId', (_event, personaId: string) => {
     setSettings({ activePersonaId: personaId })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setMemorySettings', (_event, memory: Partial<MemorySettings>) => {
+  handleIpc('settings:setMemorySettings', (_event, memory: Partial<MemorySettings>) => {
     const current = getSettings()
     setSettings({ memory: { ...current.memory, ...memory } })
     broadcastSettingsChanged()
@@ -881,60 +962,60 @@ function registerIpc() {
     return getSettings()
   })
 
-  ipcMain.handle('settings:setMemoryConsoleSettings', (_event, patch: Partial<MemoryConsoleSettings>) => {
+  handleIpc('settings:setMemoryConsoleSettings', (_event, patch: Partial<MemoryConsoleSettings>) => {
     const current = getSettings()
     setSettings({ memoryConsole: { ...current.memoryConsole, ...patch } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setPetScale', (_event, value: number) => {
+  handleIpc('settings:setPetScale', (_event, value: number) => {
     setSettings({ petScale: value })
     windowManager.resizePetWindowForScale(value)
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setPetOpacity', (_event, value: number) => {
+  handleIpc('settings:setPetOpacity', (_event, value: number) => {
     setSettings({ petOpacity: value })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setLive2dModel', (_event, modelId: string, modelFile: string) => {
+  handleIpc('settings:setLive2dModel', (_event, modelId: string, modelFile: string) => {
     setSettings({ live2dModelId: modelId, live2dModelFile: modelFile })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setLive2dMouseTrackingEnabled', (_event, enabled: boolean) => {
+  handleIpc('settings:setLive2dMouseTrackingEnabled', (_event, enabled: boolean) => {
     setSettings({ live2dMouseTrackingEnabled: enabled !== false })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setLive2dIdleSwayEnabled', (_event, enabled: boolean) => {
+  handleIpc('settings:setLive2dIdleSwayEnabled', (_event, enabled: boolean) => {
     setSettings({ live2dIdleSwayEnabled: enabled !== false })
     broadcastSettingsChanged()
     return getSettings()
   })
 
   // AI settings handlers
-  ipcMain.handle('settings:setAISettings', (_event, aiSettings: Partial<AISettings>) => {
+  handleIpc('settings:setAISettings', (_event, aiSettings: Partial<AISettings>) => {
     const current = getSettings()
     setSettings({ ai: { ...current.ai, ...aiSettings } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setNovelAISettings', (_event, patch: Partial<NovelAISettings>) => {
+  handleIpc('settings:setNovelAISettings', (_event, patch: Partial<NovelAISettings>) => {
     const current = getSettings()
     setSettings({ novelai: { ...current.novelai, ...patch } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle(
+  handleIpc(
     'settings:saveAIProfile',
     (
       _event,
@@ -982,7 +1063,7 @@ function registerIpc() {
     },
   )
 
-  ipcMain.handle('settings:deleteAIProfile', (_event, idRaw: string) => {
+  handleIpc('settings:deleteAIProfile', (_event, idRaw: string) => {
     const current = getSettings()
     const id = String(idRaw ?? '').trim()
     if (!id) return current
@@ -1011,7 +1092,7 @@ function registerIpc() {
     return getSettings()
   })
 
-  ipcMain.handle('settings:applyAIProfile', (_event, idRaw: string) => {
+  handleIpc('settings:applyAIProfile', (_event, idRaw: string) => {
     const current = getSettings()
     const id = String(idRaw ?? '').trim()
     if (!id) return current
@@ -1025,7 +1106,7 @@ function registerIpc() {
     return getSettings()
   })
 
-  ipcMain.handle('ai:listModels', async (_event, payload: { apiMode?: AIApiMode; apiKey?: string; baseUrl?: string } | null | undefined) => {
+  handleIpc('ai:listModels', async (_event, payload: { apiMode?: AIApiMode; apiKey?: string; baseUrl?: string } | null | undefined) => {
     const current = getSettings().ai
     const apiMode = normalizeAiApiMode(payload?.apiMode ?? current.apiMode)
     const baseUrl = normalizeOpenAiBaseUrl(String(payload?.baseUrl ?? '').trim() || current.baseUrl)
@@ -1060,21 +1141,21 @@ function registerIpc() {
     }
   })
 
-  ipcMain.handle('settings:setBubbleSettings', (_event, bubbleSettings: Partial<BubbleSettings>) => {
+  handleIpc('settings:setBubbleSettings', (_event, bubbleSettings: Partial<BubbleSettings>) => {
     const current = getSettings()
     setSettings({ bubble: { ...current.bubble, ...bubbleSettings } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setTaskPanelSettings', (_event, patch: Partial<TaskPanelSettings>) => {
+  handleIpc('settings:setTaskPanelSettings', (_event, patch: Partial<TaskPanelSettings>) => {
     const current = getSettings()
     setSettings({ taskPanel: { ...current.taskPanel, ...patch } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setOrchestratorSettings', (_event, patch: Partial<OrchestratorSettings>) => {
+  handleIpc('settings:setOrchestratorSettings', (_event, patch: Partial<OrchestratorSettings>) => {
     const current = getSettings()
     setSettings({ orchestrator: { ...current.orchestrator, ...patch } })
     broadcastSettingsChanged()
@@ -1082,7 +1163,7 @@ function registerIpc() {
   })
 
   // Tool settings (M3.5) - global/group/single tool toggles
-  ipcMain.handle('settings:setToolSettings', (_event, patch: Partial<ToolSettings>) => {
+  handleIpc('settings:setToolSettings', (_event, patch: Partial<ToolSettings>) => {
     const current = getSettings()
     const currTools = current.tools
 
@@ -1099,7 +1180,7 @@ function registerIpc() {
   })
 
   // MCP settings (M3.5 Step2)
-  ipcMain.handle('settings:setMcpSettings', (_event, patch: Partial<McpSettings>) => {
+  handleIpc('settings:setMcpSettings', (_event, patch: Partial<McpSettings>) => {
     const current = getSettings()
     const curr = current.mcp
 
@@ -1115,25 +1196,25 @@ function registerIpc() {
     return getSettings()
   })
 
-  ipcMain.handle('mcp:getState', () => {
+  handleIpc('mcp:getState', () => {
     return mcpManager?.getSnapshot() ?? { enabled: false, servers: [], updatedAt: Date.now() }
   })
 
-  ipcMain.handle('settings:setChatProfile', (_event, chatProfile: Partial<ChatProfile>) => {
+  handleIpc('settings:setChatProfile', (_event, chatProfile: Partial<ChatProfile>) => {
     const current = getSettings()
     setSettings({ chatProfile: { ...current.chatProfile, ...chatProfile } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setChatUiSettings', (_event, chatUi: Partial<ChatUiSettings>) => {
+  handleIpc('settings:setChatUiSettings', (_event, chatUi: Partial<ChatUiSettings>) => {
     const current = getSettings()
     setSettings({ chatUi: { ...current.chatUi, ...chatUi } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setWorldBookSettings', (_event, worldBook: Partial<WorldBookSettings>) => {
+  handleIpc('settings:setWorldBookSettings', (_event, worldBook: Partial<WorldBookSettings>) => {
     const current = getSettings()
     setSettings({ worldBook: { ...current.worldBook, ...worldBook } })
     broadcastSettingsChanged()
@@ -1141,7 +1222,7 @@ function registerIpc() {
   })
 
   // Context usage snapshot (chat -> main -> pet/chat)
-  ipcMain.on('contextUsage:set', (_event, snapshot: ContextUsageSnapshot | null) => {
+  onIpc('contextUsage:set', (_event, snapshot: ContextUsageSnapshot | null) => {
     lastContextUsage = snapshot && typeof snapshot === 'object' ? snapshot : null
     const payload = lastContextUsage
     for (const win of windowManager.getAllWindows()) {
@@ -1153,16 +1234,16 @@ function registerIpc() {
     }
   })
 
-  ipcMain.handle('contextUsage:get', () => lastContextUsage)
+  handleIpc('contextUsage:get', () => lastContextUsage)
 
-  ipcMain.handle('settings:setTtsSettings', (_event, tts: Partial<TtsSettings>) => {
+  handleIpc('settings:setTtsSettings', (_event, tts: Partial<TtsSettings>) => {
     const current = getSettings()
     setSettings({ tts: { ...current.tts, ...tts } })
     broadcastSettingsChanged()
     return getSettings()
   })
 
-  ipcMain.handle('settings:setAsrSettings', async (_event, asr: Partial<AsrSettings>) => {
+  handleIpc('settings:setAsrSettings', async (_event, asr: Partial<AsrSettings>) => {
     const current = getSettings()
     setSettings({ asr: { ...current.asr, ...asr } })
     await syncManagedAsrApi('ipc:settings:setAsrSettings')
@@ -1172,22 +1253,22 @@ function registerIpc() {
   })
 
   // Model scanner - scan live2d directory for available models
-  ipcMain.handle('models:scan', () => {
+  handleIpc('models:scan', () => {
     return scanLive2dModels()
   })
 
   // Chat persistence
-  ipcMain.handle('chat:list', () => listChatSessions())
-  ipcMain.handle('chat:get', (_event, sessionId?: string) => getChatSession(sessionId))
-  ipcMain.handle('chat:create', (_event, name?: string, personaId?: string) => createChatSession(name, personaId))
-  ipcMain.handle('chat:setCurrent', (_event, sessionId: string) => setCurrentChatSession(sessionId))
-  ipcMain.handle('chat:rename', (_event, sessionId: string, name: string) => renameChatSession(sessionId, name))
-  ipcMain.handle('chat:delete', (_event, sessionId: string) => deleteChatSession(sessionId))
-  ipcMain.handle('chat:clear', (_event, sessionId: string) => clearChatSession(sessionId))
-  ipcMain.handle('chat:setMessages', (_event, sessionId: string, messages: ChatMessageRecord[]) =>
+  handleIpc('chat:list', () => listChatSessions())
+  handleIpc('chat:get', (_event, sessionId?: string) => getChatSession(sessionId))
+  handleIpc('chat:create', (_event, name?: string, personaId?: string) => createChatSession(name, personaId))
+  handleIpc('chat:setCurrent', (_event, sessionId: string) => setCurrentChatSession(sessionId))
+  handleIpc('chat:rename', (_event, sessionId: string, name: string) => renameChatSession(sessionId, name))
+  handleIpc('chat:delete', (_event, sessionId: string) => deleteChatSession(sessionId))
+  handleIpc('chat:clear', (_event, sessionId: string) => clearChatSession(sessionId))
+  handleIpc('chat:setMessages', (_event, sessionId: string, messages: ChatMessageRecord[]) =>
     setChatMessages(sessionId, messages),
   )
-  ipcMain.handle('chat:addMessage', (_event, sessionId: string, message: ChatMessageRecord) => {
+  handleIpc('chat:addMessage', (_event, sessionId: string, message: ChatMessageRecord) => {
     const session = addChatMessage(sessionId, message)
     try {
       const memEnabled = getSettings().memory.enabled
@@ -1242,7 +1323,7 @@ function registerIpc() {
     }
     return session
   })
-  ipcMain.handle('chat:updateMessage', (_event, sessionId: string, messageId: string, content: string) => {
+  handleIpc('chat:updateMessage', (_event, sessionId: string, messageId: string, content: string) => {
     const session = updateChatMessage(sessionId, messageId, content)
     try {
       const memEnabled = getSettings().memory.enabled
@@ -1299,7 +1380,7 @@ function registerIpc() {
     }
     return session
   })
-  ipcMain.handle('chat:updateMessageRecord', (_event, sessionId: string, messageId: string, patch: unknown) => {
+  handleIpc('chat:updateMessageRecord', (_event, sessionId: string, messageId: string, patch: unknown) => {
     const session = updateChatMessageRecord(sessionId, messageId, patch)
     try {
       const memEnabled = getSettings().memory.enabled
@@ -1356,16 +1437,16 @@ function registerIpc() {
     }
     return session
   })
-  ipcMain.handle('chat:deleteMessage', (_event, sessionId: string, messageId: string) => deleteChatMessage(sessionId, messageId))
-  ipcMain.handle('chat:setAutoExtractCursor', (_event, sessionId: string, cursor: number) =>
+  handleIpc('chat:deleteMessage', (_event, sessionId: string, messageId: string) => deleteChatMessage(sessionId, messageId))
+  handleIpc('chat:setAutoExtractCursor', (_event, sessionId: string, cursor: number) =>
     setChatSessionAutoExtractCursor(sessionId, cursor),
   )
-  ipcMain.handle('chat:setAutoExtractMeta', (_event, sessionId: string, patch: unknown) =>
+  handleIpc('chat:setAutoExtractMeta', (_event, sessionId: string, patch: unknown) =>
     setChatSessionAutoExtractMeta(sessionId, patch),
   )
 
   // Chat attachments: persist dropped/pasted media into userData for stable paths.
-  ipcMain.handle('chat:saveAttachment', async (_event, payload: unknown) => {
+  handleIpc('chat:saveAttachment', async (_event, payload: unknown) => {
     const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
     const kind = p.kind === 'image' || p.kind === 'video' ? (p.kind as 'image' | 'video') : ''
     if (!kind) throw new Error('invalid kind')
@@ -1430,7 +1511,7 @@ function registerIpc() {
   })
 
   // Chat attachments: resolve managed images through the main-process media registry.
-  ipcMain.handle('chat:readAttachmentDataUrl', async (_event, payload: unknown) => {
+  handleIpc('chat:readAttachmentDataUrl', async (_event, payload: unknown) => {
     try {
       const result = await getLocalMediaServer().readDataUrl(parseLocalMediaReference(payload))
       return { ok: true as const, ...result }
@@ -1439,7 +1520,7 @@ function registerIpc() {
     }
   })
 
-  ipcMain.handle('chat:getAttachmentUrl', async (_event, payload: unknown) => {
+  handleIpc('chat:getAttachmentUrl', async (_event, payload: unknown) => {
     try {
       const result = await getLocalMediaServer().getUrl(parseLocalMediaReference(payload))
       return { ok: true as const, ...result }
@@ -1449,30 +1530,30 @@ function registerIpc() {
   })
 
   // Tasks / Orchestrator (M1)
-  ipcMain.handle('task:list', (): TaskListResult => taskService?.listTasks() ?? { items: [] })
-  ipcMain.handle('task:get', (_event, id: string): TaskRecord | null => taskService?.getTask(id) ?? null)
-  ipcMain.handle(
+  handleIpc('task:list', (): TaskListResult => taskService?.listTasks() ?? { items: [] })
+  handleIpc('task:get', (_event, id: string): TaskRecord | null => taskService?.getTask(id) ?? null)
+  handleIpc(
     'task:updateToolRunImages',
     (_event, taskId: string, runId: string, imagePaths: string[]): TaskRecord | null =>
       taskService?.updateToolRunImages(taskId, runId, imagePaths) ?? null,
   )
-  ipcMain.handle('task:create', (_event, args: TaskCreateArgs): TaskRecord => {
+  handleIpc('task:create', (_event, args: TaskCreateArgs): TaskRecord => {
     if (!taskService) throw new Error('Task service not ready')
     return taskService.createTask(args)
   })
-  ipcMain.handle('task:pause', (_event, id: string): TaskRecord | null => taskService?.pauseTask(id) ?? null)
-  ipcMain.handle('task:resume', (_event, id: string): TaskRecord | null => taskService?.resumeTask(id) ?? null)
-  ipcMain.handle('task:cancel', (_event, id: string): TaskRecord | null => taskService?.cancelTask(id) ?? null)
-  ipcMain.handle('task:dismiss', (_event, id: string): { ok: true } | null => taskService?.dismissTask(id) ?? null)
+  handleIpc('task:pause', (_event, id: string): TaskRecord | null => taskService?.pauseTask(id) ?? null)
+  handleIpc('task:resume', (_event, id: string): TaskRecord | null => taskService?.resumeTask(id) ?? null)
+  handleIpc('task:cancel', (_event, id: string): TaskRecord | null => taskService?.cancelTask(id) ?? null)
+  handleIpc('task:dismiss', (_event, id: string): { ok: true } | null => taskService?.dismissTask(id) ?? null)
 
   // Long-term memory / personas
-  ipcMain.handle('memory:listPersonas', (): PersonaSummary[] => memoryService?.listPersonas() ?? [])
-  ipcMain.handle('memory:getPersona', (_event, personaId: string): Persona | null => memoryService?.getPersona(personaId) ?? null)
-  ipcMain.handle('memory:createPersona', (_event, name: string): Persona => {
+  handleIpc('memory:listPersonas', (): PersonaSummary[] => memoryService?.listPersonas() ?? [])
+  handleIpc('memory:getPersona', (_event, personaId: string): Persona | null => memoryService?.getPersona(personaId) ?? null)
+  handleIpc('memory:createPersona', (_event, name: string): Persona => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.createPersona(name)
   })
-  ipcMain.handle(
+  handleIpc(
     'memory:updatePersona',
     (
       _event,
@@ -1490,73 +1571,73 @@ function registerIpc() {
     return memoryService.updatePersona(personaId, patch)
     },
   )
-  ipcMain.handle('memory:deletePersona', (_event, personaId: string): { ok: true } => {
+  handleIpc('memory:deletePersona', (_event, personaId: string): { ok: true } => {
     if (!memoryService) throw new Error('Memory service not ready')
     memoryService.deletePersona(personaId)
     return { ok: true }
   })
-  ipcMain.handle('memory:retrieve', async (_event, args: MemoryRetrieveArgs): Promise<MemoryRetrieveResult> => {
+  handleIpc('memory:retrieve', async (_event, args: MemoryRetrieveArgs): Promise<MemoryRetrieveResult> => {
     if (!memoryService) return { addon: '' }
     const settings = getSettings()
     if (!settings.memory.enabled) return { addon: '' }
     return memoryService.retrieveContext(args, settings.memory, settings.ai)
   })
-  ipcMain.handle('memory:list', (_event, args: MemoryListArgs): MemoryListResult => {
+  handleIpc('memory:list', (_event, args: MemoryListArgs): MemoryListResult => {
     if (!memoryService) return { total: 0, items: [] }
     return memoryService.listMemory(args)
   })
-  ipcMain.handle('memory:upsertManual', async (_event, args: MemoryUpsertManualArgs): Promise<MemoryRecord> => {
+  handleIpc('memory:upsertManual', async (_event, args: MemoryUpsertManualArgs): Promise<MemoryRecord> => {
     if (!memoryService) throw new Error('Memory service not ready')
     const settings = getSettings()
     return memoryService.upsertManualMemory(args, settings.memory, settings.ai)
   })
-  ipcMain.handle('memory:update', (_event, args: MemoryUpdateArgs): MemoryRecord => {
+  handleIpc('memory:update', (_event, args: MemoryUpdateArgs): MemoryRecord => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.updateMemory(args)
   })
-  ipcMain.handle('memory:updateMeta', (_event, args: MemoryUpdateMetaArgs): MemoryUpdateMetaResult => {
+  handleIpc('memory:updateMeta', (_event, args: MemoryUpdateMetaArgs): MemoryUpdateMetaResult => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.updateMemoryMeta(args)
   })
-  ipcMain.handle('memory:updateManyMeta', (_event, args: MemoryUpdateManyMetaArgs): MemoryUpdateMetaResult => {
+  handleIpc('memory:updateManyMeta', (_event, args: MemoryUpdateManyMetaArgs): MemoryUpdateMetaResult => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.updateManyMemoryMeta(args)
   })
-  ipcMain.handle('memory:updateByFilterMeta', (_event, args: MemoryUpdateByFilterMetaArgs): MemoryUpdateMetaResult => {
+  handleIpc('memory:updateByFilterMeta', (_event, args: MemoryUpdateByFilterMetaArgs): MemoryUpdateMetaResult => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.updateMemoryByFilterMeta(args)
   })
-  ipcMain.handle('memory:listVersions', (_event, args: MemoryListVersionsArgs): MemoryVersionRecord[] => {
+  handleIpc('memory:listVersions', (_event, args: MemoryListVersionsArgs): MemoryVersionRecord[] => {
     if (!memoryService) return []
     return memoryService.listMemoryVersions(args)
   })
-  ipcMain.handle('memory:rollbackVersion', (_event, args: MemoryRollbackVersionArgs): MemoryRecord => {
+  handleIpc('memory:rollbackVersion', (_event, args: MemoryRollbackVersionArgs): MemoryRecord => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.rollbackMemoryVersion(args)
   })
-  ipcMain.handle('memory:listConflicts', (_event, args: MemoryListConflictsArgs): MemoryListConflictsResult => {
+  handleIpc('memory:listConflicts', (_event, args: MemoryListConflictsArgs): MemoryListConflictsResult => {
     if (!memoryService) return { total: 0, items: [] }
     return memoryService.listMemoryConflicts(args)
   })
-  ipcMain.handle('memory:resolveConflict', (_event, args: MemoryResolveConflictArgs): MemoryResolveConflictResult => {
+  handleIpc('memory:resolveConflict', (_event, args: MemoryResolveConflictArgs): MemoryResolveConflictResult => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.resolveMemoryConflict(args)
   })
-  ipcMain.handle('memory:delete', (_event, args: MemoryDeleteArgs): { ok: true } => {
+  handleIpc('memory:delete', (_event, args: MemoryDeleteArgs): { ok: true } => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.deleteMemory(args)
   })
-  ipcMain.handle('memory:deleteMany', (_event, args: MemoryDeleteManyArgs): { deleted: number } => {
+  handleIpc('memory:deleteMany', (_event, args: MemoryDeleteManyArgs): { deleted: number } => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.deleteManyMemory(args)
   })
-  ipcMain.handle('memory:deleteByFilter', (_event, args: MemoryDeleteByFilterArgs): { deleted: number } => {
+  handleIpc('memory:deleteByFilter', (_event, args: MemoryDeleteByFilterArgs): { deleted: number } => {
     if (!memoryService) throw new Error('Memory service not ready')
     return memoryService.deleteMemoryByFilter(args)
   })
 
   // TTS options (scan local GPT-SoVITS directory)
-  ipcMain.handle('tts:listOptions', () => {
+  handleIpc('tts:listOptions', () => {
     const settings = getSettings()
     const configured = (settings.tts?.ttsRoot ?? '').trim()
     const ttsRoot = configured || path.join(process.env.APP_ROOT ?? process.cwd(), 'GPT-SoVITS-v2_ProPlus')
@@ -1579,7 +1660,7 @@ function registerIpc() {
     return url
   }
 
-  ipcMain.handle('tts:httpGetJson', async (_event, rawUrl: string) => {
+  handleIpc('tts:httpGetJson', async (_event, rawUrl: string) => {
     const url = validateTtsUrl(rawUrl)
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(new Error('TTS HTTP timeout')), 60000)
@@ -1596,7 +1677,7 @@ function registerIpc() {
     }
   })
 
-  ipcMain.handle(
+  handleIpc(
     'tts:httpRequestArrayBuffer',
     async (_event, payload: { url: string; method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; timeoutMs?: number }) => {
       const url = validateTtsUrl(payload.url)
@@ -1634,7 +1715,7 @@ function registerIpc() {
   const ttsHttpStreams = new Map<string, AbortController>()
   const makeStreamId = (): string => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
-  ipcMain.handle(
+  handleIpc(
     'tts:httpStreamStart',
     async (
       event,
@@ -1712,7 +1793,7 @@ function registerIpc() {
     },
   )
 
-  ipcMain.handle('tts:httpStreamCancel', (_event, streamId: string) => {
+  handleIpc('tts:httpStreamCancel', (_event, streamId: string) => {
     const ac = ttsHttpStreams.get(streamId)
     if (ac) {
       try {
@@ -1726,14 +1807,14 @@ function registerIpc() {
   })
 
   // Live2D expression/motion triggers - broadcast to pet window
-  ipcMain.on('live2d:triggerExpression', (_event, expressionName: string) => {
+  onIpc('live2d:triggerExpression', (_event, expressionName: string) => {
     const petWin = windowManager.getPetWindow()
     if (petWin && !petWin.isDestroyed()) {
       petWin.webContents.send('live2d:expression', expressionName)
     }
   })
 
-  ipcMain.on('live2d:triggerMotion', (_event, motionGroup: string, index: number) => {
+  onIpc('live2d:triggerMotion', (_event, motionGroup: string, index: number) => {
     const petWin = windowManager.getPetWindow()
     if (petWin && !petWin.isDestroyed()) {
       petWin.webContents.send('live2d:motion', motionGroup, index)
@@ -1741,7 +1822,7 @@ function registerIpc() {
   })
 
   // Live2D capabilities - report from pet window (for tools/agent)
-  ipcMain.on('live2d:capabilities', (_event, payload: unknown) => {
+  onIpc('live2d:capabilities', (_event, payload: unknown) => {
     const res = setLive2dCapabilitiesFromRenderer(payload)
     if (!res.ok) {
       console.warn('[Live2D] capabilities report rejected:', res.error)
@@ -1749,7 +1830,7 @@ function registerIpc() {
   })
 
   // Bubble message - forward from chat window to pet window
-  ipcMain.on('bubble:sendMessage', (_event, message: string) => {
+  onIpc('bubble:sendMessage', (_event, message: string) => {
     const petWin = windowManager.getPetWindow()
     if (petWin && !petWin.isDestroyed()) {
       petWin.webContents.send('bubble:message', message)
@@ -1757,7 +1838,7 @@ function registerIpc() {
   })
 
   // Bubble preview (chat -> pet): 仅用于实时可视化占位/流式文本，不触发 TTS。
-  ipcMain.on('bubble:preview', (_event, payload: unknown) => {
+  onIpc('bubble:preview', (_event, payload: unknown) => {
     const petWin = windowManager.getPetWindow()
     if (!petWin || petWin.isDestroyed()) return
 
@@ -1779,7 +1860,7 @@ function registerIpc() {
   })
 
   // ASR 文本转发：从桌宠窗口发往聊天窗口（手动模式也会使用）。
-  ipcMain.on('asr:reportTranscript', (_event, text: string) => {
+  onIpc('asr:reportTranscript', (_event, text: string) => {
     const cleaned = String(text ?? '').trim()
     if (!cleaned) return
 
@@ -1812,13 +1893,13 @@ function registerIpc() {
     pendingAsrTranscript.push(cleaned)
   })
 
-  ipcMain.handle('asr:takeTranscript', () => {
+  handleIpc('asr:takeTranscript', () => {
     const text = pendingAsrTranscript.join(' ').trim()
     pendingAsrTranscript = []
     return text
   })
 
-  ipcMain.on('asr:transcriptReady', (event) => {
+  onIpc('asr:transcriptReady', (event) => {
     const chatWin = windowManager.getChatWindow()
     if (!chatWin || chatWin.isDestroyed()) return
     if (event.sender.id !== chatWin.webContents.id) return
@@ -1826,7 +1907,7 @@ function registerIpc() {
   })
 
   // Chat -> Pet: sync current ASR compose baseline (used to keep subtitle accumulation aligned with chat input edits)
-  ipcMain.on('asr:composePreviewSync', (_event, payload: unknown) => {
+  onIpc('asr:composePreviewSync', (_event, payload: unknown) => {
     const petWin = windowManager.getPetWindow()
     if (!petWin || petWin.isDestroyed()) return
 
@@ -1837,21 +1918,21 @@ function registerIpc() {
   })
 
   // TTS segmented sync: forward utterance segments to pet window
-  ipcMain.on('tts:enqueue', (_event, payload: unknown) => {
+  onIpc('tts:enqueue', (_event, payload: unknown) => {
     const petWin = windowManager.getPetWindow()
     if (petWin && !petWin.isDestroyed()) {
       petWin.webContents.send('tts:enqueue', payload)
     }
   })
 
-  ipcMain.on('tts:finalize', (_event, utteranceId: string) => {
+  onIpc('tts:finalize', (_event, utteranceId: string) => {
     const petWin = windowManager.getPetWindow()
     if (petWin && !petWin.isDestroyed()) {
       petWin.webContents.send('tts:finalize', utteranceId)
     }
   })
 
-  ipcMain.on('tts:stopAll', () => {
+  onIpc('tts:stopAll', () => {
     const petWin = windowManager.getPetWindow()
     if (petWin && !petWin.isDestroyed()) {
       petWin.webContents.send('tts:stopAll')
@@ -1859,39 +1940,39 @@ function registerIpc() {
   })
 
   // Pet -> Chat: segment started / ended / failed
-  ipcMain.on('tts:segmentStarted', (_event, payload: unknown) => {
+  onIpc('tts:segmentStarted', (_event, payload: unknown) => {
     const chatWin = windowManager.getChatWindow()
     if (chatWin && !chatWin.isDestroyed()) {
       chatWin.webContents.send('tts:segmentStarted', payload)
     }
   })
 
-  ipcMain.on('tts:utteranceEnded', (_event, payload: unknown) => {
+  onIpc('tts:utteranceEnded', (_event, payload: unknown) => {
     const chatWin = windowManager.getChatWindow()
     if (chatWin && !chatWin.isDestroyed()) {
       chatWin.webContents.send('tts:utteranceEnded', payload)
     }
   })
 
-  ipcMain.on('tts:utteranceFailed', (_event, payload: unknown) => {
+  onIpc('tts:utteranceFailed', (_event, payload: unknown) => {
     const chatWin = windowManager.getChatWindow()
     if (chatWin && !chatWin.isDestroyed()) {
       chatWin.webContents.send('tts:utteranceFailed', payload)
     }
   })
 
-  ipcMain.handle('window:openChat', () => {
+  handleIpc('window:openChat', () => {
     windowManager.ensureChatWindow()
   })
-  ipcMain.handle('window:openSettings', () => {
+  handleIpc('window:openSettings', () => {
     windowManager.ensureSettingsWindow()
   })
-  ipcMain.handle('window:openMemory', () => {
+  handleIpc('window:openMemory', () => {
     windowManager.ensureMemoryWindow()
   })
 
   // 显示模式切换入口：支持 live2d / orb / hidden。
-  ipcMain.handle('window:setDisplayMode', (_event, modeRaw: unknown) => {
+  handleIpc('window:setDisplayMode', (_event, modeRaw: unknown) => {
     const mode = typeof modeRaw === 'string' ? (modeRaw.trim() as DisplayMode) : ''
     if (mode !== 'live2d' && mode !== 'orb' && mode !== 'hidden') return
     windowManager.setDisplayMode(mode)
@@ -1902,19 +1983,19 @@ function registerIpc() {
     }
     broadcastSettingsChanged()
   })
-  ipcMain.handle('window:hideAll', () => {
+  handleIpc('window:hideAll', () => {
     windowManager.hideAll()
   })
 
   // Close current window (not all windows)
-  ipcMain.handle('window:closeCurrent', (event) => {
+  handleIpc('window:closeCurrent', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (win && !win.isDestroyed()) {
       win.close()
     }
   })
 
-  ipcMain.handle('app:quit', () => {
+  handleIpc('app:quit', () => {
     app.quit()
   })
 
@@ -1922,11 +2003,11 @@ function registerIpc() {
   // Orb（球/条/面板）IPC
   // =====================
 
-  ipcMain.handle('orb:getUiState', () => {
+  handleIpc('orb:getUiState', () => {
     return { state: orbUiState }
   })
 
-  ipcMain.handle('orb:setUiState', (_event, stateRaw: unknown, optsRaw: unknown) => {
+  handleIpc('orb:setUiState', (_event, stateRaw: unknown, optsRaw: unknown) => {
     const state = typeof stateRaw === 'string' ? (stateRaw.trim() as OrbUiState) : ''
     if (state !== 'ball' && state !== 'bar' && state !== 'panel') return { state: orbUiState }
 
@@ -1942,7 +2023,7 @@ function registerIpc() {
     return { state }
   })
 
-  ipcMain.handle('orb:toggleUiState', () => {
+  handleIpc('orb:toggleUiState', () => {
     const next: OrbUiState = orbUiState === 'ball' ? 'bar' : orbUiState === 'bar' ? 'panel' : 'ball'
     orbUiState = next
     windowManager.setOrbUiState(next, { focus: true, animate: false })
@@ -1950,7 +2031,7 @@ function registerIpc() {
     return { state: next }
   })
 
-  ipcMain.handle('orb:setOverlayBounds', (_event, payload: unknown) => {
+  handleIpc('orb:setOverlayBounds', (_event, payload: unknown) => {
     const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null
     const width = typeof p?.width === 'number' ? p.width : Number.NaN
     const height = typeof p?.height === 'number' ? p.height : Number.NaN
@@ -1960,14 +2041,14 @@ function registerIpc() {
     return { ok: true }
   })
 
-  ipcMain.handle('orb:clearOverlayBounds', (_event, payload: unknown) => {
+  handleIpc('orb:clearOverlayBounds', (_event, payload: unknown) => {
     const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null
     const focus = Boolean(p?.focus)
     windowManager.clearOrbOverlayBounds({ focus })
     return { ok: true }
   })
 
-  ipcMain.handle('orb:showContextMenu', (_event, point: unknown) => {
+  handleIpc('orb:showContextMenu', (_event, point: unknown) => {
     const p = point && typeof point === 'object' && !Array.isArray(point) ? (point as Record<string, unknown>) : null
     const x = typeof p?.x === 'number' ? p.x : Number.NaN
     const y = typeof p?.y === 'number' ? p.y : Number.NaN
@@ -1977,7 +2058,7 @@ function registerIpc() {
   })
 
   // Window drag support (event-driven): renderer sends start/move/stop with screen coords.
-  ipcMain.on('window:startDrag', (event, payload: unknown) => {
+  onIpc('window:startDrag', (event, payload: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return
 
@@ -2015,14 +2096,14 @@ function registerIpc() {
     })
   })
 
-  ipcMain.on('window:dragMove', (event, payload: unknown) => {
+  onIpc('window:dragMove', (event, payload: unknown) => {
     const session = windowDragSessions.get(event.sender.id)
     if (!session) return
     const cursor = parseDragPoint(payload) ?? screen.getCursorScreenPoint()
     applyWindowDragMove(session, cursor)
   })
 
-  ipcMain.on('window:stopDrag', (event, payload: unknown) => {
+  onIpc('window:stopDrag', (event, payload: unknown) => {
     const session = windowDragSessions.get(event.sender.id)
     if (!session) {
       const win = BrowserWindow.fromWebContents(event.sender)
@@ -2049,7 +2130,7 @@ function registerIpc() {
     cleanupWindowDragSession(session, { snapOrb: true })
   })
   // Pet window context menu
-  ipcMain.on('pet:showContextMenu', (event) => {
+  onIpc('pet:showContextMenu', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return
 
@@ -2125,7 +2206,7 @@ function registerIpc() {
   })
 
   // Pet overlay hover: when a UI overlay (e.g. task panel) needs mouse interaction in click-through mode
-  ipcMain.on('pet:setOverlayHover', (event, hovering: boolean) => {
+  onIpc('pet:setOverlayHover', (event, hovering: boolean) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     const petWin = windowManager.getPetWindow()
     if (!win || !petWin) return
@@ -2135,7 +2216,7 @@ function registerIpc() {
 
   // Pet model hover: 渲染进程对 Live2D 画布做像素级命中检测后上报，
   // 主进程据此在点击穿透模式下切换 ignoreMouseEvents（事件驱动，无轮询）。
-  ipcMain.on('pet:setModelHover', (event, hovering: boolean) => {
+  onIpc('pet:setModelHover', (event, hovering: boolean) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     const petWin = windowManager.getPetWindow()
     if (!win || !petWin) return
@@ -2144,7 +2225,7 @@ function registerIpc() {
   })
 
   // Dynamic mouse events ignore for transparent click-through
-  ipcMain.on('window:setIgnoreMouseEvents', (event, ignore: boolean, forward: boolean) => {
+  onIpc('window:setIgnoreMouseEvents', (event, ignore: boolean, forward: boolean) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return
     win.setIgnoreMouseEvents(ignore, { forward })
