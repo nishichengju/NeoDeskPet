@@ -935,6 +935,13 @@ AI 与能力
 - UI baseline 新增 `orb-bar-560x80-scale100.png`，Ball/Bar/Panel 三种 Orb 形态现在均有独立场景；基线从 16 增至 17 个场景，三种 Orb 尺寸均无横向/纵向溢出、console error 或 failure，Bar 截图经人工检查无视觉回归。
 - `npm test` 共 73 个测试文件、323 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 17 个 UI baseline 场景均通过。下一批进入 Panel header、空状态、消息列表与行内编辑边界。
 
+第四十五批进展（2026-07-14）：
+
+- 新增 `src/orb/OrbPanelView.tsx`，抽离 Panel 会话标题/消息计数、打开完整聊天入口、加载/错误/空状态、消息行容器和行内编辑器；用户正文继续使用共享 `MarkdownMessage`，助手 block 与附件通过父层渲染器插槽传入。
+- Panel 组件只接收消息数组、编辑状态和 UI 回调，不读取任务、附件 API、会话持久化或主进程状态；`OrbApp` 继续负责工具卡/附件构造、右键菜单定位、编辑保存/重发和打开完整聊天后的模式切换。
+- 新增 3 个 Panel 视图测试，覆盖标题/计数/空状态、用户 Markdown/助手内容/附件顺序，以及用户编辑显示保存并重发、助手编辑不显示重发和三个编辑动作委托；`OrbApp.tsx` 从 2431 行降至 2377 行。
+- `npm test` 共 74 个测试文件、326 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 17 个 UI baseline 场景均通过；人工检查 Orb Panel 截图无视觉回归。下一批继续拆分工具卡与消息附件渲染，随后处理历史 popover、图片查看器和消息菜单。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

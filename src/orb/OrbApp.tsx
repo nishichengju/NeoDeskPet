@@ -24,6 +24,7 @@ import {
 import { OrbBallView } from './OrbBallView'
 import { OrbBarView, type OrbPendingAttachment } from './OrbBarView'
 import { OrbImagePreview, OrbLocalVideo, ToolUseDuration } from './OrbMessageMedia'
+import { OrbPanelView } from './OrbPanelView'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
 type PopoverKind = 'history'
@@ -2154,86 +2155,31 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
             onClose={openBall}
           />
 
-      {renderMode === 'panel' ? (
-        <div className="ndp-orbpanel">
-          <div className="ndp-orbpanel-header" data-orb-nodrag="true">
-            <div className="ndp-orbpanel-title" title={panelSession?.name || '未命名会话'}>
-              {panelSession?.name || '未命名会话'}
-            </div>
-            <div className="ndp-orbpanel-actions">
-              {currentSummary ? (
-                <div className="ndp-orbpanel-meta">
-                  {(currentSummary.messageCount ?? 0) > 0 ? `${currentSummary.messageCount}条` : '空对话'}
-                </div>
-              ) : null}
-              <button
-                className="ndp-orbpanel-action"
-                onClick={() => {
-                  void api
-                    ?.openChat()
-                    .finally(() => openBar())
-                    .catch(() => undefined)
-                }}
-                title="打开完整聊天窗口"
-              >
-                ↗
-              </button>
-            </div>
-          </div>
-
-          <div className="ndp-orbpanel-body" ref={panelListRef} data-orb-nodrag="true">
-            {panelLoading ? <div className="ndp-orbpanel-empty">加载中</div> : null}
-            {panelError ? <div className="ndp-orbpanel-empty ndp-orbpanel-empty-error">{panelError}</div> : null}
-            {!panelLoading && !panelError && panelMessages.length === 0 ? (
-              <div className="ndp-orbpanel-empty">还没有消息</div>
-            ) : null}
-
-            {panelMessages.map((m) => {
-              const isUser = m.role === 'user'
-              const isEditing = editingMessageId === m.id
-              const attachmentsNode = renderMessageAttachments(m)
-              return (
-                <div
-                  key={m.id}
-                  className={isUser ? 'ndp-orbpanel-msg ndp-orbpanel-msg-user' : 'ndp-orbpanel-msg ndp-orbpanel-msg-assistant'}
-                  onContextMenu={(e) => openMessageMenu(e, m.id)}
-                >
-                  {isEditing ? (
-                    <div className="ndp-orbpanel-edit" data-orb-nodrag="true">
-                      <textarea
-                        className="ndp-orbpanel-edit-textarea"
-                        value={editingMessageContent}
-                        onChange={(e) => setEditingMessageContent(e.target.value)}
-                        rows={3}
-                        data-orb-nodrag="true"
-                      />
-                      <div className="ndp-orbpanel-edit-actions" data-orb-nodrag="true">
-                        <button className="ndp-orbpanel-edit-btn" onClick={() => void handleSaveEdit()} data-orb-nodrag="true">
-                          保存
-                        </button>
-                        {isUser ? (
-                          <button className="ndp-orbpanel-edit-btn" onClick={() => void handleSaveEdit({ resend: true })} data-orb-nodrag="true">
-                            保存并重发
-                          </button>
-                        ) : null}
-                        <button className="ndp-orbpanel-edit-btn ndp-orbpanel-edit-btn-ghost" onClick={handleCancelEdit} data-orb-nodrag="true">
-                          取消
-                        </button>
-                      </div>
-                    </div>
-                  ) : isUser ? (
-                    <MarkdownMessage text={String(m.content ?? '')} />
-                  ) : (
-                    renderMessageBlocks(m)
-                  )}
-                  {attachmentsNode}
-                </div>
-              )
-            })}
-            <div ref={panelEndRef} />
-          </div>
-        </div>
-      ) : null}
+          {renderMode === 'panel' ? (
+            <OrbPanelView
+              sessionName={panelSession?.name}
+              summary={currentSummary}
+              loading={panelLoading}
+              error={panelError}
+              messages={panelMessages}
+              listRef={panelListRef}
+              endRef={panelEndRef}
+              editingMessageId={editingMessageId}
+              editingMessageContent={editingMessageContent}
+              renderAssistantMessage={renderMessageBlocks}
+              renderAttachments={renderMessageAttachments}
+              onOpenFullChat={() => {
+                void api
+                  ?.openChat()
+                  .finally(() => openBar())
+                  .catch(() => undefined)
+              }}
+              onMessageContextMenu={openMessageMenu}
+              onEditingMessageContentChange={setEditingMessageContent}
+              onSaveEdit={(resend) => void handleSaveEdit(resend ? { resend: true } : undefined)}
+              onCancelEdit={handleCancelEdit}
+            />
+          ) : null}
 
         </div>
       </div>
