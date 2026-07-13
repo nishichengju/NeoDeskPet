@@ -19,7 +19,6 @@ import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
 import {
   buildToolResultBlock,
-  findLastCompleteToolRequestEnd,
   hasToolRequestMarker,
   makeToolCallKey,
   stableStringify,
@@ -29,21 +28,9 @@ import {
 import {
   buildAgentEndpoint,
   buildAgentHeaders,
-  buildClaudeTextPayload,
-  createHttpStatusError,
   isAbortLikeError,
-  NativeAssistantStreamAccumulator,
-  parseNativeAssistantMessage,
-  parseTextStreamPayload,
-  readErrorStatus,
-  shouldRetryTransientError,
-  SseDataBuffer,
-  transientRetryDelayMs,
-  type AssistantMessage,
-  type LlmUsage,
-  type RawToolCall,
-  type ToolCall,
 } from './task/taskAgentLlmProtocol'
+import { TaskAgentLlmClient } from './task/taskAgentLlmClient'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, VisualArtifactRef } from './types'
@@ -1644,270 +1631,37 @@ export class TaskService {
       typeof obj?.timeoutMs === 'number'
         ? Math.max(2000, Math.min(180000, Math.trunc(obj.timeoutMs)))
         : Math.max(2000, Math.min(180000, Math.trunc(prefer.timeoutMs)))
-    const transientRetryLimit = 2
-    const transientRetryBaseDelayMs = 500
-    const transientRetryJitterMs = 250
-
     if (!baseUrl || !model) throw new Error('未配置工具 LLM baseUrl/model（设置 → AI 设置 → 工具/Agent 或 AI 设置）')
 
     const endpoint = buildAgentEndpoint(baseUrl, apiMode)
     const headers = buildAgentHeaders(apiMode, apiKey)
-
-    // 使用任务ID作为sessionId，让API代理可以缓存和复用签名
-    const sessionId = task.id
-
-    const callLlmNative = async (
-      visionRetryAttempt = 0,
-      opts?: { onDelta?: (delta: string) => void },
-    ): Promise<{ contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage }> => {
-      for (let transientAttempt = 0; transientAttempt <= transientRetryLimit; transientAttempt += 1) {
-        const ac = new AbortController()
-        const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
-        rt.cancelCurrent = () => ac.abort(new Error('canceled'))
-        let emittedAnyOutput = false
-
-        try {
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            signal: ac.signal,
-            headers: { ...headers, Accept: 'text/event-stream' },
-            body: JSON.stringify({
-              model,
-              temperature,
-              max_tokens: maxTokens,
-              ...reasoningOptions.extra,
-              messages,
-              tools,
-              tool_choice: 'auto',
-              sessionId,
-              stream: true,
-            }),
-          })
-
-          if (!res.ok) {
-            const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
-            const errMsg = errData?.error?.message || `HTTP ${res.status}`
-            throw createHttpStatusError(errMsg, res.status)
-          }
-
-          let msg: AssistantMessage = { role: 'assistant' }
-          const contentType = String(res.headers.get('content-type') ?? '')
-          const isSse = contentType.includes('text/event-stream')
-          if (isSse && res.body) {
-            const reader = res.body.getReader()
-            const decoder = new TextDecoder('utf-8')
-            const sseBuffer = new SseDataBuffer()
-            const accumulator = new NativeAssistantStreamAccumulator()
-            const throwIfCanceled = () => {
-              if (rt.canceled) throw new Error('canceled')
-            }
-
-            let streamDone = false
-            while (!streamDone) {
-              throwIfCanceled()
-              const { value, done } = await reader.read()
-              throwIfCanceled()
-              if (done) break
-              const dataValues = sseBuffer.push(decoder.decode(value, { stream: true }))
-              for (const dataString of dataValues) {
-                throwIfCanceled()
-                if (!dataString) continue
-                if (dataString === '[DONE]') {
-                  streamDone = true
-                  break
-                }
-
-                let payload: unknown
-                try {
-                  payload = JSON.parse(dataString)
-                } catch {
-                  continue
-                }
-                const update = accumulator.push(payload)
-                if (update.emitted) emittedAnyOutput = true
-                if (update.delta) {
-                  throwIfCanceled()
-                  opts?.onDelta?.(update.delta)
-                }
-              }
-            }
-            msg = accumulator.toMessage()
-          } else {
-            const data = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: AssistantMessage }> }
-            msg = (data.choices?.[0]?.message ?? {}) as AssistantMessage
-          }
-
-          const parsed = parseNativeAssistantMessage(msg)
-          if (parsed.contentText.trim() || parsed.toolCalls.length > 0 || parsed.rawToolCalls.length > 0) {
-            emittedAnyOutput = true
-          }
-          if (mainVisionArtifacts.length > 0 && !visionStripped) rememberMainVisionCapability('supported')
-          return parsed
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
-            throw new Error('canceled')
-          }
-          const status = readErrorStatus(err)
-          if (visionRetryAttempt === 0 && (await recoverFromMainVisionError(err, status ?? undefined))) {
-            return callLlmNative(1, opts)
-          }
-          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, transientRetryLimit, err, status)) {
-            const delayMs = transientRetryDelayMs(transientAttempt, transientRetryBaseDelayMs, transientRetryJitterMs)
-            pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
-            if (rt.canceled) throw new Error('canceled')
-            await sleep(delayMs)
-            if (rt.canceled) throw new Error('canceled')
-            continue
-          }
-          throw err
-        } finally {
-          clearTimeout(timer)
-          rt.cancelCurrent = undefined
-        }
-      }
-      throw new Error('llm request retry exhausted')
-    }
-
-    const callLlmText = async (
-      visionRetryAttempt = 0,
-      opts?: { onDelta?: (delta: string) => void; stopOnToolRequest?: boolean },
-    ): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage; usage?: LlmUsage }> => {
-      for (let transientAttempt = 0; transientAttempt <= transientRetryLimit; transientAttempt += 1) {
-        const ac = new AbortController()
-        const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
-        rt.cancelCurrent = () => ac.abort(new Error('canceled'))
-        let emittedAnyOutput = false
-
-        try {
-          const requestBody =
-            apiMode === 'claude'
-              ? buildClaudeTextPayload({
-                  messages,
-                  model,
-                  maxTokens,
-                  temperature,
-                  thinking: reasoningOptions.extra.thinking,
-                  stream: true,
-                })
-              : {
-                  model,
-                  temperature,
-                  max_tokens: maxTokens,
-                  ...reasoningOptions.extra,
-                  messages,
-                  sessionId,
-                  stream: true,
-                }
-
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            signal: ac.signal,
-            headers,
-            body: JSON.stringify(requestBody),
-          })
-
-          if (!res.ok) {
-            const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
-            const errMsg = errData?.error?.message || `HTTP ${res.status}`
-            throw createHttpStatusError(errMsg, res.status)
-          }
-
-          if (!res.body) {
-            throw new Error('Stream response body is null')
-          }
-
-          const reader = res.body.getReader()
-          const decoder = new TextDecoder('utf-8')
-          const sseBuffer = new SseDataBuffer()
-          let contentText = ''
-          let usage: LlmUsage | undefined
-          const throwIfCanceled = () => {
-            if (rt.canceled) throw new Error('canceled')
-          }
-
-          let stoppedEarly = false
-          let streamDone = false
-          while (!streamDone && !stoppedEarly) {
-            throwIfCanceled()
-            const { value, done } = await reader.read()
-            throwIfCanceled()
-            streamDone = done
-            if (done) break
-            const dataValues = sseBuffer.push(decoder.decode(value, { stream: true }))
-            for (const dataString of dataValues) {
-              if (stoppedEarly) break
-              throwIfCanceled()
-              if (!dataString || dataString === '[DONE]') continue
-
-              try {
-                const event = parseTextStreamPayload(JSON.parse(dataString), apiMode, usage)
-                usage = event.usage
-                if (event.done) streamDone = true
-
-                if (event.delta) {
-                  throwIfCanceled()
-                  emittedAnyOutput = true
-                  const prevLen = contentText.length
-                  contentText += event.delta
-
-                  if (opts?.stopOnToolRequest) {
-                    const lastEnd = findLastCompleteToolRequestEnd(contentText)
-                    if (lastEnd >= 0) {
-                      const keptDelta = contentText.slice(prevLen, Math.min(lastEnd, contentText.length))
-                      if (keptDelta) opts.onDelta?.(keptDelta)
-                      contentText = contentText.slice(0, lastEnd)
-                      stoppedEarly = true
-                      break
-                    }
-                  }
-
-                  opts?.onDelta?.(event.delta)
-                }
-                if (event.done) break
-              } catch (err) {
-                if ((err as { streamFatal?: unknown })?.streamFatal === true) throw err
-                // Ignore parse errors for individual chunks
-              }
-            }
-          }
-
-          if (stoppedEarly) {
-            try {
-              await reader.cancel()
-            } catch {
-              // ignore
-            }
-          }
-
-          const assistantMsgRaw: AssistantMessage = { role: 'assistant', content: contentText }
-          if (mainVisionArtifacts.length > 0 && !visionStripped) rememberMainVisionCapability('supported')
-          return { contentText, assistantMsgRaw, usage }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
-            throw new Error('canceled')
-          }
-          const status = readErrorStatus(err)
-          if (visionRetryAttempt === 0 && (await recoverFromMainVisionError(err, status ?? undefined))) {
-            return callLlmText(1, opts)
-          }
-          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, transientRetryLimit, err, status)) {
-            const delayMs = transientRetryDelayMs(transientAttempt, transientRetryBaseDelayMs, transientRetryJitterMs)
-            pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
-            if (rt.canceled) throw new Error('canceled')
-            await sleep(delayMs)
-            if (rt.canceled) throw new Error('canceled')
-            continue
-          }
-          throw err
-        } finally {
-          clearTimeout(timer)
-          rt.cancelCurrent = undefined
-        }
-      }
-      throw new Error('llm request retry exhausted')
-    }
+    const llmClient = new TaskAgentLlmClient({
+      apiMode,
+      endpoint,
+      headers,
+      model,
+      temperature,
+      maxTokens,
+      reasoningExtra: reasoningOptions.extra,
+      messages,
+      tools,
+      sessionId: task.id,
+      timeoutMs,
+      isCanceled: () => rt.canceled,
+      setCancelCurrent: (cancel) => {
+        rt.cancelCurrent = cancel
+      },
+      recoverFromVisionError: recoverFromMainVisionError,
+      onRequestSucceeded: () => {
+        if (mainVisionArtifacts.length > 0 && !visionStripped) rememberMainVisionCapability('supported')
+      },
+      onRetry: ({ delayMs, errorMessage, nextAttempt, totalAttempts }) => {
+        pushLog(
+          `[Agent] LLM 请求失败，${delayMs}ms 后重试 (${nextAttempt}/${totalAttempts})：${clampText(errorMessage, 120)}`,
+          true,
+        )
+      },
+    })
 
     type AgentToolExecution = {
       output: string
@@ -2175,7 +1929,7 @@ export class TaskService {
           if (extracted.expression || extracted.motion) updateProgress(force)
         }
 
-        const { contentText, toolCalls, assistantMsgRaw } = await callLlmNative(0, {
+        const { contentText, toolCalls, assistantMsgRaw } = await llmClient.callNative({
           onDelta: (delta) => {
             if (rt.canceled) throw new Error('canceled')
             turnRaw += delta
@@ -2342,7 +2096,7 @@ export class TaskService {
           if (extracted.expression || extracted.motion) updateProgress(force)
         }
 
-        const { contentText, assistantMsgRaw, usage } = await callLlmText(0, {
+        const { contentText, assistantMsgRaw, usage } = await llmClient.callText({
           stopOnToolRequest: true,
           onDelta: (delta) => {
             if (rt.canceled) throw new Error('canceled')

@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十九批：Task 存储与重启恢复已拆分）
+- 状态：P2-1 进行中（第二十三批：Task Agent LLM 请求生命周期已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -737,6 +737,15 @@ AI 与能力
 - `taskService.ts` 从第二十一批后的 3108 行降至 2675 行；新增 9 个 provider 协议测试，覆盖端点/鉴权、Claude 文本/图片/相邻角色 payload、重试分类与确定性退避、usage、native/legacy 调用归一化、分片 tool_calls、SSE 缓冲和 OpenAI/Claude 流事件。
 - 打包 IPC smoke 扩展三条真实 Agent provider 路径：OpenAI-compatible 首次 503 后重试并跨网络 chunk 完成文本工具协议；native 模式合并拆开的 function name/JSON 参数、执行 `delay.sleep` 并通过 `role=tool` 完成第二轮；Claude 使用 `/v1/messages`、`x-api-key` 和规范 payload，跨 chunk 合并 usage 为 3/4/7。
 - `npm test` 共 43 个测试文件、183 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 OpenAI text/native 与 Claude Agent smoke、其余 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Agent HTTP 请求生命周期、取消/重试编排和视觉 fallback 边界。
+
+### P2-1 进展记录（2026-07-13，第二十三批）
+
+- 新增 `electron/task/taskAgentLlmClient.ts`，集中管理 native/text 两类 Agent HTTP 请求、AbortController 超时与主动取消、SSE 读取、瞬时错误重试，以及视觉失败恢复后的重新请求；provider payload 与分片解析继续复用上一批的协议模块。
+- `TaskService` 改为构造 `TaskAgentLlmClient` 并注入任务取消状态、取消回调、视觉恢复、成功能力记录和重试日志，只保留任务进度、消息循环与视觉策略编排；模型参数、最大回合、工具协议、usage 累加和最终消息契约保持不变。
+- 修复视觉恢复请求的取消竞态：旧实现从 `catch` 直接递归发起新请求时，旧请求的 `finally` 可能随后清空新请求刚注册的取消回调；现在先完成旧请求计时器与取消回调清理，再启动恢复请求。回归测试会让第二次请求保持 pending，并在旧清理完成后确认其取消回调仍然有效。
+- `taskService.ts` 从第二十二批后的 2675 行降至 2429 行；新增 6 个 LLM client 测试，覆盖跨 chunk 文本工具截停、503 确定性重试、主动取消与清理、视觉恢复取消回调存活、native 分片调用合并，以及 Claude Messages payload/usage。
+- 打包 IPC smoke 继续验证 OpenAI-compatible 文本首次 503 后成功重试、跨 chunk `TOOL_REQUEST/TOOL_RESULT`、native 拆分名称与 JSON 参数合并及第二轮 `role=tool`，并确认 Claude 使用 `/v1/messages`、`x-api-key` 和 3/4/7 usage；本地媒体 smoke 与 15 个 UI baseline 场景无回归。
+- `npm test` 共 44 个测试文件、189 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 均通过。下一批继续拆分 Agent 多轮会话与工具执行编排，进一步收窄 `TaskService` 对消息、进度和视觉回执的耦合。
 
 ## 14. P2-2：前端加载与运行性能
 
