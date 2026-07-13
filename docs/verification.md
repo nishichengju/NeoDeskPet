@@ -755,3 +755,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、数据库 schema、向量设置字段含义、embedding HTTP 协议、混合召回权重或界面样式。聚焦测试验证配置失败不丢 pending、同批候选唯一、hash touch、精确 typed-array 字节范围和 provider 失败完整性；打包 smoke 通过真实后台 debounce、生产 `better-sqlite3` 和鉴权 embeddings API 证明索引确实异步落库。尚未连接真实云端 provider 测量限流/超时，也未对十万级待索引队列做吞吐基线；KG 抽取和图谱持久化仍留在 `MemoryService`，由下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第三十七批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory KG 候选/LLM 抽取/图谱事务持久化，以及英文实体 FTS 查询修复
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 64 个测试文件、284 个用例通过 |
+| Memory KG 索引维护测试 | 4 个用例通过：配置失败保留 pending；pending/兜底排重、fresh hash 跳过与完整图谱落库；provider 逐行错误隔离；关系写入失败事务回滚 |
+| Memory FTS 查询测试 | 3 个用例通过：英文单实体保持完整 token、多词 OR 与引号清理、中文无空格逐字扩展 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker 和品牌元数据写入成功 |
+| `npm run ipc:smoke` | 真实后台 KG 维护写入 status=ok、40 字符 hash、Alice/Tea 两个实体和 `Alice likes Tea` 实体关系；目标抽取请求 1 次且鉴权/payload 正确；KG retrieval hits=1 并返回原记忆；旧库迁移、Tag/Vector、Agent/MCP/媒体/任务路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；无 console error、无横向或纵向溢出，Memory 100%/150% 与 Settings 截图无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、数据库 schema、KG 设置字段、抽取提示词、图谱表含义、混合召回权重或界面样式。Node SQLite 聚焦测试覆盖候选唯一性、JSON 兼容解析、实体/关系规范化、逐行 provider 错误和事务回滚；打包 smoke 则通过专用加密密钥、真实主进程调度、生产 `better-sqlite3`、FTS trigger 和 renderer 召回接口证明 KG 从抽取到召回闭环。端到端 smoke 发现并修复了英文无空格实体被逐字符拆分、导致 KG FTS 无法命中的旧问题。尚未连接真实云端 KG provider 验证供应商特有输出、限流和超时，也未做十万级实体/mention 的 FTS 与图谱召回基线；混合召回候选、评分排序和最终文本组装仍留在 `MemoryService`，由下一批继续拆分。

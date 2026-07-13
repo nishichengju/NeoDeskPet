@@ -1,11 +1,13 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { openMemoryDatabase, type MemoryDatabaseHandle } from './memory/memoryDatabase'
 import {
   MemoryEmbeddingClient,
   hashMemoryEmbeddingInput,
   resolveMemoryEmbeddingConfig,
 } from './memory/memoryEmbeddingClient'
+import { buildMemoryFtsQuery } from './memory/memoryFtsQuery'
 import { MemoryIndexQueue } from './memory/memoryIndexQueue'
+import { MemoryKgIndexMaintainer } from './memory/memoryKgIndex'
 import { MemoryTagIndexMaintainer, extractMemoryTags } from './memory/memoryTagIndex'
 import { MemoryVectorIndexMaintainer } from './memory/memoryVectorIndex'
 import { MemoryVectorSearchClient } from './memory/memoryVectorSearchClient'
@@ -66,36 +68,6 @@ function clampFloat(value: unknown, fallback: number, min: number, max: number):
   return Math.max(min, Math.min(max, n))
 }
 
-function ftsQueryFromText(text: string): string | null {
-  const cleaned = text.trim().replace(/\s+/g, ' ')
-  if (!cleaned) return null
-
-  // 若没有空格（中文常见），尝试拆分成字符 token，提高召回
-  if (!/\s/.test(cleaned) && cleaned.length >= 2) {
-    const chars = Array.from(cleaned)
-      .map((c) => c.trim())
-      .filter(Boolean)
-      .filter((c) => /[\p{L}\p{N}]/u.test(c))
-      .slice(0, 12)
-
-    if (chars.length >= 2) {
-      return chars.map((c) => `"${c.replace(/"/g, '')}"`).join(' OR ')
-    }
-  }
-
-  const tokens = cleaned
-    .split(' ')
-    .map((t) => t.trim())
-    .filter(Boolean)
-    .slice(0, 20)
-    .map((t) => t.replace(/"/g, ''))
-    .filter(Boolean)
-
-  if (tokens.length === 0) return null
-  // 用 OR 提高召回率；FTS5 会自动做 BM25 排序
-  return tokens.map((t) => `"${t}"`).join(' OR ')
-}
-
 function extractKeywordFromQueryForLike(query: string): string | null {
   const raw = query.trim()
   if (!raw) return null
@@ -133,36 +105,6 @@ function normalizeMemoryText(text: string): string {
     .trim()
     .replace(/\s+/g, ' ')
     .trim()
-}
-
-function normalizeEntityKey(textRaw: string): string {
-  return normalizeMemoryText(textRaw)
-    .replace(/[，。！？；：,.!?;:、【】「」『』（）()《》<>“”"'\s]/g, '')
-    .trim()
-    .toLowerCase()
-}
-
-function extractJsonObject(text: string): Record<string, unknown> | null {
-  const cleaned = text.trim()
-  if (!cleaned) return null
-  try {
-    const parsed = JSON.parse(cleaned) as unknown
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
-  } catch {
-    // ignore
-  }
-
-  const start = cleaned.indexOf('{')
-  const end = cleaned.lastIndexOf('}')
-  if (start < 0 || end < 0 || end <= start) return null
-  const slice = cleaned.slice(start, end + 1)
-  try {
-    const parsed = JSON.parse(slice) as unknown
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
-  } catch {
-    return null
-  }
-  return null
 }
 
 function extractKeyValue(textRaw: string): { key: string; value: string } | null {
@@ -311,6 +253,7 @@ export class MemoryService {
   private indexQueue = new MemoryIndexQueue()
   private embeddingClient = new MemoryEmbeddingClient()
   private chatIngestRedirect = new Map<string, number>()
+  private kgIndexMaintainer: MemoryKgIndexMaintainer
   private tagIndexMaintainer: MemoryTagIndexMaintainer
   private vectorIndexMaintainer: MemoryVectorIndexMaintainer
   private vectorSearchClient: MemoryVectorSearchClient
@@ -318,6 +261,7 @@ export class MemoryService {
   constructor(userDataDir: string) {
     const opened = openMemoryDatabase(userDataDir)
     this.db = opened.db
+    this.kgIndexMaintainer = new MemoryKgIndexMaintainer(opened.db, this.indexQueue)
     this.tagIndexMaintainer = new MemoryTagIndexMaintainer(opened.db, this.indexQueue)
     this.vectorIndexMaintainer = new MemoryVectorIndexMaintainer(opened.db, this.indexQueue, this.embeddingClient)
     this.vectorSearchClient = new MemoryVectorSearchClient(opened.dbPath)
@@ -887,395 +831,7 @@ export class MemoryService {
     aiSettings: AISettings,
     opts?: { batchSize?: number },
   ): Promise<{ scanned: number; extracted: number; skipped: number; error?: string }> {
-    const enabled = memSettings.kgEnabled ?? false
-    if (!enabled) return { scanned: 0, extracted: 0, skipped: 0 }
-
-    const useCustom = memSettings.kgUseCustomAi ?? true
-    const apiKey = (useCustom ? memSettings.kgAiApiKey : aiSettings.apiKey) ?? ''
-    const baseUrl = (useCustom ? memSettings.kgAiBaseUrl : aiSettings.baseUrl) ?? ''
-    const model = (memSettings.kgAiModel ?? '').trim() || (aiSettings.model ?? '').trim()
-    const temperature = clampFloat(memSettings.kgAiTemperature, 0.2, 0, 2)
-    const maxTokens = clampInt(memSettings.kgAiMaxTokens, 1200, 200, 8000)
-
-    if (!apiKey.trim() || !baseUrl.trim() || !model.trim()) {
-      return { scanned: 0, extracted: 0, skipped: 0, error: 'KG 抽取 API 未配置（缺少 apiKey/baseUrl/model）' }
-    }
-
-    const batchSize = clampInt(opts?.batchSize, 2, 1, 10)
-    const picked = this.indexQueue.take('kg', batchSize)
-
-    type Row = {
-      rowid: number
-      personaId: string | null
-      kind: string
-      content: string
-      updatedAt: number
-      role: string | null
-      createdAt: number
-      prevHash: string | null
-      prevUpdatedAt: number | null
-    }
-
-    const rows: Row[] = []
-    if (picked.length > 0) {
-      const placeholders = picked.map(() => '?').join(',')
-      const found = this.db
-        .prepare(
-          `
-          SELECT
-            m.rowid as rowid,
-            m.persona_id as personaId,
-            m.kind as kind,
-            m.content as content,
-            m.updated_at as updatedAt,
-            m.role as role,
-            m.created_at as createdAt,
-            ki.content_hash as prevHash,
-            ki.updated_at as prevUpdatedAt
-          FROM memory m
-          LEFT JOIN kg_memory_index ki ON ki.memory_rowid = m.rowid
-          WHERE m.rowid IN (${placeholders})
-            AND COALESCE(m.status, 'active') <> 'deleted'
-            AND LENGTH(TRIM(m.content)) >= 2
-          `,
-        )
-        .all(...picked) as Row[]
-      rows.push(...found)
-    }
-
-    const remaining = batchSize - rows.length
-    if (remaining > 0) {
-      const includeChat = memSettings.kgIncludeChatMessages ?? false
-      const kinds = includeChat ? "('manual_note','chat_message')" : "('manual_note')"
-
-      const more = this.db
-        .prepare(
-          `
-          SELECT
-            m.rowid as rowid,
-            m.persona_id as personaId,
-            m.kind as kind,
-            m.content as content,
-            m.updated_at as updatedAt,
-            m.role as role,
-            m.created_at as createdAt,
-            ki.content_hash as prevHash,
-            ki.updated_at as prevUpdatedAt
-          FROM memory m
-          LEFT JOIN kg_memory_index ki ON ki.memory_rowid = m.rowid
-          WHERE COALESCE(m.status, 'active') <> 'deleted'
-            AND m.kind IN ${kinds}
-            AND LENGTH(TRIM(m.content)) >= 2
-            AND (ki.memory_rowid IS NULL OR ki.updated_at < m.updated_at)
-          ORDER BY m.updated_at DESC, m.rowid DESC
-          LIMIT ?
-          `,
-        )
-        .all(remaining) as Row[]
-      rows.push(...more)
-    }
-
-    if (rows.length === 0) return { scanned: 0, extracted: 0, skipped: 0 }
-
-    const toExtract: Array<Row & { h: string }> = []
-    for (const r of rows) {
-      const pid = r.personaId ?? 'default'
-      const clipped = normalizeMemoryText(r.content).slice(0, 2500)
-      const h = createHash('sha1').update(`${pid}\n${r.kind}\n${clipped}`).digest('hex')
-      if (r.prevHash === h && (r.prevUpdatedAt ?? 0) >= (r.updatedAt ?? 0)) continue
-      toExtract.push({ ...r, h })
-    }
-
-    if (toExtract.length === 0) return { scanned: rows.length, extracted: 0, skipped: rows.length }
-
-    const endpoint = `${baseUrl.replace(/\/+$/, '')}/chat/completions`
-    const systemPrompt = `你是“记忆图谱抽取器”。
-
-目标：从一段对话/记忆原文中抽取【实体/关系】并给出证据。
-要求：
-1) 只输出严格 JSON 对象，不要输出任何解释、代码块、Markdown。
-2) 用中文字段值；实体名尽量短且可复用。
-3) 关系 predicate 用简短动词/短语（如“喜欢”“属于”“位于”“工作于”“需要”“计划”）。
-
-输出 JSON 结构：
-{
-  "entities": [
-    { "name": "", "type": "entity|person|place|food|work|task|preference|other", "aliases": [""] }
-  ],
-  "relations": [
-    { "subject": "", "predicate": "", "object": { "type": "entity|literal", "value": "" }, "confidence": 0.0, "evidence": "" }
-  ]
-}
-
-注意：
-- evidence 必须来自原文的直接片段（可截短），用于追溯。
-- 关系不要过多，最多 12 条。实体最多 20 个。`
-
-    const extractedAt = now()
-    let extracted = 0
-
-    for (const r of toExtract) {
-      const personaId = (r.personaId ?? 'default').trim() || 'default'
-      const role = r.role === 'assistant' ? 'assistant' : r.role === 'user' ? 'user' : 'note'
-      const content = normalizeMemoryText(r.content).slice(0, 2500)
-      const userPrompt = `persona=${personaId}\nkind=${r.kind}\nrole=${role}\ncreatedAt=${formatTs(r.createdAt)}\n\n原文：\n${content}`
-
-      try {
-        const resp = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            temperature,
-            max_tokens: maxTokens,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
-            ],
-          }),
-        })
-
-        if (!resp.ok) {
-          const errData = await resp.json().catch(() => ({} as unknown))
-          const msg =
-            (errData as { error?: { message?: string } }).error?.message ?? `HTTP ${resp.status}: ${resp.statusText}`
-          this.upsertKgIndexRow({
-            memoryRowid: r.rowid,
-            personaId,
-            contentHash: r.h,
-            updatedAt: r.updatedAt,
-            extractedAt,
-            status: 'error',
-            error: msg,
-          })
-          continue
-        }
-
-        const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> }
-        const text = data.choices?.[0]?.message?.content ?? ''
-        const obj = extractJsonObject(text)
-        if (!obj) {
-          this.upsertKgIndexRow({
-            memoryRowid: r.rowid,
-            personaId,
-            contentHash: r.h,
-            updatedAt: r.updatedAt,
-            extractedAt,
-            status: 'error',
-            error: 'KG 输出不是有效 JSON 对象',
-          })
-          continue
-        }
-
-        const entitiesRaw = Array.isArray(obj.entities) ? (obj.entities as unknown[]) : []
-        const relationsRaw = Array.isArray(obj.relations) ? (obj.relations as unknown[]) : []
-
-        const entities = entitiesRaw
-          .map((it) => it as { name?: unknown; type?: unknown; aliases?: unknown })
-          .map((it) => ({
-            name: typeof it.name === 'string' ? it.name.trim() : '',
-            type: typeof it.type === 'string' ? it.type.trim() : 'entity',
-            aliases: Array.isArray(it.aliases) ? it.aliases.map((x) => (typeof x === 'string' ? x.trim() : '')).filter(Boolean) : [],
-          }))
-          .filter((e) => e.name.length >= 2)
-          .slice(0, 20)
-
-        const rels = relationsRaw
-          .map((it) => it as {
-            subject?: unknown
-            predicate?: unknown
-            object?: unknown
-            confidence?: unknown
-            evidence?: unknown
-          })
-          .map((it) => {
-            const subject = typeof it.subject === 'string' ? it.subject.trim() : ''
-            const predicate = typeof it.predicate === 'string' ? it.predicate.trim() : ''
-            const confidence = clampFloat(it.confidence, 0.6, 0, 1)
-            const evidence = typeof it.evidence === 'string' ? it.evidence.trim().slice(0, 160) : ''
-            const objVal = it.object as { type?: unknown; value?: unknown } | null
-            const oType = objVal && typeof objVal.type === 'string' ? objVal.type.trim() : 'literal'
-            const oValue = objVal && typeof objVal.value === 'string' ? objVal.value.trim() : ''
-            return { subject, predicate, objectType: oType, objectValue: oValue, confidence, evidence }
-          })
-          .filter((x) => x.subject && x.predicate && x.objectValue)
-          .slice(0, 12)
-
-        this.applyKgExtraction({
-          personaId,
-          memoryRowid: r.rowid,
-          memoryUpdatedAt: r.updatedAt,
-          extractedAt,
-          contentHash: r.h,
-          entities,
-          relations: rels,
-        })
-        extracted += 1
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        this.upsertKgIndexRow({
-          memoryRowid: r.rowid,
-          personaId,
-          contentHash: r.h,
-          updatedAt: r.updatedAt,
-          extractedAt,
-          status: 'error',
-          error: msg,
-        })
-      }
-    }
-
-    return { scanned: rows.length, extracted, skipped: rows.length - toExtract.length }
-  }
-
-  private upsertKgIndexRow(args: {
-    memoryRowid: number
-    personaId: string
-    contentHash: string
-    status: 'ok' | 'error'
-    error?: string
-    updatedAt: number
-    extractedAt: number
-  }): void {
-    const rowid = clampInt(args.memoryRowid, 0, 1, 2_000_000_000)
-    if (rowid <= 0) return
-    const exists = this.db.prepare('SELECT 1 FROM memory WHERE rowid = ? LIMIT 1').get(rowid) as { 1: number } | undefined
-    if (!exists) return
-    const pid = args.personaId.trim() || 'default'
-    const memUpdatedAt = clampInt(args.updatedAt, 0, 0, Number.MAX_SAFE_INTEGER)
-    try {
-      this.db
-        .prepare(
-          `
-          INSERT INTO kg_memory_index (memory_rowid, persona_id, content_hash, status, last_error, updated_at, extracted_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(memory_rowid) DO UPDATE SET
-            persona_id = excluded.persona_id,
-            content_hash = excluded.content_hash,
-            status = excluded.status,
-            last_error = excluded.last_error,
-            updated_at = excluded.updated_at,
-            extracted_at = excluded.extracted_at
-          `,
-        )
-        .run(rowid, pid, args.contentHash, args.status, args.error ?? null, memUpdatedAt, args.extractedAt)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (msg.includes('FOREIGN KEY constraint failed')) return
-      throw err
-    }
-  }
-
-  private applyKgExtraction(args: {
-    personaId: string
-    memoryRowid: number
-    memoryUpdatedAt: number
-    extractedAt: number
-    contentHash: string
-    entities: Array<{ name: string; type: string; aliases: string[] }>
-    relations: Array<{
-      subject: string
-      predicate: string
-      objectType: string
-      objectValue: string
-      confidence: number
-      evidence: string
-    }>
-  }): void {
-    const personaId = args.personaId.trim() || 'default'
-    const rowid = clampInt(args.memoryRowid, 0, 1, 2_000_000_000)
-    if (rowid <= 0) return
-    const exists = this.db.prepare('SELECT 1 FROM memory WHERE rowid = ? LIMIT 1').get(rowid) as { 1: number } | undefined
-    if (!exists) return
-
-    const ts = args.extractedAt
-
-    const upsertEntity = this.db.prepare(
-      `
-      INSERT INTO kg_entity (persona_id, name, entity_type, aliases_json, key, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(persona_id, key, entity_type) DO UPDATE SET
-        name = excluded.name,
-        aliases_json = excluded.aliases_json,
-        updated_at = excluded.updated_at
-      `,
-    )
-    const getEntity = this.db.prepare(
-      'SELECT id as id FROM kg_entity WHERE persona_id = ? AND key = ? AND entity_type = ? LIMIT 1',
-    )
-
-    const clearMentions = this.db.prepare('DELETE FROM kg_entity_mention WHERE memory_rowid = ?')
-    const insertMention = this.db.prepare(
-      'INSERT OR IGNORE INTO kg_entity_mention (entity_id, memory_rowid, created_at) VALUES (?, ?, ?)',
-    )
-
-    const clearRels = this.db.prepare('DELETE FROM kg_relation WHERE memory_rowid = ?')
-    const insertRel = this.db.prepare(
-      `
-      INSERT OR IGNORE INTO kg_relation (
-        persona_id, subject_entity_id, predicate, object_entity_id, object_literal, confidence, memory_rowid, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-    )
-
-    const tx = this.db.transaction(() => {
-      const idByKey = new Map<string, number>()
-
-      for (const e of args.entities) {
-        const key = normalizeEntityKey(e.name)
-        if (!key) continue
-        const entityType = e.type.trim() || 'entity'
-        const aliases = Array.from(new Set([...(e.aliases ?? []), e.name].map((x) => x.trim()).filter(Boolean))).slice(0, 12)
-        const aliasesJson = JSON.stringify(aliases, null, 0)
-        upsertEntity.run(personaId, e.name, entityType, aliasesJson, key, ts, ts)
-        const row = getEntity.get(personaId, key, entityType) as { id?: number } | undefined
-        const id = clampInt(row?.id, 0, 1, 2_000_000_000)
-        if (id > 0) idByKey.set(`${entityType}:${key}`, id)
-      }
-
-      clearMentions.run(rowid)
-      for (const [k, id] of idByKey) {
-        void k
-        insertMention.run(id, rowid, ts)
-      }
-
-      clearRels.run(rowid)
-      for (const rel of args.relations) {
-        const skey = normalizeEntityKey(rel.subject)
-        if (!skey) continue
-        const subjTypeKey = Array.from(idByKey.keys()).find((k) => k.endsWith(`:${skey}`))
-        const subjId = subjTypeKey ? idByKey.get(subjTypeKey) : undefined
-        if (!subjId) continue
-
-        let objEntityId: number | null = null
-        let objLiteral: string | null = null
-
-        if (rel.objectType === 'entity') {
-          const okey = normalizeEntityKey(rel.objectValue)
-          const objTypeKey = Array.from(idByKey.keys()).find((k) => k.endsWith(`:${okey}`))
-          objEntityId = objTypeKey ? (idByKey.get(objTypeKey) ?? null) : null
-          if (!objEntityId) objLiteral = rel.objectValue
-        } else {
-          objLiteral = rel.objectValue
-        }
-
-        insertRel.run(personaId, subjId, rel.predicate.slice(0, 40), objEntityId, objLiteral?.slice(0, 120) ?? null, rel.confidence, rowid, ts)
-      }
-
-      this.upsertKgIndexRow({
-        memoryRowid: rowid,
-        personaId,
-        contentHash: args.contentHash,
-        status: 'ok',
-        updatedAt: args.memoryUpdatedAt,
-        extractedAt: ts,
-      })
-    })
-
-    tx()
+    return this.kgIndexMaintainer.run(memSettings, aiSettings, opts)
   }
 
   private buildMemoryWhere(args: MemoryFilterArgs): { whereSql: string; params: Array<string | number> } {
@@ -2167,7 +1723,7 @@ export class MemoryService {
       }
     }
 
-    const match = ftsQueryFromText(query)
+    const match = buildMemoryFtsQuery(query)
     if (!match) {
       return {
         addon: this.buildPersonaAddon(personaId, ''),
@@ -2387,7 +1943,7 @@ export class MemoryService {
     // M6：KG 图谱召回（实体/关系 -> 反查证据 memory_rowid）
     const kgEnabled = memSettings.kgEnabled ?? false
     if (kgEnabled) {
-      const kgMatch = ftsQueryFromText(query)
+      const kgMatch = buildMemoryFtsQuery(query)
       if (kgMatch) {
         const entRows = this.db
           .prepare(

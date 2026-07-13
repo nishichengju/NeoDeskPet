@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十六批：Memory Vector 后台索引维护边界已拆分）
+- 状态：P2-1 进行中（第三十七批：Memory KG 抽取、图谱持久化与英文实体召回已收口）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -864,6 +864,15 @@ AI 与能力
 - 新增 3 个 Vector 维护测试，覆盖禁用/缺模型/缺 API 时保留 pending、pending 与兜底候选去重、touch 与 embedding 持久化，以及 provider 失败事务完整性。
 - 打包 IPC smoke 更新真实记忆并等待后台 debounce 维护完成；生产 SQLite 写入 model=`ipc-memory-vector-smoke`、dims=8、BLOB=32 bytes、content hash=40 字符，embeddings API 仅请求 1 次且携带配置鉴权。
 - `memoryService.ts` 从第三十五批后的 2728 行降至 2600 行；`npm test` 共 62 个测试文件、277 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 KG 实体/关系抽取、候选维护与图谱事务持久化边界。
+
+第三十七批进展（2026-07-14）：
+
+- 新增 `electron/memory/memoryKgIndex.ts`，集中管理 KG 功能/API 配置校验、pending/兜底候选、内容 hash、OpenAI-compatible 抽取请求、兼容 JSON 清洗、实体/关系归一化、逐行错误隔离，以及 `kg_entity/kg_entity_mention/kg_relation/kg_memory_index` 事务持久化；`MemoryService.runKgMaintenance` 现在只做委托。
+- KG 兜底扫描排除本轮 pending rowid，避免同一记忆重复占用批次；配置无效时不会消费 pending，provider 单行失败会写入对应 index error 并继续后续候选，图谱写入失败会完整回滚实体、mention、关系和成功索引状态。
+- 新增 `electron/memory/memoryFtsQuery.ts`，修复无空格英文实体被误拆为单字符 FTS token 的问题；`Alice` 现在生成完整 `"Alice"` 查询，中文无空格查询仍保留逐字扩展策略，普通 Memory FTS 与 KG 实体 FTS 共用同一构造器。
+- 新增 4 个 KG 维护测试和 3 个 FTS 查询测试，覆盖配置失败保留队列、pending/兜底排重、fresh hash 跳过、抽取 payload、实体/mention/实体关系与 literal fallback、provider 逐行错误、事务回滚，以及英文/多词/中文查询构造。
+- 打包 IPC smoke 使用专用加密 KG 密钥和 `ipc-memory-kg-smoke` 模型，经真实后台 debounce 写入 status=ok、40 字符 hash、Alice/Tea 两个实体与 `Alice likes Tea` 关系；目标请求 1 次且鉴权/提示词正确，随后 KG 召回 hits=1 并返回原记忆。
+- `memoryService.ts` 从第三十六批后的 2600 行降至 2156 行；`npm test` 共 64 个测试文件、284 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 混合召回的 FTS/LIKE/Tag/KG/Vector 候选、评分排序与回执组装边界。
 
 ## 14. P2-2：前端加载与运行性能
 

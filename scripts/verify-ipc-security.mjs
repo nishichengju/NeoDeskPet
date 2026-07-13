@@ -41,6 +41,7 @@ const legacyMemoryCreatedAt = Date.now()
 const legacyVectorMemoryContent = 'A cobalt lighthouse watches the northern sea.'
 const legacyVectorQuery = 'semantic beacon recollection'
 const legacyVectorModel = 'ipc-memory-vector-smoke'
+const memoryKgModel = 'ipc-memory-kg-smoke'
 const legacyMemoryDatabase = new DatabaseSync(memoryDatabaseFile)
 legacyMemoryDatabase.exec(`
   CREATE TABLE persona (
@@ -155,6 +156,10 @@ const aiServer = http.createServer(async (request, response) => {
   const isNativeAgent = body.model === 'ipc-agent-native-smoke'
   const isAutoFallbackAgent = body.model === 'ipc-agent-auto-fallback-smoke'
   const isMmvectorWorkflowAgent = body.model === 'ipc-agent-mmvector-workflow-smoke'
+  const isMemoryKgExtraction = body.model === memoryKgModel
+  const memoryKgUserPrompt = isMemoryKgExtraction
+    ? body.messages?.find((message) => message?.role === 'user')?.content
+    : undefined
   const recordedRequest = {
     path: request.url,
     authMatches: isClaudeAgent
@@ -175,6 +180,15 @@ const aiServer = http.createServer(async (request, response) => {
       Array.isArray(body.tools) &&
       body.tools.length > 0 &&
       body.tool_choice === 'auto',
+    memoryKgPayloadMatches:
+      isMemoryKgExtraction &&
+      body.stream !== true &&
+      Array.isArray(body.messages) &&
+      body.messages.some(
+        (message) => message?.role === 'system' && String(message?.content ?? '').includes('记忆图谱抽取器'),
+      ) &&
+      typeof memoryKgUserPrompt === 'string',
+    memoryKgUserPrompt,
   }
   aiRequests.push(recordedRequest)
 
@@ -190,6 +204,36 @@ const aiServer = http.createServer(async (request, response) => {
     recordedRequest.simulatedStatus = 400
     response.writeHead(400, { 'Content-Type': 'application/json' })
     response.end(JSON.stringify({ error: { message: 'thought_signature is required for native tool continuation' } }))
+    return
+  }
+
+  if (isMemoryKgExtraction) {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                entities: [
+                  { name: 'Alice', type: 'person', aliases: ['Ally'] },
+                  { name: 'Tea', type: 'food', aliases: [] },
+                ],
+                relations: [
+                  {
+                    subject: 'Alice',
+                    predicate: 'likes',
+                    object: { type: 'entity', value: 'Tea' },
+                    confidence: 0.92,
+                    evidence: 'Alice likes Tea',
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+      }),
+    )
     return
   }
 
@@ -1393,6 +1437,113 @@ try {
     'packaged vector maintenance did not use the configured authenticated embeddings API',
   )
   await settings.evaluate(async () => window.neoDeskPet.setMemorySettings({ vectorEnabled: false }))
+  await settings.evaluate(
+    async ({ baseUrl, apiKey, model }) => {
+      await window.neoDeskPet.setSecret('memory-kg', apiKey)
+      return window.neoDeskPet.setMemorySettings({
+        kgEnabled: true,
+        kgUseCustomAi: true,
+        kgAiBaseUrl: baseUrl,
+        kgAiModel: model,
+        kgAiTemperature: 0.25,
+        kgAiMaxTokens: 700,
+      })
+    },
+    { baseUrl: `${aiServerOrigin}/v1`, apiKey: aiSmokeKey, model: memoryKgModel },
+  )
+  const kgIndexContent = 'Alice likes Tea in the IPC packaged KG maintenance memory.'
+  const kgIndexUpdated = await memory.evaluate(
+    async ({ rowid, content }) =>
+      window.neoDeskPet.updateMemory({
+        rowid,
+        content,
+        reason: 'ipc_kg_index_smoke',
+        source: 'ipc_kg_index_smoke',
+      }),
+    { rowid: tagMemory.rowid, content: kgIndexContent },
+  )
+  let kgIndexRow = null
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const kgInspectionDatabase = new DatabaseSync(memoryDatabaseFile)
+    kgIndexRow = kgInspectionDatabase
+      .prepare(
+        'SELECT status, last_error as lastError, content_hash as contentHash, updated_at as updatedAt, extracted_at as extractedAt FROM kg_memory_index WHERE memory_rowid = ?',
+      )
+      .get(tagMemory.rowid)
+    kgInspectionDatabase.close()
+    if (kgIndexRow?.status === 'ok' && Number(kgIndexRow?.updatedAt ?? 0) >= kgIndexUpdated.updatedAt) break
+  }
+  const kgInspectionDatabase = new DatabaseSync(memoryDatabaseFile)
+  const kgEntities = kgInspectionDatabase
+    .prepare(
+      `
+      SELECT e.name, e.entity_type as entityType, e.aliases_json as aliasesJson
+      FROM kg_entity_mention em
+      JOIN kg_entity e ON e.id = em.entity_id
+      WHERE em.memory_rowid = ?
+      ORDER BY e.name
+      `,
+    )
+    .all(tagMemory.rowid)
+  const kgRelations = kgInspectionDatabase
+    .prepare(
+      `
+      SELECT s.name as subject, r.predicate, o.name as objectEntity, r.object_literal as objectLiteral, r.confidence
+      FROM kg_relation r
+      JOIN kg_entity s ON s.id = r.subject_entity_id
+      LEFT JOIN kg_entity o ON o.id = r.object_entity_id
+      WHERE r.memory_rowid = ?
+      ORDER BY r.id
+      `,
+    )
+    .all(tagMemory.rowid)
+  kgInspectionDatabase.close()
+  const kgIndexRequests = aiRequests.filter(
+    (request) => request.model === memoryKgModel && request.memoryKgUserPrompt?.includes(kgIndexContent),
+  )
+  const kgRetrieve = await chat.evaluate(
+    async ({ personaId, query }) => window.neoDeskPet.retrieveMemory({ personaId, query, limit: 5, reinforce: false }),
+    { personaId: legacyMemoryPersonaId, query: 'Alice' },
+  )
+  assert(
+    kgIndexRow?.status === 'ok' &&
+      kgIndexRow?.lastError == null &&
+      typeof kgIndexRow?.contentHash === 'string' &&
+      kgIndexRow.contentHash.length === 40 &&
+      Number(kgIndexRow?.updatedAt ?? 0) >= kgIndexUpdated.updatedAt,
+    'packaged KG maintenance did not persist the expected successful index row',
+  )
+  assert(
+    kgEntities.length === 2 &&
+      kgEntities.some(
+        (entity) =>
+          entity.name === 'Alice' &&
+          entity.entityType === 'person' &&
+          JSON.parse(entity.aliasesJson).includes('Ally'),
+      ) &&
+      kgEntities.some((entity) => entity.name === 'Tea' && entity.entityType === 'food'),
+    'packaged KG maintenance did not persist the expected entity mentions',
+  )
+  assert(
+    kgRelations.length === 1 &&
+      kgRelations[0]?.subject === 'Alice' &&
+      kgRelations[0]?.predicate === 'likes' &&
+      kgRelations[0]?.objectEntity === 'Tea' &&
+      kgRelations[0]?.objectLiteral == null &&
+      kgRelations[0]?.confidence === 0.92,
+    'packaged KG maintenance did not persist the expected entity relation',
+  )
+  assert(
+    kgIndexRequests.length === 1 &&
+      kgIndexRequests[0]?.path === '/v1/chat/completions' &&
+      kgIndexRequests[0]?.authMatches === true &&
+      kgIndexRequests[0]?.memoryKgPayloadMatches === true,
+    'packaged KG maintenance did not use the configured authenticated extraction API',
+  )
+  assert((kgRetrieve.debug?.counts.kg ?? 0) > 0, 'packaged KG retrieval did not execute the graph recall layer')
+  assert(kgRetrieve.addon.includes(kgIndexContent), 'packaged KG retrieval did not return the graph-indexed memory')
+  await settings.evaluate(async () => window.neoDeskPet.setMemorySettings({ kgEnabled: false }))
   await settings.evaluate(async (rowid) => window.neoDeskPet.deleteMemory({ rowid }), tagMemory.rowid)
 
   const memoryCrudSeed = await settings.evaluate(async () => {
@@ -1770,6 +1921,23 @@ try {
         updatedAt: vectorIndexRow?.updatedAt,
         requests: vectorIndexRequests.length,
         requestAuthenticated: vectorIndexRequests[0]?.authMatches === true,
+      },
+      kgIndex: {
+        status: kgIndexRow?.status,
+        contentHashLength: kgIndexRow?.contentHash?.length,
+        updatedAt: kgIndexRow?.updatedAt,
+        extractedAt: kgIndexRow?.extractedAt,
+        entities: kgEntities.map((entity) => ({
+          name: entity.name,
+          entityType: entity.entityType,
+          aliases: JSON.parse(entity.aliasesJson),
+        })),
+        relations: kgRelations,
+        requests: kgIndexRequests.length,
+        requestAuthenticated: kgIndexRequests[0]?.authMatches === true,
+        payloadMatches: kgIndexRequests[0]?.memoryKgPayloadMatches === true,
+        retrievalHits: kgRetrieve.debug?.counts.kg ?? 0,
+        retrievalReturned: kgRetrieve.addon.includes(kgIndexContent),
       },
       personaId: memoryCrudSeed.persona.id,
       memoryRowid: memoryCrudSeed.created.rowid,
