@@ -1,5 +1,5 @@
 import type { ChatMessageRecord, TaskRecord } from '../../electron/types'
-import { MarkdownMessage } from '../components/MarkdownMessage'
+import { DeferredMarkdownMessage } from '../components/DeferredMarkdownMessage'
 import type { NeoDeskPetApi } from '../neoDeskPetApi'
 import { OrbToolCard } from './OrbToolCard'
 import { resolveOrbMessageBlocks, type OrbImageViewerRequestItem } from './orbMessageContentUtils'
@@ -23,7 +23,7 @@ export function OrbAssistantMessageContent(props: OrbAssistantMessageContentProp
     if (block.type === 'text') {
       const text = String(block.text ?? '')
       if (!text) return null
-      return <MarkdownMessage key={`${props.message.id}-t-${textSeen++}`} text={text} />
+      return <DeferredMarkdownMessage key={`${props.message.id}-t-${textSeen++}`} text={text} />
     }
     if (block.type === 'status') {
       const text = String(block.text ?? '').trim()

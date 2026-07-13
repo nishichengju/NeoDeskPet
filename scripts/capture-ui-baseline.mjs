@@ -656,6 +656,15 @@ try {
     if (expectedRouteChunk && !loadedAssetNames.some((name) => name.startsWith(expectedRouteChunk))) {
       failures.push(`${baseline.route} route chunk is missing from ${loadedAssetNames.join(',') || 'loaded assets'}`)
     }
+    const markdownAssets = loadedAssetNames.filter((name) => name.startsWith('MarkdownMessage-'))
+    const shouldLoadMarkdown = Boolean(
+      baseline.seedOrbContent || baseline.verifyImageViewer || baseline.verifyToolCard,
+    )
+    if (shouldLoadMarkdown && markdownAssets.length === 0) {
+      failures.push('seeded messages did not load the Markdown renderer chunk')
+    } else if (!shouldLoadMarkdown && markdownAssets.length > 0) {
+      failures.push(`empty message view eagerly loaded ${markdownAssets.join(',')}`)
+    }
     if (baseline.route === 'settings') {
       if (!loadedAssetNames.some((name) => name.startsWith('Live2DTab-'))) {
         failures.push('settings initial Live2D tab chunk is missing')

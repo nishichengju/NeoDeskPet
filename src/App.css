@@ -950,6 +950,11 @@
   margin-bottom: 0;
 }
 
+.ndp-md-pending {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .ndp-md .ndp-md-image {
   display: block;
   width: auto;

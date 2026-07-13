@@ -41,7 +41,8 @@ describe('ChatMessageBody', () => {
       attachments: createElement('span', { 'data-attachment': true }, 'attachment'),
     })
 
-    expect(html).toContain('<strong>Before</strong>')
+    expect(html).toContain('data-markdown-pending="true"')
+    expect(html).toContain('**Before**')
     expect(html).toContain('ndp-muted')
     expect(html).toContain('data-tool="task-1:run-1"')
     expect(html).toContain('data-attachment="true"')
@@ -58,8 +59,8 @@ describe('ChatMessageBody', () => {
     })
     expect(html).toContain('ndp-msg-row-pet')
     expect(html).toContain('data:image/png;base64,assistant')
-    expect(html).toContain('<p>Hello</p>')
-    expect(html).toContain('<p>World</p>')
+    expect(html).toContain('Hello')
+    expect(html).toContain('World')
     expect(html).toContain('data-overlay="true"')
   })
 

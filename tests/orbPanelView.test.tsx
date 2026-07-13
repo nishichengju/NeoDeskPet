@@ -75,7 +75,8 @@ describe('Orb panel view', () => {
     )
 
     expect(html).toContain('ndp-orbpanel-msg-user')
-    expect(html).toContain('<strong>hello</strong>')
+    expect(html).toContain('data-markdown-pending="true"')
+    expect(html).toContain('**hello**')
     expect(html).toContain('assistant-body')
     expect(html).toContain('attachment-user-1')
     expect(html).toContain('attachment-assistant-1')

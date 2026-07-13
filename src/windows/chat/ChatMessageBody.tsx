@@ -1,5 +1,5 @@
 import type { ChatMessageBlock, ChatMessageRecord } from '../../../electron/types'
-import { MarkdownMessage } from '../../components/MarkdownMessage'
+import { DeferredMarkdownMessage } from '../../components/DeferredMarkdownMessage'
 import { splitTextIntoTtsSegments } from '../../services/textSegmentation'
 import { normalizeInterleavedTextSegment } from '../../utils/chatMessages'
 import { trimTrailingCommaForSegment } from '../../utils/ttsText'
@@ -145,7 +145,7 @@ function renderAssistantContent(
 ): ReactNode {
   if (blocks.length === 0) {
     const text = normalizeInterleavedTextSegment(String(message.content ?? ''))
-    return text ? <MarkdownMessage text={text} /> : null
+    return text ? <DeferredMarkdownMessage text={text} /> : null
   }
 
   let toolSeen = 0
@@ -156,7 +156,7 @@ function renderAssistantContent(
       const text = normalizeInterleavedTextSegment(String(block.text ?? ''))
       if (!text) return null
       const key = `${message.id}-text-${toolSeen}-${textSeen++}`
-      return <MarkdownMessage key={key} text={text} />
+      return <DeferredMarkdownMessage key={key} text={text} />
     }
     if (block.type === 'status') {
       const text = String(block.text ?? '').trim()

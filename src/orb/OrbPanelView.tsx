@@ -1,6 +1,6 @@
 import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from 'react'
 import type { ChatMessageRecord, ChatSessionSummary } from '../../electron/types'
-import { MarkdownMessage } from '../components/MarkdownMessage'
+import { DeferredMarkdownMessage } from '../components/DeferredMarkdownMessage'
 
 export type OrbPanelViewProps = {
   sessionName?: string
@@ -86,7 +86,7 @@ export function OrbPanelView(props: OrbPanelViewProps) {
                   </div>
                 </div>
               ) : isUser ? (
-                <MarkdownMessage text={String(message.content ?? '')} />
+                <DeferredMarkdownMessage text={String(message.content ?? '')} />
               ) : (
                 props.renderAssistantMessage(message)
               )}

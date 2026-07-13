@@ -136,7 +136,8 @@ describe('Orb message content', () => {
         onOpenImageViewer: vi.fn(),
       }),
     )
-    expect(html).toContain('<strong>answer</strong>')
+    expect(html).toContain('data-markdown-pending="true"')
+    expect(html).toContain('**answer**')
     expect(html).toContain('ndp-orbpanel-status')
     expect(html).toContain('working')
     expect(html).toContain('delay.sleep')

@@ -1011,6 +1011,14 @@ AI 与能力
 - 资源门禁确认四个 Settings 基线首屏都只加载 `SettingsWindow` 与 `Live2DTab`，没有预载 AI/Persona/Tools/WorldBook；默认交互场景经过 API 搜索、向量深层搜索、设定库确认和 AI 四视图导航后，报告中才出现 `AiTab`、`PersonaTab` 与 `WorldBookTab`。22 个场景继续保持 0 failure、0 console error、无横向或纵向溢出，默认页和模型生成页截图经人工检查无视觉回归。
 - `npm test` 共 78 个测试文件、340 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过。下一批继续隔离约 160.49 kB 的 Markdown renderer，优先避免空 Chat/Orb 窗口预加载 `react-markdown` 与 GFM。
 
+第五十二批进展（2026-07-14）：
+
+- 新增 `src/components/DeferredMarkdownMessage.tsx`，在浏览器中通过 `React.lazy` 按消息首次渲染动态导入 `MarkdownMessage`；加载期间使用保持 `.ndp-md` 排版契约的纯文本 fallback，Node 静态渲染则直接返回 fallback，避免测试与服务端渲染产生 Suspense 警告。
+- Chat 助手消息、Orb 用户消息与 Orb 助手文本 block 全部改用延迟入口；空 Chat/Orb 窗口不再预加载 `react-markdown`、`remark-gfm` 及其依赖。fallback 增加 `white-space: pre-wrap` 与 `overflow-wrap: anywhere`，在 chunk 到达前保留换行并避免长文本撑破消息容器。
+- 生产构建继续生成独立的 `MarkdownMessage` 160.55 kB chunk，并新增 0.69 kB 的延迟入口；renderer 主 chunk 为 146.26 kB，Chat 为 125.99 kB，Orb 为 49.78 kB。UI 资源门禁确认只有 Orb 内容/图片查看器/消息菜单与 Chat 图片查看器/工具卡 5 个预置消息场景按需加载 Markdown chunk，其余空消息场景均未请求。
+- 新增独立 Markdown 组件测试，覆盖 GFM 粗体、任务列表、安全外链与 `<think>` 折叠块；Chat/Orb 静态视图测试改为验证 fallback 文本、标记和内容顺序，不再把 Markdown 解析职责重复绑定到上层视图。
+- `npm test` 共 79 个测试文件、342 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过；基线为 0 failure、0 console error、无横向或纵向溢出。下一批继续评估超长消息列表虚拟化与隐藏窗口轮询暂停，优先选择可建立稳定运行时门禁的边界。
+
 ## 15. P2-3：无障碍与交互一致性
 
 ### 实施步骤

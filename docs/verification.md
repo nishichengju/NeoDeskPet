@@ -1082,3 +1082,26 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/settings-default-860x680-scale100.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-generation.png`。本批未修改 Settings 导航分组、默认 Live2D 页、Tab props、搜索索引、锚点匹配、保存代理、确认语义、样式 class 或 preload/API 契约；局部 `Suspense` 只替换内容页，标题、侧栏、搜索框和保存状态保持常驻。浏览器基线在资源快照后继续执行直接 IPC 导航、endpoint 搜索与保存、Persona 文本向量深层搜索、WorldBook 删除确认和 AI 四视图切换，证明 lazy 挂载没有丢失锚点、状态或确认回调。当前 Suspense fallback 为空，极慢磁盘下首次切换到未加载 Tab 时内容区可能短暂留白；尚未采集每个 Tab 的首帧耗时。下一批继续隔离 Markdown/remark-gfm 共享 chunk。
+
+## P2-2：前端加载与运行性能（第五十二批）
+
+- 验证日期：2026-07-14
+- 优化范围：Chat/Orb 消息 Markdown renderer 按首次消息渲染加载，以及空消息窗口与预置消息窗口的运行时资源门禁
+
+| 检查 | 结果 |
+| --- | --- |
+| Markdown renderer bundle | 独立 `MarkdownMessage` chunk 160.55 kB，延迟入口 0.69 kB；renderer 主 chunk 146.26 kB、Chat 125.99 kB、Orb 49.78 kB；空 Chat/Orb 首屏不再加载 `react-markdown`/GFM |
+| Markdown 聚焦测试 | 4 个测试文件、14 个用例通过；覆盖 GFM、任务列表、安全外链、`<think>` Markdown 与 Chat/Orb fallback 内容顺序 |
+| `npm test` | 79 个测试文件、342 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，Markdown 动态 chunk、Chat/Orb 路由 chunk、Live2D 运行时、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Pet/Chat/Settings/Memory/Orb preload 与运行正常，五类窗口 `runtimeErrors` 全为空；聊天/任务/Memory/Agent/MCP/TTS/ASR、权限、持久化与重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 22 个场景通过；只有 5 个预置消息场景加载 `MarkdownMessage-*`，空 Chat/Orb 场景均未加载；0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png` 与 `artifacts/ui-baseline/orb-panel-content-560x720-scale100.png`。本批未修改 Markdown 解析规则、链接安全属性、`<think>` 折叠语义、消息 block/附件顺序、Chat/Orb 持久化结构、preload/API 契约或工具卡行为；只把重量级解析器放到浏览器动态边界之后。加载期间会短暂显示原始 Markdown 标记，但文本、换行和长词折行保持可读，chunk 完成后替换为原 `MarkdownMessage` 输出。当前尚未采集低速磁盘或冷缓存环境下 fallback 的可见时长，也未对超长会话进行虚拟化；下一批继续评估长列表与隐藏窗口运行成本。
