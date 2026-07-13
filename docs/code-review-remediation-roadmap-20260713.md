@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二十三批：Task Agent LLM 请求生命周期已拆分）
+- 状态：P2-1 进行中（第二十四批：Task Agent 工具执行会话已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -746,6 +746,15 @@ AI 与能力
 - `taskService.ts` 从第二十二批后的 2675 行降至 2429 行；新增 6 个 LLM client 测试，覆盖跨 chunk 文本工具截停、503 确定性重试、主动取消与清理、视觉恢复取消回调存活、native 分片调用合并，以及 Claude Messages payload/usage。
 - 打包 IPC smoke 继续验证 OpenAI-compatible 文本首次 503 后成功重试、跨 chunk `TOOL_REQUEST/TOOL_RESULT`、native 拆分名称与 JSON 参数合并及第二轮 `role=tool`，并确认 Claude 使用 `/v1/messages`、`x-api-key` 和 3/4/7 usage；本地媒体 smoke 与 15 个 UI baseline 场景无回归。
 - `npm test` 共 44 个测试文件、189 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 均通过。下一批继续拆分 Agent 多轮会话与工具执行编排，进一步收窄 `TaskService` 对消息、进度和视觉回执的耦合。
+
+### P2-1 进展记录（2026-07-13，第二十四批）
+
+- 新增 `electron/task/taskAgentToolSession.ts`，统一管理 native/text 工具名解析、native JSON 参数解析、同名同参缓存、`toolsUsed` 记录、toolRun running/done/error 生命周期、错误结果缓存、模型安全输出、视觉 parts 透传和已执行工具证据顺序。
+- `TaskService` 只保留 MCP、内置工具和 `vision.look` 的实际执行适配，以及视觉产物登记/模型输出净化；native 与 text 两条模型循环不再各自维护重复的缓存、错误处理、工具卡更新和证据列表。Task IPC、工具 schema、消息角色、结果截断、视觉路由与 fallback 重放格式保持不变。
+- 工具执行失败会以 `[error]` 结果进入缓存和下一轮模型上下文，同名同参再次出现时不重复触发外部副作用；未知 text 工具继续返回清洗结果和相近工具建议，未知 native 工具继续以对应 `tool_call_id` 的 `role=tool` 错误消息结束该调用。
+- `taskService.ts` 从第二十三批后的 2429 行降至 2243 行；新增 6 个工具会话测试，覆盖 native 参数/生命周期与未知调用、文本别名与重复调用、未知工具建议、失败结果缓存，以及视觉安全输出/图片 parts/证据文本。
+- 打包 IPC smoke 继续证明文本协议跨 chunk 完成 `TOOL_REQUEST/TOOL_RESULT`、native 拆分 function 名称/参数后只执行一次 `delay.sleep` 并在第二轮带 `role=tool`，Claude Messages payload 与 3/4/7 usage 保持正确；媒体 smoke 和 15 个 UI baseline 场景无回归。
+- `npm test` 共 45 个测试文件、195 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 均通过。下一批继续拆分 Agent 最终回复校验与 native/text 多轮循环，收口消息、草稿和 usage 编排。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -20,8 +20,6 @@ import type { McpManager } from './mcpManager'
 import {
   buildToolResultBlock,
   hasToolRequestMarker,
-  makeToolCallKey,
-  stableStringify,
   stripToolRequestBlocksForDisplay,
   TaskAgentToolCatalog,
 } from './task/taskAgentTools'
@@ -31,6 +29,12 @@ import {
   isAbortLikeError,
 } from './task/taskAgentLlmProtocol'
 import { TaskAgentLlmClient } from './task/taskAgentLlmClient'
+import {
+  TaskAgentToolSession,
+  type TaskAgentToolExecution,
+  type TaskAgentToolExecutionContext,
+  type TaskAgentToolRunPatch,
+} from './task/taskAgentToolSession'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, VisualArtifactRef } from './types'
@@ -1528,17 +1532,7 @@ export class TaskService {
     const toolPreview = (v: unknown, max: number) => clampText(typeof v === 'string' ? v : JSON.stringify(v ?? ''), max)
     const toolInputPreview = (toolName: string, v: unknown) => toolPreview(v, toolName === 'image.generate' ? 6000 : 500)
 
-    const upsertToolRun = (patch: {
-      id: string
-      toolName: string
-      status: 'running' | 'done' | 'error'
-      inputPreview?: string
-      outputPreview?: string
-      imagePaths?: string[]
-      error?: string
-      startedAt?: number
-      endedAt?: number
-    }) => {
+    const upsertToolRun = (patch: TaskAgentToolRunPatch) => {
       const id = patch.id.trim() || randomUUID()
       const existingIdx = (toolRuns ?? []).findIndex((r) => r?.id === id)
       const base = existingIdx >= 0 ? (toolRuns?.[existingIdx] ?? null) : null
@@ -1663,75 +1657,7 @@ export class TaskService {
       },
     })
 
-    type AgentToolExecution = {
-      output: string
-      modelOutput?: string
-      images: Array<{ mimeType: string; data: string }>
-      imagePaths: string[]
-      visionParts?: Array<Record<string, unknown>>
-    }
-
-    const executeTextToolCall = async (
-      toolNameRaw: string,
-      input: ToolInput,
-    ): Promise<AgentToolExecution> => {
-      const resolvedTool = toolCatalog.resolveTextName(toolNameRaw)
-      const def = resolvedTool.def
-      if (!def) {
-        const suggestions = toolCatalog.suggestNames(resolvedTool.cleanedName || toolNameRaw)
-        const suffix = suggestions.length ? `；相近可用工具：${suggestions.join('、')}` : ''
-        const cleaned = resolvedTool.cleanedName && resolvedTool.cleanedName !== toolNameRaw ? `（清洗后：${resolvedTool.cleanedName}）` : ''
-        throw new Error(`未知工具：${toolNameRaw}${cleaned}${suffix}`)
-      }
-
-      if (resolvedTool.requestedName !== def.name || resolvedTool.aliasApplied) {
-        const via = resolvedTool.aliasApplied ? ' alias' : ''
-        pushLog(`[Tool] normalize${via}: ${resolvedTool.requestedName || toolNameRaw} -> ${def.name}`, true)
-      }
-
-      const key = makeToolCallKey(def.name, input)
-      const cached = executedCalls.get(key)
-      if (cached && typeof cached === 'object') {
-        pushLog(`[Tool] ${def.name} skip duplicate`, true)
-        return cached
-      }
-
-      this.writeState((draft) => {
-        const it = draft.tasks.find((x) => x.id === task.id)
-        if (!it) return
-        if (!it.toolsUsed.includes(def.name)) it.toolsUsed = [...it.toolsUsed, def.name].slice(0, 80)
-        it.updatedAt = now()
-      })
-
-      if (def.name.startsWith('mcp.') && this.mcpManager) {
-        const res = await this.mcpManager.callToolDetailed(def.name, input)
-        const out = res.text
-        const imagePaths = await this.resolveToolImagePaths(task.id, out, res.images)
-        const exec = { output: out, images: res.images, imagePaths }
-        executedCalls.set(key, exec)
-        return exec
-      }
-
-      const out = await this.executeToolByName(def.name, input, task, rt)
-      const imagePaths = await this.resolveToolImagePaths(task.id, out, [])
-      const exec = { output: out, images: [] as Array<{ mimeType: string; data: string }>, imagePaths }
-      executedCalls.set(key, exec)
-      return exec
-    }
-
     pushLog(`[Agent] request: ${clampText(request, 120)}`, true)
-
-    const executedCalls = new Map<string, AgentToolExecution>()
-    const executedCallOrder: Array<{ toolName: string; input: ToolInput; output: string }> = []
-
-    const buildEvidenceText = (): string => {
-      const parts: string[] = []
-      if (request.trim()) parts.push(request.trim())
-      for (const r of executedCallOrder) {
-        if (typeof r?.output === 'string' && r.output.trim()) parts.push(r.output)
-      }
-      return parts.join('\n\n')
-    }
 
     const hasAnyFinishedToolRun = (): boolean => Array.isArray(toolRuns) && toolRuns.some((r) => r.status === 'done' || r.status === 'error')
 
@@ -1768,7 +1694,7 @@ export class TaskService {
       )
     }
 
-    const executeVisionLook = async (input: ToolInput): Promise<AgentToolExecution> => {
+    const executeVisionLook = async (input: ToolInput): Promise<TaskAgentToolExecution> => {
       const value = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null
       const artifacts = resolveVisualArtifacts(value?.artifactIds)
       if (artifacts.length === 0) throw new Error('vision.look 未收到当前会话中有效的 artifactIds')
@@ -1798,7 +1724,6 @@ export class TaskService {
         return {
           output: JSON.stringify({ ok: true, route: 'main-native', artifactIds: artifacts.map((artifact) => artifact.id) }),
           modelOutput: `已按顺序附带 ${visionParts.length} 张所选图片；请直接依据图片回答问题：${question || '客观查看图片内容'}`,
-          images: [],
           imagePaths: [],
           visionParts,
         }
@@ -1817,7 +1742,6 @@ export class TaskService {
           modelOutput:
             '以下内容来自外挂视觉模型的客观观察。请由你按桌宠人设组织最终回复，不要把外挂模型当成说话者，也不要声称主模型直接读取了原图。\n' +
             observation,
-          images: [],
           imagePaths: [],
         }
       }
@@ -1825,6 +1749,51 @@ export class TaskService {
       if (route === 'off') throw new Error('视觉路由已关闭')
       throw new Error('当前没有可用的视觉提供方；请检查主模型能力或外挂视觉 Profile')
     }
+
+    const executeAgentTool = async (
+      toolName: string,
+      input: ToolInput,
+      context: TaskAgentToolExecutionContext,
+    ): Promise<TaskAgentToolExecution> => {
+      let execution: TaskAgentToolExecution
+      if (toolName === 'vision.look') {
+        execution = await executeVisionLook(input)
+      } else if (toolName.startsWith('mcp.') && this.mcpManager) {
+        const result = await this.mcpManager.callToolDetailed(toolName, input)
+        const imagePaths = await this.resolveToolImagePaths(task.id, result.text, result.images)
+        execution = { output: result.text, imagePaths }
+      } else {
+        const output = await this.executeToolByName(toolName, input, task, rt)
+        const imagePaths = await this.resolveToolImagePaths(task.id, output, [])
+        execution = { output, imagePaths }
+      }
+
+      const artifacts = registerToolVisualArtifacts(context.recordName, context.runId, execution.imagePaths)
+      return {
+        ...execution,
+        modelOutput:
+          execution.modelOutput ??
+          (artifacts.length > 0 ? sanitizeToolOutputForModel(execution.output, artifacts) : execution.output),
+      }
+    }
+
+    const recordToolUsed = (toolName: string) => {
+      this.writeState((draft) => {
+        const item = draft.tasks.find((candidate) => candidate.id === task.id)
+        if (!item) return
+        if (!item.toolsUsed.includes(toolName)) item.toolsUsed = [...item.toolsUsed, toolName].slice(0, 80)
+        item.updatedAt = now()
+      })
+    }
+
+    const toolSession = new TaskAgentToolSession({
+      catalog: toolCatalog,
+      executeTool: executeAgentTool,
+      recordToolUsed,
+      upsertToolRun,
+      pushLog,
+      inputPreview: toolInputPreview,
+    })
 
     const normalizeUrl = (raw: string): string => {
       const u = (raw ?? '').trim()
@@ -1856,7 +1825,7 @@ export class TaskService {
       const urls = extractUrls(text)
       if (!urls.length) return { ok: true }
 
-      const evidence = buildEvidenceText()
+      const evidence = toolSession.buildEvidenceText(request)
       const missing = urls.filter((u) => !evidence.includes(u) && !evidence.includes(`${u}/`))
       if (missing.length) return { ok: false, reason: `最终回复包含未在工具结果/用户输入出现的 URL：${missing[0]}` }
 
@@ -1956,109 +1925,17 @@ export class TaskService {
           await this.waitIfPaused(task.id)
           if (rt.canceled) throw new Error('canceled')
 
-          const def = toolCatalog.resolveCallName(call.function.name)
-          if (!def) {
-            const errText = `未知工具：${call.function.name}`
-            pushLog(`[Tool] ${errText}`)
-            messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: errText })
-            continue
-          }
-
-          this.writeState((draft) => {
-            const it = draft.tasks.find((x) => x.id === task.id)
-            if (!it) return
-            if (!it.toolsUsed.includes(def.name)) it.toolsUsed = [...it.toolsUsed, def.name].slice(0, 80)
-            it.updatedAt = now()
+          const result = await toolSession.executeNative(call)
+          messages.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            name: call.function.name,
+            content: result.toolMessage,
           })
-
-          const argStr = call.function.arguments || ''
-          let toolInput: ToolInput = {}
-          try {
-            toolInput = argStr.trim() ? (JSON.parse(argStr) as ToolInput) : {}
-          } catch {
-            toolInput = argStr
-          }
-
-          pushLog(`[Tool] ${def.name} input: ${clampText(argStr, 240)}`)
-          upsertToolRun({
-            id: call.id,
-            toolName: def.name,
-            status: 'running',
-            inputPreview: toolInputPreview(def.name, toolInput),
-            startedAt: now(),
-          })
-
-          let toolOut = ''
-          let toolImagePaths: string[] = []
-          let toolExec: AgentToolExecution | null = null
-          try {
-            const key = makeToolCallKey(def.name, toolInput)
-            const cached = executedCalls.get(key)
-            if (cached && typeof cached === 'object') {
-              pushLog(`[Tool] ${def.name} skip duplicate`, true)
-              toolExec = cached
-              toolOut = cached.output
-              toolImagePaths = Array.isArray(cached.imagePaths) ? cached.imagePaths : []
-            } else {
-              if (def.name === 'vision.look') {
-                toolExec = await executeVisionLook(toolInput)
-                toolOut = toolExec.output
-                toolImagePaths = []
-                executedCalls.set(key, toolExec)
-              } else if (def.name.startsWith('mcp.') && this.mcpManager) {
-                const res = await this.mcpManager.callToolDetailed(def.name, toolInput)
-                toolOut = res.text
-                toolImagePaths = await this.resolveToolImagePaths(task.id, toolOut, res.images)
-                toolExec = { output: toolOut, images: res.images, imagePaths: toolImagePaths }
-                executedCalls.set(key, toolExec)
-              } else {
-                toolOut = await this.executeToolByName(def.name, toolInput, task, rt)
-                toolImagePaths = await this.resolveToolImagePaths(task.id, toolOut, [])
-                toolExec = { output: toolOut, images: [], imagePaths: toolImagePaths }
-                executedCalls.set(key, toolExec)
-              }
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err)
-            toolOut = `[error] ${msg}`
-            const key = makeToolCallKey(def.name, toolInput)
-            if (!executedCalls.has(key)) {
-              toolExec = { output: toolOut, images: [], imagePaths: [] }
-              executedCalls.set(key, toolExec)
-            }
-            upsertToolRun({
-              id: call.id,
-              toolName: def.name,
-              status: 'error',
-              error: clampText(msg, 800),
-              outputPreview: clampText(toolOut, 800),
-              imagePaths: [],
-              endedAt: now(),
-            })
-          }
-
-          const artifacts = registerToolVisualArtifacts(def.name, call.id, toolImagePaths)
-          const modelToolOutput =
-            toolExec?.modelOutput ?? (artifacts.length > 0 ? sanitizeToolOutputForModel(toolOut, artifacts) : toolOut)
-          if (!executedCallOrder.some((entry) => entry.toolName === def.name && stableStringify(entry.input) === stableStringify(toolInput))) {
-            executedCallOrder.push({ toolName: def.name, input: toolInput, output: modelToolOutput })
-          }
-          const toolMsg = clampText(modelToolOutput, 4000) || '(空)'
-          pushLog(`[Tool] ${def.name} done`)
-          upsertToolRun({
-            id: call.id,
-            toolName: def.name,
-            status: toolOut.startsWith('[error]') ? 'error' : 'done',
-            outputPreview: clampText(toolOut, 800),
-            imagePaths: toolImagePaths,
-            endedAt: now(),
-          })
-          messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: toolMsg })
-          const visionParts = toolExec?.visionParts ?? []
-          if (visionParts.length > 0) {
+          if (result.visionParts.length > 0) {
             pendingVisionMessages.push({
               role: 'user',
-              content: [{ type: 'text', text: toolMsg }, ...visionParts],
+              content: [{ type: 'text', text: result.toolMessage }, ...result.visionParts],
             })
           }
         }
@@ -2128,76 +2005,12 @@ export class TaskService {
           await this.waitIfPaused(task.id)
           if (rt.canceled) throw new Error('canceled')
 
-          pushLog(`[Tool] ${c.toolName} input: ${clampText(JSON.stringify(c.input ?? {}), 240)}`)
-          const runId = randomUUID()
-          upsertToolRun({
-            id: runId,
-            toolName: c.toolName,
-            status: 'running',
-            inputPreview: toolInputPreview(c.toolName, c.input ?? {}),
-            startedAt: now(),
-          })
-
-          let toolOut = ''
-          let toolImagePaths: string[] = []
-          let toolExec: AgentToolExecution | null = null
-          try {
-            const key = makeToolCallKey(c.toolName, c.input ?? {})
-            const cached = executedCalls.get(key)
-            if (cached && typeof cached === 'object') {
-              pushLog(`[Tool] ${c.toolName} skip duplicate`, true)
-              toolExec = cached
-              toolOut = cached.output
-              toolImagePaths = Array.isArray(cached.imagePaths) ? cached.imagePaths : []
-            } else {
-              toolExec = c.toolName === 'vision.look' ? await executeVisionLook(c.input) : await executeTextToolCall(c.toolName, c.input)
-              toolOut = toolExec.output
-              toolImagePaths = Array.isArray(toolExec.imagePaths) ? toolExec.imagePaths : []
-              executedCalls.set(key, toolExec)
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err)
-            toolOut = `[error] ${msg}`
-            const key = makeToolCallKey(c.toolName, c.input ?? {})
-            if (!executedCalls.has(key)) {
-              toolExec = { output: toolOut, images: [], imagePaths: [] }
-              executedCalls.set(key, toolExec)
-            }
-            upsertToolRun({
-              id: runId,
-              toolName: c.toolName,
-              status: 'error',
-              error: clampText(msg, 800),
-              outputPreview: clampText(toolOut, 800),
-              imagePaths: [],
-              endedAt: now(),
-            })
-          }
-
-          const artifacts = registerToolVisualArtifacts(c.toolName, runId, toolImagePaths)
-          const modelToolOutput =
-            toolExec?.modelOutput ?? (artifacts.length > 0 ? sanitizeToolOutputForModel(toolOut, artifacts) : toolOut)
-          if (!executedCallOrder.some((entry) => entry.toolName === c.toolName && stableStringify(entry.input) === stableStringify(c.input ?? {}))) {
-            executedCallOrder.push({ toolName: c.toolName, input: c.input ?? {}, output: modelToolOutput })
-          }
-          const toolMsg = clampText(modelToolOutput, 4000) || '(空)'
-          pushLog(`[Tool] ${c.toolName} done`)
-          upsertToolRun({
-            id: runId,
-            toolName: c.toolName,
-            status: toolOut.startsWith('[error]') ? 'error' : 'done',
-            outputPreview: clampText(toolOut, 800),
-            imagePaths: toolImagePaths,
-            endedAt: now(),
-          })
-
-          const toolResultBlock = buildToolResultBlock(c.toolName, toolMsg)
-
-          const visionParts = toolExec?.visionParts ?? []
-          if (visionParts.length > 0) {
+          const result = await toolSession.executeText(c.toolName, c.input ?? {})
+          const toolResultBlock = buildToolResultBlock(c.toolName, result.toolMessage)
+          if (result.visionParts.length > 0) {
             messages.push({
               role: 'user',
-              content: [{ type: 'text', text: toolResultBlock }, ...visionParts],
+              content: [{ type: 'text', text: toolResultBlock }, ...result.visionParts],
             })
           } else {
             messages.push({ role: 'user', content: toolResultBlock })
@@ -2271,6 +2084,7 @@ export class TaskService {
             : effectiveAgentRequest,
       })
 
+      const executedCallOrder = toolSession.listExecutedCallOrder()
       if (executedCallOrder.length > 0) {
         messages.push({
           role: 'system',
