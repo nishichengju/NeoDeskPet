@@ -9,8 +9,7 @@ import {
 } from './toolRegistry'
 import { getLive2dCapabilities } from './live2dToolState'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
-import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
-import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
+import { SkillManager } from './skillRegistry'
 import type { McpManager } from './mcpManager'
 import {
   buildToolResultBlock,
@@ -18,16 +17,13 @@ import {
 } from './task/taskAgentTools'
 import { TaskAgentConversation } from './task/taskAgentConversation'
 import { TaskAgentLoopRunner } from './task/taskAgentLoopRunner'
-import {
-  buildAgentEndpoint,
-  buildAgentHeaders,
-} from './task/taskAgentLlmProtocol'
 import { TaskAgentLlmClient } from './task/taskAgentLlmClient'
+import { resolveTaskAgentRunConfig } from './task/taskAgentRunConfig'
+import { TaskAgentTaskState } from './task/taskAgentTaskState'
 import {
   TaskAgentToolSession,
   type TaskAgentToolExecution,
   type TaskAgentToolExecutionContext,
-  type TaskAgentToolRunPatch,
 } from './task/taskAgentToolSession'
 import {
   TaskAgentVisionSession,
@@ -48,7 +44,6 @@ import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreS
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord } from './types'
 import { resolveVisionFallbackProfile } from './visionRouter'
 
-const MAX_STEP_OUTPUT_CHARS = 5000
 const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
 
 type Live2dModelTagHints = { expressions: string[]; motions: string[] }
@@ -231,18 +226,6 @@ function clampText(text: unknown, max: number): string {
   return trimmed.slice(0, max) + '…'
 }
 
-function clampInt(value: unknown, fallback: number, min: number, max: number): number {
-  const n =
-    typeof value === 'number'
-      ? value
-      : typeof value === 'string' && value.trim().length > 0
-        ? Number(value)
-        : Number.NaN
-  if (!Number.isFinite(n)) return fallback
-  const i = Math.trunc(n)
-  return Math.max(min, Math.min(max, i))
-}
-
 function sleep(ms: number): Promise<void> {
   const delay = Math.max(0, Math.trunc(ms))
   return new Promise((resolve) => setTimeout(resolve, delay))
@@ -297,10 +280,6 @@ function resolveTemplates(value: ToolInput, task: TaskRecord): ToolInput {
     out[k] = resolveTemplates(v as ToolInput, task)
   }
   return out as ToolInput
-}
-
-function clampStepOutput(text: string): string {
-  return clampText(text, MAX_STEP_OUTPUT_CHARS)
 }
 
 export class TaskService {
@@ -541,39 +520,27 @@ export class TaskService {
   }
 
   private async runAgentRunTool(resolved: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
-    const obj = typeof resolved === 'object' && resolved && !Array.isArray(resolved) ? (resolved as Record<string, unknown>) : null
-    const request = typeof obj?.request === 'string' ? obj.request : typeof resolved === 'string' ? resolved : ''
-
-    if (!request.trim()) throw new Error('agent.run 需要 request 文本')
-
     const settings = getSettings()
-    const orch = settings.orchestrator
-    const configuredMaxTurns = clampInt(orch?.toolAgentMaxTurns, 8, 1, 30)
-    const maxTurns = clampInt(obj?.maxTurns, configuredMaxTurns, 1, configuredMaxTurns)
-
-    const normalizeMode = (v: unknown): 'auto' | 'native' | 'text' | null => {
-      const s = typeof v === 'string' ? v.trim() : ''
-      if (!s) return null
-      if (s === 'auto' || s === 'native' || s === 'text') return s
-      return null
-    }
-
-    const mode: 'auto' | 'native' | 'text' = normalizeMode(obj?.mode) ?? normalizeMode(orch?.toolCallingMode) ?? 'text'
-
-    // 桌宠“人设/语气”只允许来自 AI 设置里的 systemPrompt；agent.run 不允许覆盖 system（避免多处人设割裂）
-    const system = typeof settings.ai.systemPrompt === 'string' ? settings.ai.systemPrompt.trim() : ''
-    const extraContext = typeof obj?.context === 'string' ? obj.context.trim() : ''
-
-    const maxVisionImages = clampInt(settings.ai.visionMaxImagesPerLook, 4, 1, 8)
+    const config = resolveTaskAgentRunConfig(resolved, settings)
+    const {
+      request,
+      maxTurns,
+      mode,
+      system,
+      extraContext,
+      maxVisionImages,
+      legacyVisionImagePaths,
+      historyMessages,
+      skillRuntimeOptions,
+      skillAllowModelInvocation,
+      skillVerboseLogging,
+      mainVisionCapabilityKey,
+    } = config
     const visualContext: TaskAgentVisualContext = this.visualContextByTask.get(task.id) ?? {
       artifacts: new Map(),
       initialVisionIds: [],
     }
-    const legacyVisionImagePaths = Array.isArray(obj?.imagePaths) ? (obj.imagePaths as unknown[]) : []
     const fallbackProfile = resolveVisionFallbackProfile(settings)
-    const mainVisionCapabilityKey = [settings.ai.apiMode, settings.ai.baseUrl, settings.ai.model]
-      .map((value) => String(value ?? '').trim().toLowerCase())
-      .join('|')
     const effectiveMainVisionCapability =
       settings.ai.visionCapability === 'auto'
         ? (this.visionCapabilityCache.get(mainVisionCapabilityKey) ?? 'auto')
@@ -599,16 +566,6 @@ export class TaskService {
     const skillSystemMessages: Array<Record<string, unknown>> = []
     let effectiveAgentRequest = request
     const deferredSkillLogs: string[] = []
-    const skillEnabled = settings.orchestrator?.skillEnabled !== false
-    const skillAllowModelInvocation = settings.orchestrator?.skillAllowModelInvocation !== false
-    const skillManagedDirRaw =
-      typeof settings.orchestrator?.skillManagedDir === 'string' ? settings.orchestrator.skillManagedDir : ''
-    const skillVerboseLogging = settings.orchestrator?.skillVerboseLogging === true
-    const skillRuntimeOptions: SkillManagerRuntimeOptions = {
-      enabled: skillEnabled,
-      allowModelInvocation: skillAllowModelInvocation,
-      managedDir: skillManagedDirRaw.trim() || undefined,
-    }
 
     try {
       const skillDiagnostics = await this.skillManager.getDiagnostics(skillRuntimeOptions)
@@ -772,16 +729,7 @@ export class TaskService {
     if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
     // 注入历史对话（history），让 agent 能够理解对话上下文，避免答非所问
-    const historyRaw = Array.isArray(obj?.history) ? obj.history : []
-    for (const h of historyRaw) {
-      if (typeof h !== 'object' || h === null) continue
-      const hObj = h as Record<string, unknown>
-      const role = typeof hObj.role === 'string' ? hObj.role.trim() : ''
-      const content = typeof hObj.content === 'string' ? hObj.content.trim() : ''
-      if ((role === 'user' || role === 'assistant') && content.length > 0) {
-        messages.push({ role, content })
-      }
-    }
+    messages.push(...historyMessages)
     const requestText = effectiveAgentRequest.trim()
     const lastHistoryMessage = [...messages].reverse().find((m) => m.role === 'user' || m.role === 'assistant')
     const lastHistoryUserText =
@@ -796,49 +744,22 @@ export class TaskService {
       if (!hasSameTailUserRequest) messages.push({ role: 'user', content: effectiveAgentRequest })
     }
 
-    const logs: string[] = []
-    let lastProgressAt = 0
     const conversation = new TaskAgentConversation(maxTurns)
-    let toolRuns: TaskRecord['toolRuns'] = []
-
-    // 初始化一次：避免复用上次残留的 draft/toolRuns
-    this.writeState((draft) => {
-      const it = draft.tasks.find((x) => x.id === task.id)
-      if (!it) return
-      it.draftReply = ''
-      it.finalReply = undefined
-      it.live2dExpression = undefined
-      it.live2dMotion = undefined
-      it.toolRuns = []
-      it.updatedAt = now()
+    const taskState = new TaskAgentTaskState({
+      taskId: task.id,
+      conversation,
+      updateTask: (mutator) => {
+        this.writeState((draft) => {
+          const item = draft.tasks.find((candidate) => candidate.id === task.id)
+          if (item) mutator(item)
+        })
+      },
+      isCanceled: () => rt.canceled,
     })
+    taskState.reset()
 
-    const updateProgress = (force?: boolean) => {
-      if (rt.canceled) return
-      const nowTs = Date.now()
-      if (!force && nowTs - lastProgressAt < 250) return
-      lastProgressAt = nowTs
-      const text = clampStepOutput(logs.join('\n') || '执行中…')
-      const presentation = conversation.snapshot()
-      this.writeState((draft) => {
-        const it = draft.tasks.find((x) => x.id === task.id)
-        if (!it) return
-        const s = it.steps[it.currentStepIndex]
-        if (!s) return
-        s.output = text
-        it.draftReply = presentation.draftReply
-        it.live2dExpression = presentation.live2dExpression
-        it.live2dMotion = presentation.live2dMotion
-        it.toolRuns = toolRuns
-        it.updatedAt = now()
-      })
-    }
-
-    const pushLog = (line: string, force?: boolean) => {
-      logs.push(clampText(line, 800))
-      if (logs.length > 120) logs.splice(0, logs.length - 120)
-      updateProgress(force)
-    }
+    const updateProgress = (force?: boolean) => taskState.updateProgress(force)
+    const pushLog = (line: string, force?: boolean) => taskState.pushLog(line, force)
     visionLogSink = pushLog
     for (const line of deferredSkillLogs) pushLog(line, true)
     for (const line of visionAttachLogs) pushLog(line, true)
@@ -846,103 +767,7 @@ export class TaskService {
     const toolPreview = (v: unknown, max: number) => clampText(typeof v === 'string' ? v : JSON.stringify(v ?? ''), max)
     const toolInputPreview = (toolName: string, v: unknown) => toolPreview(v, toolName === 'image.generate' ? 6000 : 500)
 
-    const upsertToolRun = (patch: TaskAgentToolRunPatch) => {
-      const id = patch.id.trim() || randomUUID()
-      const existingIdx = (toolRuns ?? []).findIndex((r) => r?.id === id)
-      const base = existingIdx >= 0 ? (toolRuns?.[existingIdx] ?? null) : null
-      const next = {
-        id,
-        toolName: patch.toolName,
-        status: patch.status,
-        inputPreview: patch.inputPreview ?? base?.inputPreview,
-        outputPreview: patch.outputPreview ?? base?.outputPreview,
-        imagePaths:
-          Array.isArray(patch.imagePaths)
-            ? normalizeImagePathList(patch.imagePaths, 8)
-            : base?.imagePaths,
-        error: patch.error ?? base?.error,
-        startedAt: typeof patch.startedAt === 'number' ? patch.startedAt : base?.startedAt ?? now(),
-        endedAt: typeof patch.endedAt === 'number' ? patch.endedAt : base?.endedAt,
-      }
-      if (existingIdx >= 0) toolRuns = [...toolRuns!.slice(0, existingIdx), next, ...toolRuns!.slice(existingIdx + 1)]
-      else toolRuns = [...(toolRuns ?? []), next].slice(0, 80)
-      updateProgress(true)
-    }
-
-    const baseAi = settings.ai
-    const apiOverride =
-      obj?.api && typeof obj.api === 'object' && obj.api && !Array.isArray(obj.api) ? (obj.api as Record<string, unknown>) : obj
-
-    const prefer = orch.toolUseCustomAi
-      ? {
-          apiKey: String(orch.toolAiApiKey ?? '').trim() || String(baseAi.apiKey ?? '').trim(),
-          baseUrl: String(orch.toolAiBaseUrl ?? '').trim() || String(baseAi.baseUrl ?? '').trim(),
-          model: String(orch.toolAiModel ?? '').trim() || String(baseAi.model ?? '').trim(),
-          temperature: typeof orch.toolAiTemperature === 'number' ? orch.toolAiTemperature : baseAi.temperature ?? 0.2,
-          maxTokens: typeof orch.toolAiMaxTokens === 'number' ? orch.toolAiMaxTokens : baseAi.maxTokens ?? 900,
-          timeoutMs: typeof orch.toolAiTimeoutMs === 'number' ? orch.toolAiTimeoutMs : 60000,
-        }
-      : {
-          apiKey: String(baseAi.apiKey ?? '').trim(),
-          baseUrl: String(baseAi.baseUrl ?? '').trim(),
-          model: String(baseAi.model ?? '').trim(),
-          temperature: typeof baseAi.temperature === 'number' ? baseAi.temperature : 0.2,
-          maxTokens: typeof baseAi.maxTokens === 'number' ? baseAi.maxTokens : 900,
-          timeoutMs: 60000,
-        }
-
-    const readString = (src: Record<string, unknown> | null | undefined, key: string): string => {
-      const v = src?.[key]
-      return typeof v === 'string' ? v.trim() : ''
-    }
-    const readNumber = (src: Record<string, unknown> | null | undefined, key: string): number | null => {
-      const v = src?.[key]
-      return typeof v === 'number' && Number.isFinite(v) ? v : null
-    }
-
-    const baseUrl = readString(apiOverride, 'baseUrl') || prefer.baseUrl || ''
-    const apiKey = readString(apiOverride, 'apiKey') || prefer.apiKey || ''
-    const model = readString(apiOverride, 'model') || prefer.model || ''
-    const apiMode =
-      readString(apiOverride, 'apiMode') === 'claude' || (baseAi as { apiMode?: unknown }).apiMode === 'claude'
-        ? 'claude'
-        : 'openai-compatible'
-
-    const tempOverride = readNumber(apiOverride, 'temperature')
-    const temperature = Math.max(0, Math.min(2, tempOverride ?? prefer.temperature))
-
-    const maxTokensOverride = readNumber(apiOverride, 'maxTokens')
-    const maxTokensCandidate = maxTokensOverride ?? prefer.maxTokens
-    const maxTokensRaw =
-      typeof maxTokensCandidate === 'number' && Number.isFinite(maxTokensCandidate) ? Math.trunc(maxTokensCandidate) : 900
-    const thinkingEffortOverride = readString(apiOverride, 'thinkingEffort')
-    const reasoningOptions = buildOpenAICompatReasoningOptions({
-      model,
-      maxTokens: maxTokensRaw,
-      settings: {
-        thinkingEffort: thinkingEffortOverride || (baseAi as { thinkingEffort?: unknown }).thinkingEffort,
-        thinkingProvider:
-          apiMode === 'claude'
-            ? 'claude'
-            : readString(apiOverride, 'thinkingProvider') || (baseAi as { thinkingProvider?: unknown }).thinkingProvider,
-        openaiReasoningEffort:
-          readString(apiOverride, 'openaiReasoningEffort') || (baseAi as { openaiReasoningEffort?: unknown }).openaiReasoningEffort,
-        claudeThinkingEffort:
-          readString(apiOverride, 'claudeThinkingEffort') || (baseAi as { claudeThinkingEffort?: unknown }).claudeThinkingEffort,
-        geminiThinkingEffort:
-          readString(apiOverride, 'geminiThinkingEffort') || (baseAi as { geminiThinkingEffort?: unknown }).geminiThinkingEffort,
-      },
-      claudeDisabledMinMaxTokens: 2048,
-    })
-    const maxTokens = reasoningOptions.maxTokens
-    const timeoutMs =
-      typeof obj?.timeoutMs === 'number'
-        ? Math.max(2000, Math.min(180000, Math.trunc(obj.timeoutMs)))
-        : Math.max(2000, Math.min(180000, Math.trunc(prefer.timeoutMs)))
-    if (!baseUrl || !model) throw new Error('未配置工具 LLM baseUrl/model（设置 → AI 设置 → 工具/Agent 或 AI 设置）')
-
-    const endpoint = buildAgentEndpoint(baseUrl, apiMode)
-    const headers = buildAgentHeaders(apiMode, apiKey)
+    const { apiMode, endpoint, headers, model, temperature, maxTokens, reasoningExtra, timeoutMs } = config.llm
     const llmClient = new TaskAgentLlmClient({
       apiMode,
       endpoint,
@@ -950,7 +775,7 @@ export class TaskService {
       model,
       temperature,
       maxTokens,
-      reasoningExtra: reasoningOptions.extra,
+      reasoningExtra,
       messages,
       tools,
       sessionId: task.id,
@@ -970,8 +795,6 @@ export class TaskService {
     })
 
     pushLog(`[Agent] request: ${clampText(request, 120)}`, true)
-
-    const hasAnyFinishedToolRun = (): boolean => Array.isArray(toolRuns) && toolRuns.some((r) => r.status === 'done' || r.status === 'error')
 
     const executeAgentTool = async (
       toolName: string,
@@ -994,47 +817,20 @@ export class TaskService {
       }
     }
 
-    const recordToolUsed = (toolName: string) => {
-      this.writeState((draft) => {
-        const item = draft.tasks.find((candidate) => candidate.id === task.id)
-        if (!item) return
-        if (!item.toolsUsed.includes(toolName)) item.toolsUsed = [...item.toolsUsed, toolName].slice(0, 80)
-        item.updatedAt = now()
-      })
-    }
-
     const toolSession = new TaskAgentToolSession({
       catalog: toolCatalog,
       executeTool: executeAgentTool,
-      recordToolUsed,
-      upsertToolRun,
+      recordToolUsed: (toolName) => taskState.recordToolUsed(toolName),
+      upsertToolRun: (patch) => taskState.upsertToolRun(patch),
       pushLog,
       inputPreview: toolInputPreview,
     })
 
-    const finalize = (finalText: string): string => {
-      const out = conversation.finalize(finalText)
-      const snapshot = conversation.snapshot()
-      this.writeState((draft) => {
-        const it = draft.tasks.find((x) => x.id === task.id)
-        if (!it) return
-        it.finalReply = out
-        it.draftReply = out
-        it.live2dExpression = snapshot.live2dExpression
-        it.live2dMotion = snapshot.live2dMotion
-        it.toolRuns = toolRuns
-        // 保存累积的 usage 统计到任务（用于前端上下文悬浮球）
-        if (snapshot.usage.totalTokens > 0) {
-          it.usage = { ...snapshot.usage }
-        }
-        it.updatedAt = now()
-      })
-      return out
-    }
+    const finalize = (finalText: string): string => taskState.finalize(finalText)
 
     const tryFinalizeOrContinue = (candidateText: string, turn: number): { done: boolean; text: string } => {
       const decision = conversation.decideFinal(candidateText, turn, {
-        hasFinishedToolRun: hasAnyFinishedToolRun(),
+        hasFinishedToolRun: taskState.hasFinishedToolRun(),
         evidenceText: toolSession.buildEvidenceText(request),
       })
       if (decision.kind === 'accept') return { done: true, text: finalize(decision.text) }

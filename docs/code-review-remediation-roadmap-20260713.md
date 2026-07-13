@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十批：Task 工具执行适配与 MMVector 视频问答工作流已拆分）
+- 状态：P2-1 进行中（第三十一批：Task Agent 运行配置与任务状态持久化已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -809,6 +809,15 @@ AI 与能力
 - 新增 5 个执行适配器测试和 6 个 MMVector workflow 测试，覆盖 MCP 结构化图片、内置运行时/Skills、workflow/子工具调度、禁用与缺失 MCP，本地视频复制、参数边界、无命中、远程流下载、超限清理、缓存同名保护、取消和超时；`taskService.ts` 从第二十九批后的 1356 行降至 1144 行。
 - 打包 IPC smoke 启动真实 stdio MCP 测试服务：直接 `mcp.mmvector.capture_image` task 的 step/toolRun 均为 done，结构化 PNG 被落盘到 `imagePaths`；Agent 通过文本工具协议实际调用 `workflow.mmvector_video_qa`，完成两轮 TOOL_REQUEST/TOOL_RESULT、done toolRun、最终答复和任务清理。
 - `npm test` 共 52 个测试文件、237 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续抽离 `runAgentRunTool` 的会话装配、配置解析和持久化适配，完成 `TaskService` 领域收口。
+
+### P2-1 进展记录（2026-07-13，第三十一批）
+
+- 新增 `electron/task/taskAgentRunConfig.ts`，统一解析 `agent.run` 请求、最大轮数、native/text/auto 模式、system/context、history、旧图片列表、视觉数量上限、Skills 运行参数、主/专用工具 AI 选择、单次 API 覆盖、OpenAI-compatible/Claude 端点与鉴权、reasoning 参数和超时边界。
+- 新增 `electron/task/taskAgentTaskState.ts`，集中管理 Agent 运行前状态重置、最多 120 行日志、250ms 进度节流、step 临时输出、draft/Live2D presentation、toolRun upsert/图片路径归一化、`toolsUsed` 去重、最终答复与非零 usage 持久化；TaskService 不再直接维护日志、toolRuns 和多处分散的 TaskStore 更新闭包。
+- `TaskService.runAgentRunTool` 改为消费纯配置和任务状态适配器，保留 Skills 匹配、视觉会话、消息装配、LLM client、工具会话、最终证据校验与 text fallback 的既有协作关系；`taskService.ts` 从第三十批后的 1144 行降至 940 行。
+- 新增 5 个 Agent 配置测试和 5 个任务状态测试，覆盖主/专用 AI、嵌套覆盖、Claude、history/视觉/Skills 边界、空请求/缺失配置、重置、进度节流、toolRun 合并、取消、工具去重、Live2D 与 3/4/7 usage 持久化。
+- 打包 IPC smoke 继续通过 text 首次 503 后重试、真实 MCP 图片、Agent MMVector workflow、native role=tool、带本地 PNG 的 auto native→text fallback 及 Claude `/v1/messages`；done/error toolRun、最终输出、Live2D/usage 相关任务状态没有回归。
+- `npm test` 共 54 个测试文件、247 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续抽离 Skills 准备与 Agent system/history 消息装配，完成 `runAgentRunTool` 剩余领域收口。
 
 ## 14. P2-2：前端加载与运行性能
 
