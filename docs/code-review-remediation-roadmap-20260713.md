@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二十九批：Task 工具媒体解析与受限落盘已拆分）
+- 状态：P2-1 进行中（第三十批：Task 工具执行适配与 MMVector 视频问答工作流已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -800,6 +800,15 @@ AI 与能力
 - 新增 6 个媒体模块测试，覆盖显式字段顺序、远程缩略图过滤、本地/localhost 自由文本提取、数量/大小/MIME/Base64/内容去重、安全文件名、结构化图片优先与文本回退，以及本地路径、file URL、data URL、HTTP URL 和无效模型图片输入。
 - 打包 IPC smoke 新增真实 `file.read` 图片清单任务：从隔离 `userData/task-output` 读取包含本地 PNG 路径的文本，断言 task、step、toolRun 均为 done，toolRun `imagePaths` 保留该 PNG，并在 dismiss 后完成清理；既有 auto fallback 三次视觉请求与单次工具副作用验证继续通过。
 - `npm test` 共 50 个测试文件、226 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分直接工具执行适配与 `workflow.mmvector_video_qa` 专用工作流，进一步收窄 `TaskService`。
+
+### P2-1 进展记录（2026-07-13，第三十批）
+
+- 新增 `electron/task/taskToolExecutionAdapter.ts`，统一工具启用检查、MCP `callToolDetailed`、内置工具运行时依赖、Skills 刷新、图片解析和 `{ output, imagePaths }` 返回契约；直接 step 与 Agent 内部工具现共用同一适配器，直接 MCP 调用不再丢失结构化图片。
+- 专用 `workflow.mmvector_video_qa` 纳入统一适配器调度，修复它虽然出现在 Agent 工具目录中、但 Agent 实际调用会落入普通内置执行器并报未知工具的问题；workflow 自身及其 `mcp.mmvector.search_by_text`、`media.video_qa` 子工具都会经过工具开关检查。
+- 新增 `electron/task/taskMmvectorVideoQa.ts`，集中管理输入归一化、MMVector 结果选择、本地视频缓存、远程视频下载和 Video QA 子工具调用。远程下载改用 Node `Readable.fromWeb` + `pipeline`，限制 HTTP(S)、总超时和最多 4 GiB，流式累计校验大小，取消/失败/超限时清理半成品，并用唯一安全文件名避免覆盖既有缓存。
+- 新增 5 个执行适配器测试和 6 个 MMVector workflow 测试，覆盖 MCP 结构化图片、内置运行时/Skills、workflow/子工具调度、禁用与缺失 MCP，本地视频复制、参数边界、无命中、远程流下载、超限清理、缓存同名保护、取消和超时；`taskService.ts` 从第二十九批后的 1356 行降至 1144 行。
+- 打包 IPC smoke 启动真实 stdio MCP 测试服务：直接 `mcp.mmvector.capture_image` task 的 step/toolRun 均为 done，结构化 PNG 被落盘到 `imagePaths`；Agent 通过文本工具协议实际调用 `workflow.mmvector_video_qa`，完成两轮 TOOL_REQUEST/TOOL_RESULT、done toolRun、最终答复和任务清理。
+- `npm test` 共 52 个测试文件、237 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续抽离 `runAgentRunTool` 的会话装配、配置解析和持久化适配，完成 `TaskService` 领域收口。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -1,20 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
 import { getSettings } from './store'
-import { cancelCliExecStreamSessionsForTask, executeBuiltinTool, type ToolInput } from './toolExecutor'
+import { cancelCliExecStreamSessionsForTask, type ToolInput } from './toolExecutor'
 import {
   filterToolDefinitionsBySettings,
   getDefaultAgentToolDefinitions,
-  isToolEnabled,
   toOpenAITools,
   type OpenAIFunctionToolSpec,
 } from './toolRegistry'
 import { getLive2dCapabilities } from './live2dToolState'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
 import { buildOpenAICompatReasoningOptions } from './reasoningConfig'
-import { localMediaTypeFromPath } from './localMediaRegistry'
-import { isPathWithinRoot } from './localMediaPolicy'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
 import {
@@ -41,6 +36,12 @@ import {
   type TaskAgentVisualContext,
 } from './task/taskAgentVisionSession'
 import { TaskExecutionRunner } from './task/taskExecutionRunner'
+import { TaskMmvectorVideoQaWorkflow } from './task/taskMmvectorVideoQa'
+import {
+  TaskToolExecutionAdapter,
+  type TaskToolExecutionResult,
+  type TaskToolExecutionRuntime,
+} from './task/taskToolExecutionAdapter'
 import { TaskToolMediaStore, imageUrlPartsFromPaths } from './task/taskToolMedia'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
@@ -312,6 +313,7 @@ export class TaskService {
   private readonly mcpManager: McpManager | null
   private readonly skillManager: SkillManager
   private readonly toolMediaStore: TaskToolMediaStore
+  private readonly toolExecutor: TaskToolExecutionAdapter
 
   constructor(opts: { onChanged: () => void; userDataDir: string; mcpManager?: McpManager | null }) {
     this.taskStore = new TaskStore({ onChanged: opts.onChanged })
@@ -319,6 +321,15 @@ export class TaskService {
     this.mcpManager = opts.mcpManager ?? null
     this.skillManager = new SkillManager({ workspaceDir: process.cwd() })
     this.toolMediaStore = new TaskToolMediaStore({ userDataDir: this.userDataDir })
+    const mmvectorVideoQa = new TaskMmvectorVideoQaWorkflow({ userDataDir: this.userDataDir })
+    this.toolExecutor = new TaskToolExecutionAdapter({
+      userDataDir: this.userDataDir,
+      mediaStore: this.toolMediaStore,
+      mcpManager: this.mcpManager,
+      refreshSkillRegistry: (managedDir) => this.skillManager.refresh({ managedDir }),
+      runMmvectorVideoQa: (input, task, runtime, executeChildTool) =>
+        mmvectorVideoQa.run(input, { task, ...runtime, executeTool: executeChildTool }),
+    })
     this.scheduler = new TaskScheduler({
       readTasks: () => this.taskStore.readState().tasks,
       startTask: (id) => this.startTask(id),
@@ -495,254 +506,38 @@ export class TaskService {
     await this.runtime.waitIfPaused(id)
   }
 
-  private async executeToolByName(toolName: string, input: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
-    const settings = getSettings()
-    if (!isToolEnabled(toolName, settings.tools)) {
-      throw new Error(`tool disabled: ${toolName}`)
-    }
-
-    if (toolName.startsWith('mcp.')) {
-      if (!this.mcpManager) throw new Error('MCP manager not initialized')
-      return this.mcpManager.callTool(toolName, input)
-    }
-
-    return executeBuiltinTool(
-      toolName,
-      input,
-      {
-        task,
-        userDataDir: this.userDataDir,
-        waitIfPaused: () => this.waitIfPaused(task.id),
-        isCanceled: () => rt.canceled,
-        setCancelCurrent: (fn) => {
-          rt.cancelCurrent = fn
-        },
-        refreshSkillRegistry: async () => {
-          const skillManagedDirRaw =
-            typeof settings.orchestrator?.skillManagedDir === 'string' ? settings.orchestrator.skillManagedDir.trim() : ''
-          await this.skillManager.refresh({ managedDir: skillManagedDirRaw || undefined })
-        },
+  private toolRuntime(taskId: string, rt: TaskRuntime): TaskToolExecutionRuntime {
+    return {
+      waitIfPaused: () => this.waitIfPaused(taskId),
+      isCanceled: () => rt.canceled,
+      setCancelCurrent: (cancel) => {
+        rt.cancelCurrent = cancel
       },
-      { maxStepOutputChars: MAX_STEP_OUTPUT_CHARS },
-    )
+    }
   }
 
-  private async runTool(tool: string | undefined, input: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
+  private async runTool(
+    tool: string | undefined,
+    input: ToolInput,
+    task: TaskRecord,
+    rt: TaskRuntime,
+  ): Promise<TaskToolExecutionResult> {
     const toolName = typeof tool === 'string' ? tool.trim() : ''
     const resolved = resolveTemplates(input, task)
 
     if (!toolName) {
       // 没有工具：作为“备注/占位 step”，直接通过
       await sleep(60)
-      return '跳过（无 tool）'
+      return { output: '跳过（无 tool）', imagePaths: [] }
     }
 
     if (toolName === 'agent.run') {
-      return this.runAgentRunTool(resolved, task, rt)
+      const output = await this.runAgentRunTool(resolved, task, rt)
+      const imagePaths = await this.toolMediaStore.resolveImagePaths(task.id, output, [])
+      return { output, imagePaths }
     }
 
-    if (toolName === 'workflow.mmvector_video_qa') {
-      return this.runWorkflowMmvectorVideoQa(resolved, task, rt)
-    }
-
-    return this.executeToolByName(toolName, resolved, task, rt)
-  }
-
-  private async runWorkflowMmvectorVideoQa(resolved: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
-    if (!this.mcpManager) throw new Error('MCP manager not initialized')
-
-    const obj = typeof resolved === 'object' && resolved && !Array.isArray(resolved) ? (resolved as Record<string, unknown>) : null
-    const searchQuery = typeof obj?.searchQuery === 'string' ? obj.searchQuery.trim() : typeof resolved === 'string' ? resolved.trim() : ''
-    const question = typeof obj?.question === 'string' ? obj.question.trim() : ''
-    if (!searchQuery) throw new Error('workflow.mmvector_video_qa 需要 searchQuery')
-    if (!question) throw new Error('workflow.mmvector_video_qa 需要 question')
-
-    const topK = typeof obj?.topK === 'number' ? Math.max(1, Math.min(20, Math.trunc(obj.topK))) : 3
-    const minScore = typeof obj?.minScore === 'number' ? Math.max(0, Math.min(1, obj.minScore)) : undefined
-
-    const segmentSeconds = typeof obj?.segmentSeconds === 'number' ? Math.max(5, Math.min(120, Math.trunc(obj.segmentSeconds))) : 20
-    const framesPerSegment = typeof obj?.framesPerSegment === 'number' ? Math.max(1, Math.min(8, Math.trunc(obj.framesPerSegment))) : 3
-    const maxSegments = typeof obj?.maxSegments === 'number' ? Math.max(1, Math.min(60, Math.trunc(obj.maxSegments))) : 8
-    const startSeconds = typeof obj?.startSeconds === 'number' ? Math.max(0, Math.min(1e9, obj.startSeconds)) : 0
-
-    const timeoutMs = typeof obj?.timeoutMs === 'number' ? Math.max(5000, Math.min(600000, Math.trunc(obj.timeoutMs))) : 180000
-    const startedAt = now()
-    const ensureTime = () => {
-      if (now() - startedAt > timeoutMs) throw new Error('workflow.mmvector_video_qa timeout')
-    }
-
-    const parseJsonFromText = (raw: string): Record<string, unknown> | null => {
-      const text = String(raw ?? '').trim()
-      if (!text) return null
-      const first = text.indexOf('{')
-      const last = text.lastIndexOf('}')
-      if (first < 0 || last <= first) return null
-      try {
-        return JSON.parse(text.slice(first, last + 1)) as Record<string, unknown>
-      } catch {
-        return null
-      }
-    }
-
-    const exists = async (p: string): Promise<boolean> => {
-      try {
-        const st = await fs.promises.stat(p)
-        return st.isFile()
-      } catch {
-        return false
-      }
-    }
-
-    const downloadToFile = async (url: string, destPath: string): Promise<void> => {
-      const ac = new AbortController()
-      const remaining = Math.max(5000, timeoutMs - (now() - startedAt))
-      const timer = setTimeout(() => ac.abort(new Error('download timeout')), remaining)
-      rt.cancelCurrent = () => ac.abort(new Error('canceled'))
-
-      try {
-        const res = await fetch(url, { method: 'GET', signal: ac.signal })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        await fs.promises.mkdir(path.dirname(destPath), { recursive: true })
-
-        const file = fs.createWriteStream(destPath)
-        await new Promise<void>((resolve, reject) => {
-          file.once('error', reject)
-          file.once('finish', () => resolve())
-          const body = res.body
-          if (!body) {
-            file.end()
-            reject(new Error('empty body'))
-            return
-          }
-          const bodyStream = body as unknown as NodeJS.ReadableStream
-          bodyStream.pipe(file)
-        })
-      } finally {
-        clearTimeout(timer)
-        rt.cancelCurrent = undefined
-      }
-    }
-
-    ensureTime()
-    await this.waitIfPaused(task.id)
-
-    const searchText = await this.mcpManager.callTool('mcp.mmvector.search_by_text', {
-      query: searchQuery,
-      topK,
-      filter: 'video',
-      ...(typeof minScore === 'number' ? { minScore } : {}),
-    })
-
-    type MmvectorResult = { id?: number; type?: string; score?: number; filename?: string; videoUrl?: string; videoPath?: string }
-    const parsed = parseJsonFromText(searchText)
-    const resultsUnknown = parsed && parsed.ok === true && Array.isArray(parsed.results) ? (parsed.results as unknown[]) : []
-    const results: MmvectorResult[] = resultsUnknown
-      .map((r) => (r && typeof r === 'object' && !Array.isArray(r) ? (r as MmvectorResult) : null))
-      .filter((r): r is MmvectorResult => Boolean(r))
-
-    const picked =
-      results.find((r) => typeof r.videoPath === 'string' && r.videoPath.trim()) ??
-      results.find((r) => typeof r.videoUrl === 'string' && r.videoUrl.trim()) ??
-      null
-    if (!picked) {
-      return clampText(
-        JSON.stringify({ ok: false, error: 'mmvector 未命中任何视频', searchQuery, tool: 'mcp.mmvector.search_by_text', raw: searchText }),
-        5000,
-      )
-    }
-
-    ensureTime()
-    await this.waitIfPaused(task.id)
-
-    const rawVideoPath = typeof picked.videoPath === 'string' ? picked.videoPath.trim() : ''
-    const rawVideoUrl = typeof picked.videoUrl === 'string' ? picked.videoUrl.trim() : ''
-
-    const cacheDir = path.join(this.userDataDir, 'video-qa-cache')
-    await fs.promises.mkdir(cacheDir, { recursive: true })
-    let localVideoPath = ''
-    if (rawVideoPath && (await exists(rawVideoPath))) {
-      const sourceType = localMediaTypeFromPath(rawVideoPath)
-      if (!sourceType || sourceType.kind !== 'video') throw new Error('mmvector videoPath 类型不受支持')
-      const sourceStat = await fs.promises.stat(rawVideoPath)
-      if (!sourceStat.isFile() || sourceStat.size <= 0 || sourceStat.size > 4 * 1024 * 1024 * 1024) {
-        throw new Error('mmvector videoPath 文件大小不受支持')
-      }
-      const realSource = await fs.promises.realpath(rawVideoPath)
-      const realCache = await fs.promises.realpath(cacheDir)
-      const style = process.platform === 'win32' ? 'win32' : 'posix'
-      if (isPathWithinRoot(realSource, realCache, style)) {
-        localVideoPath = realSource
-      } else {
-        const safeBase = ((picked.filename ?? '').trim() || path.basename(realSource)).replace(/[<>:"/\\|?*]+/g, '_')
-        const ext = path.extname(realSource).toLowerCase()
-        const stem = path.basename(safeBase, path.extname(safeBase)).slice(0, 120) || 'mmvector'
-        const dest = path.join(cacheDir, `${stem}-${randomUUID()}${ext}`)
-        await fs.promises.copyFile(realSource, dest)
-        localVideoPath = dest
-      }
-    } else {
-      if (!rawVideoUrl) throw new Error(`mmvector 命中但无可用 videoPath/videoUrl：${JSON.stringify(picked)}`)
-      const requestedName = (picked.filename ?? '').trim() || `mmvector_${task.id}_${now().toString(36)}.mp4`
-      const safeName = localMediaTypeFromPath(requestedName)?.kind === 'video' ? requestedName : `${requestedName}.mp4`
-      const dest = path.join(cacheDir, safeName.replace(/[<>:"/\\|?*]+/g, '_'))
-      await downloadToFile(rawVideoUrl, dest)
-      const downloadedStat = await fs.promises.stat(dest)
-      if (!downloadedStat.isFile() || downloadedStat.size <= 0 || downloadedStat.size > 4 * 1024 * 1024 * 1024) {
-        throw new Error('下载视频文件大小不受支持')
-      }
-      localVideoPath = dest
-    }
-
-    ensureTime()
-    await this.waitIfPaused(task.id)
-
-    const qaInput: Record<string, unknown> = {
-      videoPath: localVideoPath,
-      question,
-      segmentSeconds,
-      framesPerSegment,
-      maxSegments,
-      startSeconds,
-      ...(typeof obj?.baseUrl === 'string' && obj.baseUrl.trim() ? { baseUrl: obj.baseUrl.trim() } : {}),
-      ...(typeof obj?.apiKey === 'string' && obj.apiKey.trim() ? { apiKey: obj.apiKey.trim() } : {}),
-      ...(typeof obj?.model === 'string' && obj.model.trim() ? { model: obj.model.trim() } : {}),
-      ...(typeof obj?.temperature === 'number' ? { temperature: obj.temperature } : {}),
-      ...(typeof obj?.maxTokensPerSegment === 'number' ? { maxTokensPerSegment: obj.maxTokensPerSegment } : {}),
-      ...(typeof obj?.maxTokensFinal === 'number' ? { maxTokensFinal: obj.maxTokensFinal } : {}),
-      ...(typeof obj?.timeoutMs === 'number' ? { timeoutMs: Math.max(5000, timeoutMs - (now() - startedAt)) } : {}),
-    }
-
-    const qaText = await this.executeToolByName('media.video_qa', qaInput, task, rt)
-
-    const out = {
-      ok: true,
-      search: {
-        query: searchQuery,
-        picked: {
-          id: picked.id,
-          score: picked.score,
-          filename: picked.filename,
-          videoUrl: rawVideoUrl || undefined,
-          videoPath: rawVideoPath || undefined,
-          localVideoPath,
-        },
-      },
-      qa: (() => {
-        const raw = String(qaText ?? '').trim()
-        const first = raw.indexOf('{')
-        const last = raw.lastIndexOf('}')
-        if (first >= 0 && last > first) {
-          try {
-            return JSON.parse(raw.slice(first, last + 1)) as unknown
-          } catch {
-            return raw
-          }
-        }
-        return raw
-      })(),
-    }
-
-    return clampText(JSON.stringify(out, null, 2), 5000) || '(空)'
+    return this.toolExecutor.execute(toolName, resolved, task, this.toolRuntime(task.id, rt))
   }
 
   private async runAgentRunTool(resolved: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
@@ -930,7 +725,7 @@ export class TaskService {
       loadImageParts: imageUrlPartsFromPaths,
       inspectFallbackArtifact: async (artifact, question) => {
         if (!fallbackProfile) throw new Error('未配置可用的外挂视觉 Profile')
-        return this.executeToolByName(
+        const execution = await this.toolExecutor.execute(
           'image.inspect',
           {
             path: artifact.path,
@@ -944,8 +739,9 @@ export class TaskService {
             maxTokens: 800,
           },
           task,
-          rt,
+          this.toolRuntime(task.id, rt),
         )
+        return execution.output
       },
       rememberMainCapability: rememberMainVisionCapability,
       pushLog: (line, force) => visionLogSink(line, force),
@@ -1185,14 +981,8 @@ export class TaskService {
       let execution: TaskAgentToolExecution
       if (toolName === 'vision.look') {
         execution = await visionSession.executeVisionLook(input)
-      } else if (toolName.startsWith('mcp.') && this.mcpManager) {
-        const result = await this.mcpManager.callToolDetailed(toolName, input)
-        const imagePaths = await this.toolMediaStore.resolveImagePaths(task.id, result.text, result.images)
-        execution = { output: result.text, imagePaths }
       } else {
-        const output = await this.executeToolByName(toolName, input, task, rt)
-        const imagePaths = await this.toolMediaStore.resolveImagePaths(task.id, output, [])
-        execution = { output, imagePaths }
+        execution = await this.toolExecutor.execute(toolName, input, task, this.toolRuntime(task.id, rt))
       }
 
       const artifacts = visionSession.registerToolVisualArtifacts(context.recordName, context.runId, execution.imagePaths)
@@ -1336,9 +1126,7 @@ export class TaskService {
       isCanceled: () => rt.canceled,
       executeStep: async (task, step) => {
         const toolInput = parseToolInput(step.input)
-        const output = await this.runTool(step.tool, toolInput, task, rt)
-        const imagePaths = step.tool ? await this.toolMediaStore.resolveImagePaths(id, output, []) : []
-        return { output, imagePaths }
+        return this.runTool(step.tool, toolInput, task, rt)
       },
       normalizeImagePaths: normalizeImagePathList,
       onFinished: () => {

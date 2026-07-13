@@ -17,6 +17,7 @@ const packagedExeName = existsSync(packagedDir)
   : undefined
 const packagedExe = packagedExeName ? path.join(packagedDir, packagedExeName) : ''
 const electronExe = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe')
+const mcpSmokeServerScript = path.join(projectRoot, 'scripts', 'fixtures', 'ipc-smoke-mcp-server.mjs')
 
 mkdirSync(userDataDir, { recursive: true })
 const taskMediaDir = path.join(userDataDir, 'task-output')
@@ -68,6 +69,7 @@ const aiServer = http.createServer(async (request, response) => {
   const isClaudeAgent = body.model === 'ipc-agent-claude-smoke'
   const isNativeAgent = body.model === 'ipc-agent-native-smoke'
   const isAutoFallbackAgent = body.model === 'ipc-agent-auto-fallback-smoke'
+  const isMmvectorWorkflowAgent = body.model === 'ipc-agent-mmvector-workflow-smoke'
   const recordedRequest = {
     path: request.url,
     authMatches: isClaudeAgent
@@ -186,7 +188,16 @@ const aiServer = http.createServer(async (request, response) => {
       return
     }
     const content =
-      body.model === 'ipc-agent-smoke'
+      isMmvectorWorkflowAgent
+        ? hasAgentToolResult
+          ? 'MMVector workflow smoke complete.'
+          : [
+              '<<<[TOOL_REQUEST]>>>',
+              'tool_name:「始」workflow.mmvector_video_qa「末」',
+              'input_json:「始」{"searchQuery":"ipc smoke video","question":"What is shown?"}「末」',
+              '<<<[END_TOOL_REQUEST]>>>',
+            ].join('\n')
+        : body.model === 'ipc-agent-smoke'
         ? hasAgentToolResult
           ? 'Agent protocol smoke complete.'
           : [
@@ -841,6 +852,140 @@ try {
   )
   assert(taskAgentProtocol.dismissed?.ok, 'agent text protocol task cleanup failed')
 
+  const taskAgentMmvectorMcp = await settings.evaluate(
+    async ({ command, serverScript, cwd }) => {
+      await window.neoDeskPet.setMcpSettings({
+        enabled: true,
+        servers: [
+          {
+            id: 'mmvector',
+            enabled: true,
+            label: 'IPC Smoke MMVector',
+            transport: 'stdio',
+            command,
+            args: [serverScript],
+            cwd,
+          },
+        ],
+      })
+      await window.neoDeskPet.setAISettings({ model: 'ipc-agent-mmvector-workflow-smoke' })
+      await window.neoDeskPet.setOrchestratorSettings({ toolCallingMode: 'text', skillEnabled: false })
+
+      const deadline = Date.now() + 15_000
+      let state = await window.neoDeskPet.getMcpState()
+      while (Date.now() < deadline) {
+        const server = state.servers.find((item) => item.id === 'mmvector')
+        if (
+          server?.status === 'connected' &&
+          server.tools.some((tool) => tool.toolName === 'mcp.mmvector.search_by_text') &&
+          server.tools.some((tool) => tool.toolName === 'mcp.mmvector.capture_image')
+        ) {
+          break
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 50))
+        state = await window.neoDeskPet.getMcpState()
+      }
+      return state
+    },
+    { command: process.execPath, serverScript: mcpSmokeServerScript, cwd: projectRoot },
+  )
+  assert(
+    taskAgentMmvectorMcp.servers.some(
+      (server) =>
+        server.id === 'mmvector' &&
+        server.status === 'connected' &&
+        server.tools.some((tool) => tool.toolName === 'mcp.mmvector.search_by_text') &&
+        server.tools.some((tool) => tool.toolName === 'mcp.mmvector.capture_image'),
+    ),
+    'packaged MCP smoke server did not expose the expected tools',
+  )
+
+  const taskMcpDirect = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Direct MCP Media Task',
+      steps: [{ title: 'Capture MCP image', tool: 'mcp.mmvector.capture_image', input: '{}' }],
+    })
+    const deadline = Date.now() + 15_000
+    let completed = null
+    while (Date.now() < deadline) {
+      completed = await window.neoDeskPet.getTask(created.id)
+      if (completed && ['done', 'failed', 'canceled'].includes(completed.status)) break
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    }
+    const dismissed = await window.neoDeskPet.dismissTask(created.id)
+    return { taskId: created.id, completed, dismissed }
+  })
+  assert(
+    taskMcpDirect.completed?.status === 'done',
+    `direct MCP media task failed: ${taskMcpDirect.completed?.lastError ?? 'missing'}`,
+  )
+  assert(taskMcpDirect.completed?.steps?.[0]?.status === 'done', 'direct MCP media step was not marked done')
+  assert(
+    taskMcpDirect.completed?.toolRuns?.some(
+      (run) =>
+        run.toolName === 'mcp.mmvector.capture_image' &&
+        run.status === 'done' &&
+        run.outputPreview?.includes('IPC MCP image captured.') &&
+        Array.isArray(run.imagePaths) &&
+        run.imagePaths.length === 1 &&
+        run.imagePaths[0].toLowerCase().endsWith('.png'),
+    ),
+    'direct MCP media toolRun did not persist its structured image',
+  )
+  assert(taskMcpDirect.dismissed?.ok, 'direct MCP media task cleanup failed')
+
+  const taskAgentMmvector = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Agent MMVector Workflow Task',
+      steps: [
+        {
+          title: 'Run MMVector workflow through Agent',
+          tool: 'agent.run',
+          input: JSON.stringify({ request: 'Run the mmvector workflow smoke tool, then finish.', mode: 'text', maxTurns: 3 }),
+        },
+      ],
+    })
+    const deadline = Date.now() + 15_000
+    let completed = null
+    while (Date.now() < deadline) {
+      completed = await window.neoDeskPet.getTask(created.id)
+      if (completed && ['done', 'failed', 'canceled'].includes(completed.status)) break
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    }
+    const dismissed = await window.neoDeskPet.dismissTask(created.id)
+    return { taskId: created.id, completed, dismissed }
+  })
+  const taskAgentMmvectorRequests = aiRequests.filter(
+    (request) => request.model === 'ipc-agent-mmvector-workflow-smoke',
+  )
+  assert(
+    taskAgentMmvector.completed?.status === 'done',
+    `agent mmvector workflow task failed: ${taskAgentMmvector.completed?.lastError ?? 'missing'}`,
+  )
+  assert(
+    taskAgentMmvector.completed?.steps[0]?.output === 'MMVector workflow smoke complete.',
+    'agent mmvector workflow final output was not persisted',
+  )
+  assert(
+    taskAgentMmvector.completed?.toolRuns?.some(
+      (run) =>
+        run.toolName === 'workflow.mmvector_video_qa' &&
+        run.status === 'done' &&
+        run.outputPreview?.includes('mmvector 未命中任何视频'),
+    ),
+    'agent did not execute workflow.mmvector_video_qa through the unified tool adapter',
+  )
+  assert(
+    taskAgentMmvectorRequests.length === 2 &&
+      taskAgentMmvectorRequests[0]?.hasAgentToolResult === false &&
+      taskAgentMmvectorRequests[1]?.hasAgentToolResult === true,
+    'agent mmvector workflow did not round-trip TOOL_REQUEST/TOOL_RESULT',
+  )
+  assert(taskAgentMmvector.dismissed?.ok, 'agent mmvector workflow task cleanup failed')
+  await settings.evaluate(() => window.neoDeskPet.setMcpSettings({ enabled: false, servers: [] }))
+
   await settings.evaluate(() =>
     window.neoDeskPet.setAISettings({ model: 'ipc-agent-native-smoke', apiMode: 'openai-compatible' }),
   )
@@ -1304,6 +1449,25 @@ try {
       retryStatus: taskAgentRequests[0]?.simulatedStatus,
       resultRoundTrip: taskAgentRequests[2]?.hasAgentToolResult === true,
       cleanup: taskAgentProtocol.dismissed?.ok === true,
+    },
+    taskMcpDirect: {
+      status: taskMcpDirect.completed?.status,
+      step: taskMcpDirect.completed?.steps?.[0]?.status,
+      toolRun: taskMcpDirect.completed?.toolRuns?.find(
+        (run) => run.toolName === 'mcp.mmvector.capture_image',
+      ),
+      cleanup: taskMcpDirect.dismissed?.ok === true,
+    },
+    taskAgentMmvector: {
+      mcpConnected: taskAgentMmvectorMcp.servers.some(
+        (server) => server.id === 'mmvector' && server.status === 'connected',
+      ),
+      status: taskAgentMmvector.completed?.status,
+      output: taskAgentMmvector.completed?.steps[0]?.output,
+      toolRuns: taskAgentMmvector.completed?.toolRuns,
+      requestCount: taskAgentMmvectorRequests.length,
+      resultRoundTrip: taskAgentMmvectorRequests[1]?.hasAgentToolResult === true,
+      cleanup: taskAgentMmvector.dismissed?.ok === true,
     },
     taskAgentNative: {
       status: taskAgentNative.completed?.status,

@@ -603,3 +603,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义、Agent 消息协议、模型配置或界面样式。媒体模块单测覆盖受限落盘和模型输入边界，打包 smoke 直接证明普通工具文本中的本地图片能进入持久化 toolRun，并继续证明图片可跨 native continuation 与 text fallback 重放。尚未连接真实 MCP 多图片工具、浏览器截图、生图服务或真实外挂视觉 Profile 覆盖供应商特有 MIME/URL 与多图片故障组合，这些外部差异继续作为后续集成风险保留。
+
+## P2-1：大型模块拆分与领域边界（第三十批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task 统一工具执行适配、直接 MCP 结构化图片与 MMVector 视频问答工作流
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 52 个测试文件、237 个用例通过 |
+| Task tool execution adapter 测试 | 5 个用例通过：MCP detailed/结构化图片、内置运行时与 Skills 刷新、workflow/受检子工具调度、禁用 workflow、缺失 MCP manager |
+| MMVector workflow 测试 | 6 个用例通过：本地视频缓存与参数边界、无命中结果、远程 Web Stream 下载、流式超限清理、缓存同名保护、取消与总超时 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | 真实 stdio MCP 服务连接成功；直接 MCP task 持久化 1 张结构化 PNG；Agent 实际调用 MMVector workflow 并完成两轮 TOOL_REQUEST/RESULT、done toolRun、最终输出与清理；既有 text/native/auto/Claude 路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义/schema、模型配置或界面样式。单元测试验证远程视频 Web Stream、大小限制和残留清理，打包 smoke 则证明真实 MCP 进程、直接结构化图片和 Agent workflow 调度契约。尚未连接真实 MMVector 数据库、真实视频下载源、FFmpeg 抽帧和云端视觉模型跑完整 Video QA，供应商输出差异、超大视频长时间取消和真实网络中断仍需后续人工集成回归。
