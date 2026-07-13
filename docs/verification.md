@@ -43,3 +43,22 @@
 - 安装器 smoke 使用当前 Windows 10 主机上的隔离目录模拟干净安装，并非独立 Windows 11 虚拟机。
 - 发行包尚未配置代码签名证书；Windows SmartScreen 信誉需在正式发布签名后另行验证。
 - 精简版首次浏览器下载依赖用户网络可访问 Playwright CDN；网络失败会保留明确错误并允许下次重试。
+
+## P2-1：大型模块拆分与领域边界（第一批）
+
+- 验证日期：2026-07-13
+- 拆分范围：`electron/main.ts` 中全部 28 个 `settings:*` IPC 处理器
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 21 个测试文件、77 个用例通过 |
+| 设置 IPC 行为测试 | 通道覆盖、密钥边界、Memory/MCP/ASR 副作用、AI Profile 通过 |
+| IPC 权限结构测试 | 递归扫描全部 Electron TypeScript 源码，118 个通道与权限矩阵一致 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 设置导航、密钥脱敏、AI 代理、重启迁移和五类窗口通过 |
+| `npm run media:smoke` | 通过 |
+| `npm run ui:baseline` | 13 个场景通过 |
+
+本批未修改 renderer、preload、权限矩阵或数据库结构。P2-1 仍在进行中，后续继续拆分 Chat、Task、Memory、TTS 和 Window IPC。

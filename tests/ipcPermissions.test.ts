@@ -10,6 +10,16 @@ import {
   isTrustedApplicationUrl,
 } from '../electron/ipcPermissions'
 
+function listTypeScriptSources(directory: string): string[] {
+  const files: string[] = []
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name)
+    if (entry.isDirectory()) files.push(...listTypeScriptSources(fullPath))
+    else if (entry.isFile() && entry.name.endsWith('.ts')) files.push(fullPath)
+  }
+  return files
+}
+
 const trustedRequest = {
   channel: 'settings:get',
   senderWindowType: 'settings' as const,
@@ -65,13 +75,16 @@ describe('IPC window permissions', () => {
   })
 
   it('declares a permission rule for every registered IPC channel', () => {
-    const mainSource = fs.readFileSync(path.resolve('electron/main.ts'), 'utf8')
-    const registered = Array.from(mainSource.matchAll(/\b(?:handleIpc|onIpc)\(\s*'([^']+)'/g), (match) => match[1])
+    const ipcSources = listTypeScriptSources(path.resolve('electron'))
+      .map((file) => fs.readFileSync(file, 'utf8'))
+      .join('\n')
+    const registered = Array.from(ipcSources.matchAll(/\b(?:handleIpc|onIpc|handle)\(\s*'([^']+)'/g), (match) => match[1])
     const declared = Object.keys(IPC_CHANNEL_PERMISSIONS)
 
     expect(new Set(registered).size).toBe(registered.length)
     expect([...registered].sort()).toEqual([...declared].sort())
-    expect(mainSource).not.toMatch(/\bipcMain\.(?:handle|on)\(\s*['"]/)
+    const directIpcRegistration = /\bipcMain\.(?:handle|on)\(\s*['"]/
+    expect(ipcSources).not.toMatch(directIpcRegistration)
   })
 
   it('keeps high-risk channels on narrow window allowlists', () => {

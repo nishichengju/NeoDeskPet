@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P1-4 已完成，下一阶段为 P2-1
+- 状态：P2-1 进行中（第一批：Settings IPC 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -534,6 +534,15 @@ AI 与能力
 - Chat 流式输出、停止、重发、编辑、附件和 TTS 不回归。
 - Task 暂停、恢复、取消、工具重试和状态持久化不回归。
 - Memory 检索、批量修改、版本回滚和维护任务不回归。
+
+### P2-1 进展记录（2026-07-13，第一批）
+
+- 新增 `electron/ipc/registration.ts` 作为领域 IPC 模块共用的 `IpcHandle` / `IpcOn` 注册契约；安全校验、权限判断和 renderer settings 脱敏仍集中由 `main.ts` 的统一包装器执行。
+- 将 28 个 `settings:*` 通道完整迁移到 `electron/ipc/registerSettingsIpc.ts`，通过依赖注入明确设置存储、窗口动作、设置广播、Memory 补索引、MCP 同步、ASR 服务和热键同步边界。
+- `electron/main.ts` 从 2743 行降至 2436 行；本批只移动设置领域，不改变通道名、权限矩阵、preload API、返回结构或错误文本。
+- IPC 权限测试改为递归扫描全部 `electron/**/*.ts`，继续确保 118 个注册通道与权限矩阵一一对应、无重复、无直接绕过统一包装器的 `ipcMain.handle/on`。
+- 新增设置 IPC 行为测试，覆盖 28 通道注册、密钥专用写入边界、Memory/MCP/ASR 副作用和 AI Profile 密钥继承。
+- `npm test` 共 77 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC 双启动 smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
 
 ## 14. P2-2：前端加载与运行性能
 
