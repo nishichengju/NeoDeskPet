@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二十四批：Task Agent 工具执行会话已拆分）
+- 状态：P2-1 进行中（第二十五批：Task Agent 会话状态与最终回复策略已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -755,6 +755,15 @@ AI 与能力
 - `taskService.ts` 从第二十三批后的 2429 行降至 2243 行；新增 6 个工具会话测试，覆盖 native 参数/生命周期与未知调用、文本别名与重复调用、未知工具建议、失败结果缓存，以及视觉安全输出/图片 parts/证据文本。
 - 打包 IPC smoke 继续证明文本协议跨 chunk 完成 `TOOL_REQUEST/TOOL_RESULT`、native 拆分 function 名称/参数后只执行一次 `delay.sleep` 并在第二轮带 `role=tool`，Claude Messages payload 与 3/4/7 usage 保持正确；媒体 smoke 和 15 个 UI baseline 场景无回归。
 - `npm test` 共 45 个测试文件、195 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 均通过。下一批继续拆分 Agent 最终回复校验与 native/text 多轮循环，收口消息、草稿和 usage 编排。
+
+### P2-1 进展记录（2026-07-13，第二十五批）
+
+- 新增 `electron/task/taskAgentConversation.ts`，集中管理每轮流式草稿基线、文本工具协议块隐藏、Live2D 表情/动作标签提取、跨轮 usage 累加、最终回复证据校验和最大回合保守净化。
+- 最终回复策略会拒绝暴露内部工具名、在没有 toolRun 时声称已执行操作、以及不在用户输入/工具结果中出现的 URL；未到最大回合时向模型追加校验失败提示，最后一轮则移除内部名并把未验证 URL 替换为 `[链接未验证]`。
+- `TaskService` 只读取会话快照更新 `draftReply`、Live2D 字段和最终 usage，并负责把 accept/retry/sanitize 决策转成日志、系统消息和任务持久化；native/text 流式草稿、最终回复、消息角色与任务字段契约保持不变。
+- `taskService.ts` 从第二十四批后的 2243 行降至 2123 行；新增 7 个会话测试，覆盖 Live2D 标签清洗、跨 chunk/跨轮草稿、文本工具块隐藏、usage 累加、虚假操作/内部名拒绝、URL 证据与末轮净化，以及空最终答复回退草稿。
+- 打包 IPC smoke 继续验证文本/native 工具第二轮往返和最终答复持久化，并确认 Claude 分段 usage 经会话累加后仍落盘为 3/4/7；Windows unpacked、媒体 smoke 和 15 个 UI baseline 场景无回归。
+- `npm test` 共 46 个测试文件、202 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 均通过。下一批继续抽取 native/text 多轮循环、消息追加和 auto native→text fallback 编排。
 
 ## 14. P2-2：前端加载与运行性能
 

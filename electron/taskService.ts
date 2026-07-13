@@ -20,9 +20,9 @@ import type { McpManager } from './mcpManager'
 import {
   buildToolResultBlock,
   hasToolRequestMarker,
-  stripToolRequestBlocksForDisplay,
   TaskAgentToolCatalog,
 } from './task/taskAgentTools'
+import { TaskAgentConversation } from './task/taskAgentConversation'
 import {
   buildAgentEndpoint,
   buildAgentHeaders,
@@ -43,42 +43,7 @@ import { classifyVisionError, decideVisionRoute, resolveVisionFallbackProfile } 
 const MAX_STEP_OUTPUT_CHARS = 5000
 const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
 
-type Live2dTagExtracted = { cleanedText: string; expression?: string; motion?: string }
 type Live2dModelTagHints = { expressions: string[]; motions: string[] }
-
-function extractLive2dTags(text: string): Live2dTagExtracted {
-  const raw = String(text ?? '')
-  if (!raw.trim()) return { cleanedText: raw.trim() }
-
-  let expression: string | undefined
-  let motion: string | undefined
-  let cleaned = raw
-
-  const expRe = /\[表情[：:]\s*([^\]]+)\]/u
-  const motionRe = /\[动作[：:]\s*([^\]]+)\]/u
-
-  const expMatch = cleaned.match(expRe)
-  if (expMatch?.[1]) {
-    expression = expMatch[1].trim()
-    cleaned = cleaned.replace(/\[表情[：:]\s*[^\]]+\]/gu, '')
-  }
-
-  const motionMatch = cleaned.match(motionRe)
-  if (motionMatch?.[1]) {
-    motion = motionMatch[1].trim()
-    cleaned = cleaned.replace(/\[动作[：:]\s*[^\]]+\]/gu, '')
-  }
-
-  cleaned = cleaned
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n[ \t]+/g, '\n')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-
-  return { cleanedText: cleaned, expression, motion }
-}
 
 function readLive2dTagHintsFromModelFile(modelFileUrl: string): Live2dModelTagHints {
   const meta = readLive2dModelMetadata(modelFileUrl)
@@ -273,14 +238,6 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 function sleep(ms: number): Promise<void> {
   const delay = Math.max(0, Math.trunc(ms))
   return new Promise((resolve) => setTimeout(resolve, delay))
-}
-
-function finalTextClaimsToolAction(text: string): boolean {
-  const raw = String(text ?? '').trim()
-  if (!raw) return false
-  const negated = /(?:没有|没|未|无法|不能|失败|没能).{0,12}(?:调用|使用|运行|执行|搜索|搜|查询|截图|截屏|打开|点击|读取|写入|保存|修改|修复|工具)/u.test(raw)
-  if (negated) return false
-  return /(?:调用了|使用了|运行了|执行了|搜索了|搜到了|查到了|找到了|截图了|截屏了|打开了|点击了|读取了|写入了|保存了|修改了|下载了|安装了|创建了|生成了|修好了|已调用|已搜索|已截图|已打开|已读取|已写入|已修改|已保存|工具返回|搜索结果|截图已经|已经帮你)/u.test(raw)
 }
 
 function parseToolInput(input: string | undefined): ToolInput {
@@ -1437,12 +1394,8 @@ export class TaskService {
 
     const logs: string[] = []
     let lastProgressAt = 0
-    let draftReply = ''
-    let live2dExpression: string | undefined
-    let live2dMotion: string | undefined
+    const conversation = new TaskAgentConversation(maxTurns)
     let toolRuns: TaskRecord['toolRuns'] = []
-    // 累积 API 返回的 token 使用统计（多轮工具调用会累加）
-    const cumulativeUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
 
     // 初始化一次：避免复用上次残留的 draft/toolRuns
     this.writeState((draft) => {
@@ -1462,15 +1415,16 @@ export class TaskService {
       if (!force && nowTs - lastProgressAt < 250) return
       lastProgressAt = nowTs
       const text = clampStepOutput(logs.join('\n') || '执行中…')
+      const presentation = conversation.snapshot()
       this.writeState((draft) => {
         const it = draft.tasks.find((x) => x.id === task.id)
         if (!it) return
         const s = it.steps[it.currentStepIndex]
         if (!s) return
         s.output = text
-        it.draftReply = draftReply
-        it.live2dExpression = live2dExpression
-        it.live2dMotion = live2dMotion
+        it.draftReply = presentation.draftReply
+        it.live2dExpression = presentation.live2dExpression
+        it.live2dMotion = presentation.live2dMotion
         it.toolRuns = toolRuns
         it.updatedAt = now()
       })
@@ -1795,62 +1749,20 @@ export class TaskService {
       inputPreview: toolInputPreview,
     })
 
-    const normalizeUrl = (raw: string): string => {
-      const u = (raw ?? '').trim()
-      if (!u) return ''
-      return u.replace(/[)\]}>"'’”。，！？,.!?:;]+$/g, '').replace(/\/+$/g, '')
-    }
-
-    const extractUrls = (text: string): string[] => {
-      const urls = text.match(/https?:\/\/[^\s<>()]+/g) ?? []
-      return urls.map(normalizeUrl).filter(Boolean)
-    }
-
-    const sanitizeInternalToolNames = (text: string): string => {
-      // UI 会展示 ToolUse，最终回复不要暴露内部调用名
-      return text.replace(/\b(?:mcp|cli|browser|file|llm|delay|vision|image)\.[A-Za-z0-9_:\-./]+/g, '').replace(/[ \t]{2,}/g, ' ')
-    }
-
-    const validateFinalText = (finalText: string): { ok: true } | { ok: false; reason: string } => {
-      const text = (finalText ?? '').trim()
-      if (!text) return { ok: true }
-
-      const internalNameHit = /\b(?:mcp|cli|browser|file|llm|delay|vision|image)\.[A-Za-z0-9_:\-./]+/g.test(text)
-      if (internalNameHit) return { ok: false, reason: '最终回复包含工具内部名（如 cli.exec/browser.open/mcp.*）' }
-
-      if (!hasAnyFinishedToolRun() && finalTextClaimsToolAction(text)) {
-        return { ok: false, reason: '最终回复声称已调用/执行工具，但本轮没有任何工具执行记录' }
-      }
-
-      const urls = extractUrls(text)
-      if (!urls.length) return { ok: true }
-
-      const evidence = toolSession.buildEvidenceText(request)
-      const missing = urls.filter((u) => !evidence.includes(u) && !evidence.includes(`${u}/`))
-      if (missing.length) return { ok: false, reason: `最终回复包含未在工具结果/用户输入出现的 URL：${missing[0]}` }
-
-      return { ok: true }
-    }
-
     const finalize = (finalText: string): string => {
-      const raw = (finalText ?? '').trim()
-      const extracted = extractLive2dTags(raw)
-      if (extracted.expression) live2dExpression = extracted.expression
-      if (extracted.motion) live2dMotion = extracted.motion
-
-      const text = extracted.cleanedText
-      const out = text || draftReply || ''
+      const out = conversation.finalize(finalText)
+      const snapshot = conversation.snapshot()
       this.writeState((draft) => {
         const it = draft.tasks.find((x) => x.id === task.id)
         if (!it) return
         it.finalReply = out
         it.draftReply = out
-        it.live2dExpression = live2dExpression
-        it.live2dMotion = live2dMotion
+        it.live2dExpression = snapshot.live2dExpression
+        it.live2dMotion = snapshot.live2dMotion
         it.toolRuns = toolRuns
         // 保存累积的 usage 统计到任务（用于前端上下文悬浮球）
-        if (cumulativeUsage.totalTokens > 0) {
-          it.usage = { ...cumulativeUsage }
+        if (snapshot.usage.totalTokens > 0) {
+          it.usage = { ...snapshot.usage }
         }
         it.updatedAt = now()
       })
@@ -1858,23 +1770,21 @@ export class TaskService {
     }
 
     const tryFinalizeOrContinue = (candidateText: string, turn: number): { done: boolean; text: string } => {
-      const raw = (candidateText ?? '').trim()
-      const v = validateFinalText(raw)
-      if (v.ok) return { done: true, text: finalize(raw) }
-
-      if (turn < maxTurns - 1) {
-        pushLog(`[Agent] final reply rejected: ${v.reason}`, true)
+      const decision = conversation.decideFinal(candidateText, turn, {
+        hasFinishedToolRun: hasAnyFinishedToolRun(),
+        evidenceText: toolSession.buildEvidenceText(request),
+      })
+      if (decision.kind === 'accept') return { done: true, text: finalize(decision.text) }
+      if (decision.kind === 'retry') {
+        pushLog(`[Agent] final reply rejected: ${decision.reason}`, true)
         messages.push({
           role: 'system',
-          content: `校验失败：${v.reason}。请基于工具输出重答；需要链接/事实请先调用工具获取，且最终回复不要输出工具内部名。`,
+          content: `校验失败：${decision.reason}。请基于工具输出重答；需要链接/事实请先调用工具获取，且最终回复不要输出工具内部名。`,
         })
         return { done: false, text: '' }
       }
-
-      // 最后一轮：做一次保守净化，避免把未验证的 URL/内部名直接发给用户
-      const sanitized = sanitizeInternalToolNames(candidateText).replace(/https?:\/\/[^\s<>()]+/g, '[链接未验证]')
-      pushLog(`[Agent] final reply sanitized at maxTurns: ${v.reason}`, true)
-      return { done: true, text: finalize(sanitized) }
+      pushLog(`[Agent] final reply sanitized at maxTurns: ${decision.reason}`, true)
+      return { done: true, text: finalize(decision.text) }
     }
 
     const runNative = async (): Promise<string> => {
@@ -1883,30 +1793,18 @@ export class TaskService {
         if (rt.canceled) throw new Error('canceled')
 
         pushLog(`[Agent] turn ${turn + 1}/${maxTurns}`)
-        const draftBase = draftReply
         let turnRaw = ''
-        const applyTurnDraft = (raw: string, force?: boolean) => {
-          const extracted = extractLive2dTags(raw)
-          if (extracted.expression) live2dExpression = extracted.expression
-          if (extracted.motion) live2dMotion = extracted.motion
-          const piece = extracted.cleanedText
-          if (piece) {
-            draftReply = draftBase ? `${draftBase}\n${piece}` : piece
-            updateProgress(force)
-            return
-          }
-          if (extracted.expression || extracted.motion) updateProgress(force)
-        }
+        const applyTurnDraft = conversation.beginTurn('native')
 
         const { contentText, toolCalls, assistantMsgRaw } = await llmClient.callNative({
           onDelta: (delta) => {
             if (rt.canceled) throw new Error('canceled')
             turnRaw += delta
-            applyTurnDraft(turnRaw)
+            if (applyTurnDraft(turnRaw)) updateProgress()
           },
         })
         messages.push(assistantMsgRaw)
-        applyTurnDraft(contentText, true)
+        if (applyTurnDraft(contentText)) updateProgress(true)
 
         if (!toolCalls.length) {
           if (hasToolRequestMarker(contentText)) {
@@ -1957,41 +1855,23 @@ export class TaskService {
         if (rt.canceled) throw new Error('canceled')
 
         pushLog(`[Agent] turn ${turn + 1}/${maxTurns}`)
-        const draftBase = draftReply
         let turnRaw = ''
-        const applyTurnDraft = (raw: string, force?: boolean) => {
-          const display = stripToolRequestBlocksForDisplay(raw)
-          const extracted = extractLive2dTags(display)
-          if (extracted.expression) live2dExpression = extracted.expression
-          if (extracted.motion) live2dMotion = extracted.motion
-          const piece = extracted.cleanedText
-          if (piece) {
-            draftReply = draftBase ? `${draftBase}\n${piece}` : piece
-            updateProgress(force)
-            return
-          }
-          if (extracted.expression || extracted.motion) updateProgress(force)
-        }
+        const applyTurnDraft = conversation.beginTurn('text')
 
         const { contentText, assistantMsgRaw, usage } = await llmClient.callText({
           stopOnToolRequest: true,
           onDelta: (delta) => {
             if (rt.canceled) throw new Error('canceled')
             turnRaw += delta
-            applyTurnDraft(turnRaw)
+            if (applyTurnDraft(turnRaw)) updateProgress()
           },
         })
         messages.push(assistantMsgRaw)
 
-        // 累积本次 API 调用的 usage
-        if (usage) {
-          cumulativeUsage.promptTokens += usage.promptTokens
-          cumulativeUsage.completionTokens += usage.completionTokens
-          cumulativeUsage.totalTokens += usage.totalTokens
-        }
+        conversation.addUsage(usage)
 
         const { cleaned, calls } = toolCatalog.parseTextRequests(contentText)
-        applyTurnDraft(cleaned, true)
+        if (applyTurnDraft(cleaned)) updateProgress(true)
         if (!calls.length) {
           pushLog('[Agent] done', true)
           const fin = tryFinalizeOrContinue(cleaned, turn)
