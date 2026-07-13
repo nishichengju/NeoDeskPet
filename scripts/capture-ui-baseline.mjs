@@ -263,6 +263,7 @@ function installOrbMock(page, options) {
   return page.addInitScript(({ initialState, seedContent }) => {
     const now = Date.now()
     const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nT8AAAAASUVORK5CYII='
+    const secondImageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1/8AAAAASUVORK5CYII='
     const task = {
       id: 'baseline-orb-task',
       queue: 'chat',
@@ -281,7 +282,7 @@ function installOrbMock(page, options) {
           status: 'done',
           inputPreview: '{"ms":1}',
           outputPreview: 'sleep 1ms',
-          imagePaths: [imageDataUrl],
+          imagePaths: [imageDataUrl, secondImageDataUrl],
           startedAt: now - 1000,
           endedAt: now,
         },
@@ -495,6 +496,7 @@ const baselines = [
   { name: 'orb-bar-560x80-scale100', route: 'orb', width: 560, height: 80, scale: 1, mockOrbState: 'bar' },
   { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel' },
   { name: 'orb-panel-content-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true },
+  { name: 'orb-image-viewer-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true, verifyOrbImageViewer: true },
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
   { name: 'chat-tool-card-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyToolCard: true },
@@ -583,7 +585,6 @@ try {
 
     const failures = []
     if (metrics.horizontalOverflow) failures.push('body has horizontal overflow')
-    if (consoleErrors.length > 0) failures.push(`console errors: ${consoleErrors.join(' | ')}`)
     if (baseline.compactChat && !metrics.chatStatus?.summaryVisible) {
       failures.push('compact chat status summary is not visible')
     }
@@ -821,6 +822,55 @@ try {
       if (!(await viewer.isHidden().catch(() => false))) failures.push('image viewer did not close with Escape')
     }
 
+    let orbImageViewer = null
+    if (baseline.verifyOrbImageViewer) {
+      const attachment = page.locator('.ndp-orbpanel-attachment').first()
+      await attachment.waitFor({ state: 'visible' })
+      await attachment.click()
+      const viewer = page.locator('.ndp-orbimg-viewer')
+      await viewer.waitFor({ state: 'visible' })
+      const readViewerState = () => viewer.evaluate((element) => {
+        const image = element.querySelector('.ndp-orbimg-viewer-img')
+        return {
+          meta: element.querySelector('.ndp-orbimg-viewer-meta')?.textContent?.trim() ?? '',
+          title: element.querySelector('.ndp-orbimg-viewer-title')?.textContent?.trim() ?? '',
+          navCount: element.querySelectorAll('.ndp-orbimg-viewer-nav').length,
+          transform: image?.style?.transform ?? '',
+          horizontalOverflow: element.scrollWidth > element.clientWidth,
+        }
+      })
+      const initial = await readViewerState()
+      await page.keyboard.press('d')
+      await page.waitForFunction(() => document.querySelector('.ndp-orbimg-viewer-meta')?.textContent?.trim() === '2/2')
+      const afterNext = await readViewerState()
+      await viewer.locator('.ndp-orbimg-viewer-stage').dispatchEvent('wheel', { deltaY: -100 })
+      await page.waitForFunction(() => {
+        const transform = document.querySelector('.ndp-orbimg-viewer-img')?.style?.transform ?? ''
+        return transform !== 'scale(1)'
+      })
+      const afterZoom = await readViewerState()
+      await viewer.getByRole('button', { name: '1:1' }).click()
+      const afterReset = await readViewerState()
+      const viewerScreenshotPath = path.join(outputDir, `${baseline.name}-open.png`)
+      await page.screenshot({ path: viewerScreenshotPath })
+      orbImageViewer = {
+        initial,
+        afterNext,
+        afterZoom,
+        afterReset,
+        screenshot: path.relative(projectRoot, viewerScreenshotPath),
+      }
+      if (initial.meta !== '1/2') failures.push(`orb image viewer initial meta is ${initial.meta || 'missing'}`)
+      if (initial.navCount !== 2) failures.push(`orb image viewer has ${initial.navCount} navigation buttons`)
+      if (afterNext.meta !== '2/2') failures.push(`orb image viewer next meta is ${afterNext.meta || 'missing'}`)
+      if (!afterNext.title) failures.push('orb image viewer title is missing')
+      if (afterZoom.transform === 'scale(1)') failures.push('orb image viewer did not zoom with the wheel')
+      if (afterReset.transform !== 'scale(1)') failures.push(`orb image viewer reset transform is ${afterReset.transform || 'missing'}`)
+      if (initial.horizontalOverflow || afterNext.horizontalOverflow) failures.push('orb image viewer has horizontal overflow')
+      await page.keyboard.press('Escape')
+      if (!(await viewer.isHidden().catch(() => false))) failures.push('orb image viewer did not close with Escape')
+    }
+
     let toolCard = null
     if (baseline.verifyToolCard) {
       const summary = page.locator('.ndp-tooluse-summary').first()
@@ -977,6 +1027,8 @@ try {
       if (!advancedClosed) failures.push('AI advanced context settings are not collapsed by default')
     }
 
+    if (consoleErrors.length > 0) failures.push(`console errors: ${consoleErrors.join(' | ')}`)
+
     report.items.push({
       ...baseline,
       screenshot: path.relative(projectRoot, screenshotPath),
@@ -984,6 +1036,7 @@ try {
       expandedChat,
       chatUi,
       imageViewer,
+      orbImageViewer,
       toolCard,
       settingsNavigation,
       settingsSearch,

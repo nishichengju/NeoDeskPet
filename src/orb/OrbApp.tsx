@@ -1,5 +1,5 @@
 ﻿import './orb.css'
-import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent as ReactWheelEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import type {
   AppSettings,
@@ -22,6 +22,7 @@ import {
 import { OrbBallView } from './OrbBallView'
 import { OrbBarView, type OrbPendingAttachment } from './OrbBarView'
 import { OrbAssistantMessageContent } from './OrbAssistantMessageContent'
+import { OrbImageViewer, type OrbImageViewerItem } from './OrbImageViewer'
 import { OrbMessageAttachments } from './OrbMessageAttachments'
 import { OrbPanelView } from './OrbPanelView'
 import type { OrbImageViewerRequestItem } from './orbMessageContentUtils'
@@ -116,13 +117,11 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     dockSideRef.current = dockSide
   }, [dockSide])
 
-  type ImageViewerItem = { src: string; title: string }
   const [pendingAttachments, setPendingAttachments] = useState<OrbPendingAttachment[]>([])
-  const [imageViewer, setImageViewer] = useState<{ open: boolean; items: ImageViewerItem[]; index: number; scale: number }>({
+  const [imageViewer, setImageViewer] = useState<{ open: boolean; items: OrbImageViewerItem[]; index: number }>({
     open: false,
     items: [],
     index: 0,
-    scale: 1,
   })
   const imageViewerReqRef = useRef(0)
   const pendingAttachmentsRef = useRef<OrbPendingAttachment[]>([])
@@ -1663,79 +1662,22 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       const finalItems = resolved.filter((it) => Boolean(it.src))
       if (finalItems.length === 0) return
       const safeIndex = Math.max(0, Math.min(Math.trunc(startIndex), finalItems.length - 1))
-      setImageViewer({ open: true, items: finalItems, index: safeIndex, scale: 1 })
+      setImageViewer({ open: true, items: finalItems, index: safeIndex })
     },
     [resolveImageViewerSrc],
   )
 
   const closeImageViewer = useCallback(() => {
-    setImageViewer((prev) => ({ ...prev, open: false, scale: 1 }))
+    setImageViewer((prev) => ({ ...prev, open: false }))
   }, [])
 
-  const prevImageViewer = useCallback(() => {
+  const setImageViewerIndex = useCallback((index: number) => {
     setImageViewer((prev) => {
-      const total = prev.items.length
-      if (!prev.open || total <= 1) return prev
-      const next = (prev.index - 1 + total) % total
-      return { ...prev, index: next, scale: 1 }
+      if (!prev.open || prev.items.length === 0) return prev
+      const safeIndex = Math.max(0, Math.min(Math.trunc(index), prev.items.length - 1))
+      return { ...prev, index: safeIndex }
     })
   }, [])
-
-  const nextImageViewer = useCallback(() => {
-    setImageViewer((prev) => {
-      const total = prev.items.length
-      if (!prev.open || total <= 1) return prev
-      const next = (prev.index + 1) % total
-      return { ...prev, index: next, scale: 1 }
-    })
-  }, [])
-
-  const resetImageViewerScale = useCallback(() => {
-    setImageViewer((prev) => ({ ...prev, scale: 1 }))
-  }, [])
-
-  const onImageViewerWheel = useCallback((e: ReactWheelEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    const delta = e.deltaY
-    setImageViewer((prev) => {
-      if (!prev.open) return prev
-      const factor = delta < 0 ? 1.1 : 0.9
-      const nextScale = Math.max(0.2, Math.min(6, prev.scale * factor))
-      return { ...prev, scale: nextScale }
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!imageViewer.open) return
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        closeImageViewer()
-        return
-      }
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault()
-        prevImageViewer()
-        return
-      }
-      if (e.key === 'a' || e.key === 'A') {
-        e.preventDefault()
-        prevImageViewer()
-        return
-      }
-      if (e.key === 'ArrowRight') {
-        e.preventDefault()
-        nextImageViewer()
-        return
-      }
-      if (e.key === 'd' || e.key === 'D') {
-        e.preventDefault()
-        nextImageViewer()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [closeImageViewer, imageViewer.open, nextImageViewer, prevImageViewer])
 
   const renderMessageBlocks = useCallback(
     (message: ChatMessageRecord) => (
@@ -1918,50 +1860,13 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         </div>
       </div>
 
-      {imageViewer.open && imageViewer.items.length > 0 ? (
-        <div className="ndp-orbimg-viewer" data-orb-nodrag="true" onClick={closeImageViewer}>
-          <div className="ndp-orbimg-viewer-shell" data-orb-nodrag="true" onClick={(e) => e.stopPropagation()}>
-            <div className="ndp-orbimg-viewer-toolbar" data-orb-nodrag="true">
-              <div className="ndp-orbimg-viewer-title" title={imageViewer.items[imageViewer.index]?.title || ''}>
-                {imageViewer.items[imageViewer.index]?.title || `图片 ${imageViewer.index + 1}`}
-              </div>
-              <div className="ndp-orbimg-viewer-meta">
-                {imageViewer.index + 1}/{imageViewer.items.length}
-              </div>
-              <div className="ndp-orbimg-viewer-tools">
-                <button className="ndp-orbimg-viewer-btn" onClick={resetImageViewerScale} title="重置缩放" data-orb-nodrag="true">
-                  1:1
-                </button>
-                <button className="ndp-orbimg-viewer-btn" onClick={closeImageViewer} title="关闭" data-orb-nodrag="true">
-                  关闭
-                </button>
-              </div>
-            </div>
-            <div className="ndp-orbimg-viewer-stage" data-orb-nodrag="true" onWheel={onImageViewerWheel}>
-              {imageViewer.items.length > 1 ? (
-                <button className="ndp-orbimg-viewer-nav" onClick={prevImageViewer} title="上一张" data-orb-nodrag="true">
-                  ◀
-                </button>
-              ) : (
-                <div />
-              )}
-              <img
-                className="ndp-orbimg-viewer-img"
-                src={imageViewer.items[imageViewer.index]?.src || ''}
-                alt={imageViewer.items[imageViewer.index]?.title || 'image'}
-                style={{ transform: `scale(${imageViewer.scale})` }}
-              />
-              {imageViewer.items.length > 1 ? (
-                <button className="ndp-orbimg-viewer-nav" onClick={nextImageViewer} title="下一张" data-orb-nodrag="true">
-                  ▶
-                </button>
-              ) : (
-                <div />
-              )}
-            </div>
-            <div className="ndp-orbimg-viewer-tip">滚轮缩放 · ←/→ 或 A/D 切换 · Esc 关闭</div>
-          </div>
-        </div>
+      {imageViewer.open ? (
+        <OrbImageViewer
+          items={imageViewer.items}
+          index={imageViewer.index}
+          onIndexChange={setImageViewerIndex}
+          onClose={closeImageViewer}
+        />
       ) : null}
 
       {renderMode === 'panel' && messageMenu && messageMenuTarget ? (

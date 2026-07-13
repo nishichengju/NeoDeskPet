@@ -972,3 +972,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/orb-panel-content-560x720-scale100.png` 与 `artifacts/ui-baseline/orb-panel-560x720-scale100.png`。本批未修改 Orb Panel CSS、消息气泡 class、Markdown 规则、任务/消息持久化结构、附件 API、安全边界、工具运行状态文案或图片查看器缩放逻辑；缺失任务文案只补齐原本遗漏的右括号，多 run 顶层 key 只消除 React 列表告警。聚焦测试验证纯归一化和服务端静态渲染，打包 IPC smoke 验证真实 Orb preload 与任务/附件链路，浏览器基线验证有内容 Panel 的工具图片和消息图片均实际渲染。当前自动化尚未在真实 Electron Orb 中点击视频、跨多张工具图片导航、展开工具详情、触发行内编辑或右键消息菜单；历史 popover、图片查看器外壳和消息操作仍留在 `OrbApp`，下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第四十七批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Orb 图片查看器 UI、缩放/循环导航/键盘交互与 UI baseline 控制台门禁
+
+| 检查 | 结果 |
+| --- | --- |
+| Orb 图片查看器测试 | 3 个用例通过：任意偏移循环索引、0.2 至 6 倍缩放边界、单图 DOM、多图选中项与前后导航 DOM |
+| `npm test` | 76 个测试文件、334 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功；renderer 主 chunk 约 1.409 MB |
+| `npm run ipc:smoke` | Orb ball/panel/ball 状态往返、真实聊天/任务/Memory/Agent/MCP/媒体/TTS/ASR 与重启路径全部通过，所有窗口 runtimeErrors 为空 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 19 个场景通过；新增 `orb-image-viewer-560x720-scale100`，D 键完成 `1/2 → 2/2`，滚轮缩放 `1 → 1.1`、1:1 重置和 Esc 关闭通过，0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/orb-image-viewer-560x720-scale100-open.png`、`artifacts/ui-baseline/orb-image-viewer-560x720-scale100.png` 与 `artifacts/ui-baseline/orb-panel-content-560x720-scale100.png`。本批未修改查看器 CSS、标题/计数/提示文案、缩放倍率与上下界、循环导航语义、附件 URL API 或打开入口；只把已有状态和 JSX 迁移到独立组件，并移除会触发 passive-listener 错误的无必要 `preventDefault()`。聚焦测试验证纯索引/缩放函数和静态 DOM，浏览器基线使用两张真实 data URL 图片验证切换、缩放、重置、关闭及打开态布局，打包 IPC/媒体 smoke 继续验证生产附件解析与安全边界。当前自动化尚未在真实 Electron Orb 中验证鼠标连续快速滚轮、超高分辨率图片显存占用或查看器打开期间窗口状态切换；历史 popover 与消息菜单仍留在 `OrbApp`，下一批继续拆分。

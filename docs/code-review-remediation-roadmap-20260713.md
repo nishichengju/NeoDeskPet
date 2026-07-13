@@ -950,6 +950,15 @@ AI 与能力
 - UI baseline 新增预置用户/助手消息、状态、真实工具 run、工具图片和消息图片的 `orb-panel-content-560x720-scale100.png`；基线从 17 增至 18 个场景，新场景确认 2 条消息、1 张工具卡、2 个附件，0 failure、0 console error、无横向或纵向溢出，截图经人工检查无布局回归。
 - `npm test` 共 75 个测试文件、331 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 18 个 UI baseline 场景均通过。下一批继续拆分历史 popover、图片查看器或消息菜单，优先选择能保持 Orb 状态机边界清晰的一组。
 
+第四十七批进展（2026-07-14）：
+
+- 新增 `src/orb/OrbImageViewer.tsx` 与 `orbImageViewerUtils.ts`，抽离查看器遮罩/工具栏/舞台、0.2 至 6 倍滚轮缩放、1:1 重置、循环前后切图、方向键与 A/D 导航、Esc/遮罩关闭；附件 URL 安全解析、并发请求代次和已解析条目仍由 `OrbApp` 持有。
+- 查看器在索引或图片源变化时重置缩放，单图继续隐藏导航按钮，多图继续首尾循环；`OrbApp.tsx` 从 2111 行降至 2016 行，未修改 CSS、图片源解析、标题/计数文案或打开入口。
+- 新增 3 个查看器测试，覆盖任意偏移循环索引、缩放上下界、单图 DOM 和多图选中项/导航 DOM；浏览器基线进一步实际验证 D 键切换、滚轮放大、1:1 重置与 Esc 关闭。
+- 修复滚轮处理调用 `preventDefault()` 触发 Chromium passive-listener 控制台错误的问题；同时将 UI baseline 的 console error 判定移动到每个场景全部交互完成后，避免后续异步/交互阶段错误被写入报告却不使门禁失败。
+- UI baseline 新增 `orb-image-viewer-560x720-scale100`，工具 mock 提供两张图片；基线从 18 增至 19 个场景，查看器从 `1/2` 切换到 `2/2`、缩放 `1 → 1.1 → 1`、Esc 关闭均通过，0 failure、0 console error、无横向或纵向溢出，打开态截图经人工检查无布局回归。
+- `npm test` 共 76 个测试文件、334 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 19 个 UI baseline 场景均通过。下一批继续拆分历史 popover 或消息菜单及其定位/动作边界。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤
