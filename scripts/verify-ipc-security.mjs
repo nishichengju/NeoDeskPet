@@ -45,16 +45,91 @@ const aiServer = http.createServer(async (request, response) => {
   const body = bodyText ? JSON.parse(bodyText) : {}
   const messageText = JSON.stringify(body.messages ?? [])
   const hasAgentToolResult = messageText.includes('<<<[TOOL_RESULT]>>>')
-  aiRequests.push({
+  const hasNativeToolResult = Array.isArray(body.messages) && body.messages.some((message) => message?.role === 'tool')
+  const isClaudeAgent = body.model === 'ipc-agent-claude-smoke'
+  const isNativeAgent = body.model === 'ipc-agent-native-smoke'
+  const recordedRequest = {
     path: request.url,
-    authMatches: request.headers.authorization === `Bearer ${aiSmokeKey}`,
+    authMatches: isClaudeAgent
+      ? request.headers['x-api-key'] === aiSmokeKey
+      : request.headers.authorization === `Bearer ${aiSmokeKey}`,
     streaming: body.stream === true,
     model: body.model,
     hasAgentToolResult,
-  })
+    hasNativeToolResult,
+    claudePayloadMatches:
+      isClaudeAgent &&
+      typeof body.system === 'string' &&
+      Array.isArray(body.messages) &&
+      body.messages.every((message) => message?.role === 'user' || message?.role === 'assistant'),
+    nativePayloadMatches:
+      isNativeAgent && Array.isArray(body.tools) && body.tools.length > 0 && body.tool_choice === 'auto',
+  }
+  aiRequests.push(recordedRequest)
+
+  const modelRequestCount = aiRequests.filter((item) => item.model === body.model).length
+  if (body.model === 'ipc-agent-smoke' && body.stream === true && !hasAgentToolResult && modelRequestCount === 1) {
+    recordedRequest.simulatedStatus = 503
+    response.writeHead(503, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ error: { message: 'temporary agent smoke failure' } }))
+    return
+  }
 
   if (body.stream === true) {
     response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    if (isClaudeAgent) {
+      const frames = [
+        { type: 'message_start', message: { usage: { input_tokens: 3, output_tokens: 0 } } },
+        { type: 'content_block_delta', delta: { text: 'Claude provider smoke complete.' } },
+        { type: 'message_delta', usage: { input_tokens: 0, output_tokens: 4 } },
+        { type: 'message_stop' },
+      ]
+        .map((payload) => `data: ${JSON.stringify(payload)}\n\n`)
+        .join('')
+      const splitAt = Math.max(1, Math.floor(frames.length / 2))
+      response.write(frames.slice(0, splitAt))
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      response.end(frames.slice(splitAt))
+      return
+    }
+    if (isNativeAgent) {
+      const payloads = hasNativeToolResult
+        ? [{ choices: [{ delta: { content: 'Native provider smoke complete.' } }] }]
+        : [
+            {
+              choices: [
+                {
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'native-smoke-call',
+                        type: 'function',
+                        function: { name: 'ndp_delay_', arguments: '{"ms":' },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [{ index: 0, function: { name: 'sleep', arguments: '1}' } }],
+                  },
+                },
+              ],
+            },
+          ]
+      const frames = `${payloads.map((payload) => `data: ${JSON.stringify(payload)}\n\n`).join('')}data: [DONE]\n\n`
+      const splitAt = Math.max(1, Math.floor(frames.length / 2))
+      response.write(frames.slice(0, splitAt))
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      response.end(frames.slice(splitAt))
+      return
+    }
     const content =
       body.model === 'ipc-agent-smoke'
         ? hasAgentToolResult
@@ -66,8 +141,11 @@ const aiServer = http.createServer(async (request, response) => {
               '<<<[END_TOOL_REQUEST]>>>',
             ].join('\n')
         : '代理'
-    response.write(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`)
-    response.end('data: [DONE]\n\n')
+    const frames = `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`
+    const splitAt = Math.max(1, Math.floor(frames.length / 2))
+    response.write(frames.slice(0, splitAt))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    response.end(frames.slice(splitAt))
     return
   }
 
@@ -602,7 +680,6 @@ try {
     const dismissed = await window.neoDeskPet.dismissTask(created.id)
     return { taskId: created.id, completed, dismissed }
   })
-  await settings.evaluate(() => window.neoDeskPet.setAISettings({ model: 'ipc-smoke' }))
   const taskAgentRequests = aiRequests.filter((request) => request.model === 'ipc-agent-smoke')
   assert(taskAgentProtocol.completed?.status === 'done', `agent text protocol task failed: ${taskAgentProtocol.completed?.lastError ?? 'missing'}`)
   assert(
@@ -614,13 +691,104 @@ try {
     'agent text protocol did not execute and record delay.sleep',
   )
   assert(
-    taskAgentRequests.length === 2 &&
+    taskAgentRequests.length === 3 &&
       taskAgentRequests.every((request) => request.authMatches) &&
+      taskAgentRequests[0]?.simulatedStatus === 503 &&
       taskAgentRequests[0]?.hasAgentToolResult === false &&
-      taskAgentRequests[1]?.hasAgentToolResult === true,
-    'agent text protocol did not round-trip TOOL_REQUEST and TOOL_RESULT through the packaged task runner',
+      taskAgentRequests[1]?.hasAgentToolResult === false &&
+      taskAgentRequests[2]?.hasAgentToolResult === true,
+    'agent text protocol did not retry and round-trip TOOL_REQUEST/TOOL_RESULT through the packaged task runner',
   )
   assert(taskAgentProtocol.dismissed?.ok, 'agent text protocol task cleanup failed')
+
+  await settings.evaluate(() =>
+    window.neoDeskPet.setAISettings({ model: 'ipc-agent-native-smoke', apiMode: 'openai-compatible' }),
+  )
+  const taskAgentNative = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Agent Native Provider Task',
+      steps: [
+        {
+          title: 'Run native tool call stream',
+          tool: 'agent.run',
+          input: JSON.stringify({ request: 'Run the native smoke delay tool, then finish.', mode: 'native', maxTurns: 3 }),
+        },
+      ],
+    })
+    const deadline = Date.now() + 15_000
+    let completed = null
+    while (Date.now() < deadline) {
+      completed = await window.neoDeskPet.getTask(created.id)
+      if (completed && ['done', 'failed', 'canceled'].includes(completed.status)) break
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    }
+    const dismissed = await window.neoDeskPet.dismissTask(created.id)
+    return { taskId: created.id, completed, dismissed }
+  })
+  const taskAgentNativeRequests = aiRequests.filter((request) => request.model === 'ipc-agent-native-smoke')
+  assert(taskAgentNative.completed?.status === 'done', `agent native task failed: ${taskAgentNative.completed?.lastError ?? 'missing'}`)
+  assert(
+    taskAgentNative.completed?.steps[0]?.output === 'Native provider smoke complete.',
+    'agent native final output was not persisted',
+  )
+  assert(
+    taskAgentNative.completed?.toolRuns?.some((run) => run.toolName === 'delay.sleep' && run.status === 'done'),
+    'agent native stream did not merge and execute delay.sleep',
+  )
+  assert(
+    taskAgentNativeRequests.length === 2 &&
+      taskAgentNativeRequests.every((request) => request.authMatches && request.nativePayloadMatches) &&
+      taskAgentNativeRequests[0]?.hasNativeToolResult === false &&
+      taskAgentNativeRequests[1]?.hasNativeToolResult === true,
+    'agent native tool_calls did not round-trip through role=tool messages',
+  )
+  assert(taskAgentNative.dismissed?.ok, 'agent native task cleanup failed')
+
+  await settings.evaluate(() => window.neoDeskPet.setAISettings({ model: 'ipc-agent-claude-smoke', apiMode: 'claude' }))
+  const taskAgentClaude = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Agent Claude Provider Task',
+      steps: [
+        {
+          title: 'Run Claude provider stream',
+          tool: 'agent.run',
+          input: JSON.stringify({ request: 'Return the Claude provider smoke result.', mode: 'text', maxTurns: 1 }),
+        },
+      ],
+    })
+    const deadline = Date.now() + 15_000
+    let completed = null
+    while (Date.now() < deadline) {
+      completed = await window.neoDeskPet.getTask(created.id)
+      if (completed && ['done', 'failed', 'canceled'].includes(completed.status)) break
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    }
+    const dismissed = await window.neoDeskPet.dismissTask(created.id)
+    return { taskId: created.id, completed, dismissed }
+  })
+  await settings.evaluate(() => window.neoDeskPet.setAISettings({ model: 'ipc-smoke', apiMode: 'openai-compatible' }))
+  const taskAgentClaudeRequests = aiRequests.filter((request) => request.model === 'ipc-agent-claude-smoke')
+  assert(taskAgentClaude.completed?.status === 'done', `agent Claude task failed: ${taskAgentClaude.completed?.lastError ?? 'missing'}`)
+  assert(
+    taskAgentClaude.completed?.steps[0]?.output === 'Claude provider smoke complete.',
+    'agent Claude final output was not persisted',
+  )
+  assert(
+    taskAgentClaude.completed?.usage?.promptTokens === 3 &&
+      taskAgentClaude.completed?.usage?.completionTokens === 4 &&
+      taskAgentClaude.completed?.usage?.totalTokens === 7,
+    'agent Claude usage was not merged from stream events',
+  )
+  assert(
+    taskAgentClaudeRequests.length === 1 &&
+      taskAgentClaudeRequests[0]?.path === '/v1/messages' &&
+      taskAgentClaudeRequests[0]?.authMatches === true &&
+      taskAgentClaudeRequests[0]?.claudePayloadMatches === true,
+    'agent Claude request did not use the expected endpoint, payload, or x-api-key',
+  )
+  assert(taskAgentClaude.dismissed?.ok, 'agent Claude task cleanup failed')
 
   const memoryCrudSeed = await settings.evaluate(async () => {
     const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
@@ -896,8 +1064,27 @@ try {
       output: taskAgentProtocol.completed?.steps[0]?.output,
       toolRuns: taskAgentProtocol.completed?.toolRuns,
       requestCount: taskAgentRequests.length,
-      resultRoundTrip: taskAgentRequests[1]?.hasAgentToolResult === true,
+      retryStatus: taskAgentRequests[0]?.simulatedStatus,
+      resultRoundTrip: taskAgentRequests[2]?.hasAgentToolResult === true,
       cleanup: taskAgentProtocol.dismissed?.ok === true,
+    },
+    taskAgentNative: {
+      status: taskAgentNative.completed?.status,
+      output: taskAgentNative.completed?.steps[0]?.output,
+      toolRuns: taskAgentNative.completed?.toolRuns,
+      requestCount: taskAgentNativeRequests.length,
+      payloadMatches: taskAgentNativeRequests.every((request) => request.nativePayloadMatches),
+      resultRoundTrip: taskAgentNativeRequests[1]?.hasNativeToolResult === true,
+      cleanup: taskAgentNative.dismissed?.ok === true,
+    },
+    taskAgentClaude: {
+      status: taskAgentClaude.completed?.status,
+      output: taskAgentClaude.completed?.steps[0]?.output,
+      usage: taskAgentClaude.completed?.usage,
+      endpoint: taskAgentClaudeRequests[0]?.path,
+      authMatches: taskAgentClaudeRequests[0]?.authMatches,
+      payloadMatches: taskAgentClaudeRequests[0]?.claudePayloadMatches,
+      cleanup: taskAgentClaude.dismissed?.ok === true,
     },
     memoryCrud: {
       personaId: memoryCrudSeed.persona.id,

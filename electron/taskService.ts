@@ -26,6 +26,24 @@ import {
   stripToolRequestBlocksForDisplay,
   TaskAgentToolCatalog,
 } from './task/taskAgentTools'
+import {
+  buildAgentEndpoint,
+  buildAgentHeaders,
+  buildClaudeTextPayload,
+  createHttpStatusError,
+  isAbortLikeError,
+  NativeAssistantStreamAccumulator,
+  parseNativeAssistantMessage,
+  parseTextStreamPayload,
+  readErrorStatus,
+  shouldRetryTransientError,
+  SseDataBuffer,
+  transientRetryDelayMs,
+  type AssistantMessage,
+  type LlmUsage,
+  type RawToolCall,
+  type ToolCall,
+} from './task/taskAgentLlmProtocol'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, VisualArtifactRef } from './types'
@@ -1118,16 +1136,6 @@ export class TaskService {
       }
     }
 
-    type ToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } }
-    type RawToolCall = Record<string, unknown>
-
-    type AssistantMessage = Record<string, unknown> & {
-      role?: string
-      content?: unknown
-      tool_calls?: unknown
-      function_call?: unknown
-    }
-
     const builtinDefs = getDefaultAgentToolDefinitions().filter(
       (definition) => definition.name !== 'vision.look' || settings.ai.visionRoutingMode !== 'off',
     )
@@ -1639,286 +1647,19 @@ export class TaskService {
     const transientRetryLimit = 2
     const transientRetryBaseDelayMs = 500
     const transientRetryJitterMs = 250
-    type RetryableLlmError = Error & { status?: number }
-
-    const withHttpStatus = (message: string, status: number): RetryableLlmError => {
-      const err = new Error(message) as RetryableLlmError
-      err.status = status
-      return err
-    }
-    const readErrorStatus = (err: unknown): number | null => {
-      const status = (err as { status?: unknown })?.status
-      return typeof status === 'number' && Number.isFinite(status) ? status : null
-    }
-    const isAbortLikeError = (err: unknown): boolean => {
-      if (err instanceof DOMException && err.name === 'AbortError') return true
-      const msg = String(err instanceof Error ? err.message : err ?? '').toLowerCase()
-      return msg === 'canceled' || msg === 'cancelled'
-    }
-    const isTransientHttpStatus = (status: number): boolean =>
-      status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)
-    const isTransientErrorMessage = (message: string): boolean => {
-      const s = String(message ?? '').toLowerCase()
-      return (
-        s.includes('timeout') ||
-        s.includes('timed out') ||
-        s.includes('network error') ||
-        s.includes('networkerror') ||
-        s.includes('fetch failed') ||
-        s.includes('failed to fetch') ||
-        s.includes('socket hang up') ||
-        s.includes('econnreset') ||
-        s.includes('econnrefused') ||
-        s.includes('etimedout') ||
-        s.includes('connection reset') ||
-        s.includes('connection refused') ||
-        s.includes('service unavailable') ||
-        s.includes('gateway timeout') ||
-        s.includes('bad gateway') ||
-        s.includes('temporarily unavailable') ||
-        s.includes('rate limit') ||
-        s.includes('too many requests') ||
-        s.includes('连接超时') ||
-        s.includes('网络') ||
-        s.includes('连接失败') ||
-        s.includes('连接重置')
-      )
-    }
-    const shouldRetryTransientError = (attempt: number, err: unknown, status: number | null): boolean => {
-      if (attempt >= transientRetryLimit) return false
-      if (isAbortLikeError(err)) return false
-      if (status != null && isTransientHttpStatus(status)) return true
-      const msg = err instanceof Error ? err.message : String(err)
-      return isTransientErrorMessage(msg)
-    }
-    const transientRetryDelayMs = (attempt: number): number => {
-      const backoff = transientRetryBaseDelayMs * Math.max(1, 2 ** attempt)
-      const jitter = Math.floor(Math.random() * transientRetryJitterMs)
-      return backoff + jitter
-    }
-    const sleep = async (ms: number): Promise<void> => {
-      await new Promise<void>((resolve) => setTimeout(resolve, ms))
-    }
 
     if (!baseUrl || !model) throw new Error('未配置工具 LLM baseUrl/model（设置 → AI 设置 → 工具/Agent 或 AI 设置）')
 
-    const join = (b: string, p: string) => `${b.replace(/\/+$/, '')}/${p.replace(/^\/+/, '')}`
-    const endpoint = join(baseUrl, apiMode === 'claude' ? 'messages' : 'chat/completions')
-    const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (apiMode === 'claude') {
-      headers['anthropic-version'] = '2023-06-01'
-      if (apiKey) headers['x-api-key'] = apiKey
-    } else if (apiKey) {
-      headers.authorization = `Bearer ${apiKey}`
-    }
+    const endpoint = buildAgentEndpoint(baseUrl, apiMode)
+    const headers = buildAgentHeaders(apiMode, apiKey)
 
     // 使用任务ID作为sessionId，让API代理可以缓存和复用签名
     const sessionId = task.id
-
-    const textFromMessageContent = (content: unknown): string => {
-      if (typeof content === 'string') return content
-      if (!Array.isArray(content)) return ''
-      return content
-        .map((part) => {
-          if (part && typeof part === 'object' && !Array.isArray(part)) {
-            const text = (part as { text?: unknown }).text
-            if (typeof text === 'string') return text
-          }
-          return ''
-        })
-        .filter(Boolean)
-        .join('\n')
-    }
-
-    const parseClaudeDataUrl = (url: string): { mediaType: string; data: string } | null => {
-      const raw = String(url ?? '').trim()
-      if (!raw.startsWith('data:')) return null
-      const comma = raw.indexOf(',')
-      if (comma < 0) return null
-      const meta = raw.slice(5, comma)
-      const data = raw.slice(comma + 1)
-      const parts = meta.split(';').map((p) => p.trim())
-      const mediaType = parts[0] || 'application/octet-stream'
-      if (!parts.includes('base64') || !data) return null
-      return { mediaType, data }
-    }
-
-    const toClaudeContentBlocks = (content: unknown): Array<Record<string, unknown>> => {
-      if (typeof content === 'string') return content.trim() ? [{ type: 'text', text: content }] : []
-      if (!Array.isArray(content)) return []
-      const blocks: Array<Record<string, unknown>> = []
-      for (const part of content) {
-        if (!part || typeof part !== 'object' || Array.isArray(part)) continue
-        const rec = part as Record<string, unknown>
-        if (rec.type === 'text') {
-          const text = typeof rec.text === 'string' ? rec.text : ''
-          if (text.trim()) blocks.push({ type: 'text', text })
-          continue
-        }
-        if (rec.type === 'image_url') {
-          const image = rec.image_url && typeof rec.image_url === 'object' ? (rec.image_url as Record<string, unknown>) : null
-          const url = typeof image?.url === 'string' ? image.url.trim() : ''
-          if (!url) continue
-          const dataUrl = parseClaudeDataUrl(url)
-          blocks.push(
-            dataUrl
-              ? { type: 'image', source: { type: 'base64', media_type: dataUrl.mediaType, data: dataUrl.data } }
-              : { type: 'image', source: { type: 'url', url } },
-          )
-        }
-      }
-      return blocks
-    }
-
-    const buildClaudeTextPayload = (stream: boolean): Record<string, unknown> => {
-      const systemParts: string[] = []
-      const outMessages: Array<{ role: 'user' | 'assistant'; content: Array<Record<string, unknown>> }> = []
-      for (const m of messages) {
-        const rec = m as Record<string, unknown>
-        const roleRaw = typeof rec.role === 'string' ? rec.role : 'user'
-        if (roleRaw === 'system') {
-          const text = textFromMessageContent(rec.content).trim()
-          if (text) systemParts.push(text)
-          continue
-        }
-        const role = roleRaw === 'assistant' ? 'assistant' : 'user'
-        const content = toClaudeContentBlocks(rec.content)
-        if (!content.length) continue
-        const prev = outMessages[outMessages.length - 1]
-        if (prev?.role === role) prev.content.push(...content)
-        else outMessages.push({ role, content })
-      }
-
-      const body: Record<string, unknown> = {
-        model,
-        max_tokens: maxTokens,
-        temperature,
-        messages: outMessages,
-        stream,
-      }
-      if (systemParts.length) body.system = systemParts.join('\n\n')
-      const thinking = reasoningOptions.extra.thinking
-      if (
-        thinking &&
-        typeof thinking === 'object' &&
-        !Array.isArray(thinking) &&
-        (thinking as { type?: unknown }).type === 'enabled'
-      ) {
-        body.thinking = thinking
-      }
-      return body
-    }
-
-    const readClaudeUsage = (payload: unknown): { promptTokens: number; completionTokens: number; totalTokens: number } | undefined => {
-      const usage = (payload as { usage?: unknown })?.usage
-      if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return undefined
-      const input = (usage as { input_tokens?: unknown }).input_tokens
-      const output = (usage as { output_tokens?: unknown }).output_tokens
-      const promptTokens = typeof input === 'number' && Number.isFinite(input) ? input : 0
-      const completionTokens = typeof output === 'number' && Number.isFinite(output) ? output : 0
-      return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }
-    }
-
-    const mergeLlmUsage = (
-      prev: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined,
-      next: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined,
-    ): { promptTokens: number; completionTokens: number; totalTokens: number } | undefined => {
-      if (!next) return prev
-      const promptTokens = next.promptTokens || prev?.promptTokens || 0
-      const completionTokens = next.completionTokens || prev?.completionTokens || 0
-      const totalTokens = next.totalTokens || promptTokens + completionTokens
-      return { promptTokens, completionTokens, totalTokens }
-    }
 
     const callLlmNative = async (
       visionRetryAttempt = 0,
       opts?: { onDelta?: (delta: string) => void },
     ): Promise<{ contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage }> => {
-      const parseNativeAssistantMessage = (
-        msg: AssistantMessage,
-      ): { contentText: string; toolCalls: ToolCall[]; rawToolCalls: RawToolCall[]; assistantMsgRaw: AssistantMessage } => {
-        const contentText =
-          typeof msg.content === 'string'
-            ? msg.content
-            : Array.isArray(msg.content)
-              ? msg.content
-                  .map((p) => {
-                    if (p && typeof p === 'object') {
-                      const t = (p as Record<string, unknown>).text
-                      if (typeof t === 'string') return t
-                    }
-                    return ''
-                  })
-                  .filter(Boolean)
-                  .join('\n')
-              : ''
-
-        const toolCallsRawUnknown = Array.isArray(msg.tool_calls) ? (msg.tool_calls as unknown[]) : []
-        const rawToolCallsFromToolCalls = toolCallsRawUnknown
-          .map((c) => (c && typeof c === 'object' && !Array.isArray(c) ? (c as RawToolCall) : null))
-          .filter((c): c is RawToolCall => Boolean(c))
-
-        const legacyRawToolCalls: RawToolCall[] = (() => {
-          const fc = msg.function_call
-          if (!fc || typeof fc !== 'object' || Array.isArray(fc)) return []
-          const fcObj = fc as Record<string, unknown>
-          const name = typeof fcObj.name === 'string' ? fcObj.name : ''
-          const args = typeof fcObj.arguments === 'string' ? fcObj.arguments : fcObj.arguments != null ? JSON.stringify(fcObj.arguments) : ''
-          if (!name.trim()) return []
-          return [{ id: 'call_legacy', type: 'function', function: { name, arguments: args } }]
-        })()
-
-        const rawToolCalls = rawToolCallsFromToolCalls.length ? rawToolCallsFromToolCalls : legacyRawToolCalls
-
-        const ensureToolCallId = (raw: RawToolCall, idx: number): RawToolCall => {
-          const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id : `call_${idx}`
-          if (raw.id === id) return raw
-          return { ...raw, id }
-        }
-
-        const parseToolCall = (rawIn: RawToolCall, idx: number): ToolCall | null => {
-          const raw = ensureToolCallId(rawIn, idx)
-          const id = typeof raw.id === 'string' ? raw.id : `call_${idx}`
-
-          const fn = raw.function && typeof raw.function === 'object' && !Array.isArray(raw.function) ? (raw.function as Record<string, unknown>) : null
-          const fnCall =
-            (raw as Record<string, unknown>).functionCall &&
-            typeof (raw as Record<string, unknown>).functionCall === 'object' &&
-            !Array.isArray((raw as Record<string, unknown>).functionCall)
-              ? ((raw as Record<string, unknown>).functionCall as Record<string, unknown>)
-              : null
-
-          const name =
-            (typeof fn?.name === 'string' ? fn.name : '') ||
-            (typeof fnCall?.name === 'string' ? fnCall.name : '') ||
-            (typeof (raw as Record<string, unknown>).name === 'string' ? ((raw as Record<string, unknown>).name as string) : '')
-
-          const argVal = fn?.arguments ?? fnCall?.args ?? (raw as Record<string, unknown>).arguments
-          const argumentsStr =
-            typeof argVal === 'string'
-              ? argVal
-              : argVal != null
-                ? (() => {
-                    try {
-                      return JSON.stringify(argVal)
-                    } catch {
-                      return ''
-                    }
-                  })()
-                : ''
-
-          if (!name.trim()) return null
-          return { id, type: 'function', function: { name, arguments: argumentsStr } }
-        }
-
-        const toolCalls: ToolCall[] = rawToolCalls.map((c, idx) => parseToolCall(c, idx)).filter((c): c is ToolCall => Boolean(c))
-
-        const assistantMsgRaw: AssistantMessage = { ...msg, role: typeof msg.role === 'string' ? msg.role : 'assistant' }
-        if (rawToolCalls.length) assistantMsgRaw.tool_calls = rawToolCalls.map((c, idx) => ensureToolCallId(c, idx))
-
-        return { contentText, toolCalls, rawToolCalls: rawToolCalls.map((c, idx) => ensureToolCallId(c, idx)), assistantMsgRaw }
-      }
-
       for (let transientAttempt = 0; transientAttempt <= transientRetryLimit; transientAttempt += 1) {
         const ac = new AbortController()
         const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
@@ -1946,7 +1687,7 @@ export class TaskService {
           if (!res.ok) {
             const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
             const errMsg = errData?.error?.message || `HTTP ${res.status}`
-            throw withHttpStatus(errMsg, res.status)
+            throw createHttpStatusError(errMsg, res.status)
           }
 
           let msg: AssistantMessage = { role: 'assistant' }
@@ -1955,37 +1696,10 @@ export class TaskService {
           if (isSse && res.body) {
             const reader = res.body.getReader()
             const decoder = new TextDecoder('utf-8')
-            let buffer = ''
+            const sseBuffer = new SseDataBuffer()
+            const accumulator = new NativeAssistantStreamAccumulator()
             const throwIfCanceled = () => {
               if (rt.canceled) throw new Error('canceled')
-            }
-
-            let role: string | undefined
-            let contentText = ''
-            let legacyFnName = ''
-            let legacyFnArgs = ''
-            const toolCallsAcc: Array<{
-              id?: string
-              type?: string
-              function?: { name?: string; arguments?: string }
-            }> = []
-
-            const mergeStreamStr = (prev: string, next: string): string => {
-              const p = prev ?? ''
-              const n = next ?? ''
-              if (!n) return p
-              if (!p) return n
-              if (n.startsWith(p)) return n
-              if (p.startsWith(n)) return p
-              return p + n
-            }
-
-            const ensureToolAcc = (idx: number) => {
-              if (!toolCallsAcc[idx]) toolCallsAcc[idx] = { type: 'function', function: { name: '', arguments: '' } }
-              const it = toolCallsAcc[idx]!
-              if (!it.function) it.function = { name: '', arguments: '' }
-              if (typeof it.type !== 'string' || !it.type) it.type = 'function'
-              return it
             }
 
             let streamDone = false
@@ -1994,140 +1708,30 @@ export class TaskService {
               const { value, done } = await reader.read()
               throwIfCanceled()
               if (done) break
-              buffer += decoder.decode(value, { stream: true })
-
-              let hasMoreLines = true
-              while (hasMoreLines) {
+              const dataValues = sseBuffer.push(decoder.decode(value, { stream: true }))
+              for (const dataString of dataValues) {
                 throwIfCanceled()
-                const lineEnd = buffer.indexOf('\n')
-                if (lineEnd === -1) {
-                  hasMoreLines = false
-                  break
-                }
-                const line = buffer.slice(0, lineEnd).trim()
-                buffer = buffer.slice(lineEnd + 1)
-                if (!line.startsWith('data:')) continue
-                const dataStr = line.slice('data:'.length).trim()
-                if (!dataStr) continue
-                if (dataStr === '[DONE]') {
+                if (!dataString) continue
+                if (dataString === '[DONE]') {
                   streamDone = true
-                  hasMoreLines = false
                   break
                 }
 
                 let payload: unknown
                 try {
-                  payload = JSON.parse(dataStr)
+                  payload = JSON.parse(dataString)
                 } catch {
                   continue
                 }
-
-                const payloadObj = payload as {
-                  choices?: Array<{ delta?: Record<string, unknown>; message?: Record<string, unknown> }>
-                }
-                const choice = payloadObj.choices?.[0]
-                const deltaObj = choice?.delta ?? null
-                const msgObj = choice?.message ?? null
-
-                if (deltaObj && typeof deltaObj === 'object') {
-                  const deltaRole = (deltaObj as { role?: unknown }).role
-                  if (!role && typeof deltaRole === 'string' && deltaRole.trim()) role = deltaRole.trim()
-                }
-
-                const deltaContent = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { content?: unknown }).content : undefined
-                const msgContent = msgObj && typeof msgObj === 'object' ? (msgObj as { content?: unknown }).content : undefined
-
-                const piece = (() => {
-                  if (typeof deltaContent === 'string' && deltaContent) return deltaContent
-                  if (typeof msgContent !== 'string' || !msgContent) return ''
-                  return msgContent.startsWith(contentText) ? msgContent.slice(contentText.length) : msgContent
-                })()
-                if (piece) {
+                const update = accumulator.push(payload)
+                if (update.emitted) emittedAnyOutput = true
+                if (update.delta) {
                   throwIfCanceled()
-                  emittedAnyOutput = true
-                  contentText += piece
-                  opts?.onDelta?.(piece)
-                }
-
-                const toolCallsDelta = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { tool_calls?: unknown }).tool_calls : undefined
-                if (Array.isArray(toolCallsDelta) && toolCallsDelta.length > 0) {
-                  emittedAnyOutput = true
-                  for (let i = 0; i < toolCallsDelta.length; i += 1) {
-                    const raw = toolCallsDelta[i]
-                    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
-                    const rec = raw as Record<string, unknown>
-                    const idx = typeof rec.index === 'number' ? rec.index : i
-                    const acc = ensureToolAcc(Math.max(0, idx))
-
-                    const id = typeof rec.id === 'string' ? rec.id : ''
-                    if (id.trim()) acc.id = id.trim()
-
-                    const type = typeof rec.type === 'string' ? rec.type : ''
-                    if (type.trim()) acc.type = type.trim()
-
-                    const fnRaw = rec.function
-                    if (fnRaw && typeof fnRaw === 'object' && !Array.isArray(fnRaw)) {
-                      const fn = fnRaw as Record<string, unknown>
-                      const name = typeof fn.name === 'string' ? fn.name : ''
-                      if (name) acc.function!.name = mergeStreamStr(acc.function!.name ?? '', name)
-
-                      const argsVal = fn.arguments
-                      const argsStr =
-                        typeof argsVal === 'string'
-                          ? argsVal
-                          : argsVal != null
-                            ? (() => {
-                                try {
-                                  return JSON.stringify(argsVal)
-                                } catch {
-                                  return ''
-                                }
-                              })()
-                            : ''
-                      if (argsStr) acc.function!.arguments = mergeStreamStr(acc.function!.arguments ?? '', argsStr)
-                    }
-                  }
-                }
-
-                const legacyFn = deltaObj && typeof deltaObj === 'object' ? (deltaObj as { function_call?: unknown }).function_call : undefined
-                if (legacyFn && typeof legacyFn === 'object' && !Array.isArray(legacyFn)) {
-                  emittedAnyOutput = true
-                  const fc = legacyFn as Record<string, unknown>
-                  const name = typeof fc.name === 'string' ? fc.name : ''
-                  if (name) legacyFnName = mergeStreamStr(legacyFnName, name)
-
-                  const argsVal = fc.arguments
-                  const argsStr =
-                    typeof argsVal === 'string'
-                      ? argsVal
-                      : argsVal != null
-                        ? (() => {
-                            try {
-                              return JSON.stringify(argsVal)
-                            } catch {
-                              return ''
-                            }
-                          })()
-                        : ''
-                  if (argsStr) legacyFnArgs = mergeStreamStr(legacyFnArgs, argsStr)
+                  opts?.onDelta?.(update.delta)
                 }
               }
             }
-
-            const toolCallsRaw = toolCallsAcc
-              .map((c, idx) => {
-                if (!c) return null
-                const fn = c.function ?? {}
-                const name = typeof fn.name === 'string' ? fn.name : ''
-                const args = typeof fn.arguments === 'string' ? fn.arguments : ''
-                if (!name.trim()) return null
-                return { id: typeof c.id === 'string' && c.id.trim() ? c.id : `call_${idx}`, type: 'function', function: { name, arguments: args } }
-              })
-              .filter((x): x is { id: string; type: string; function: { name: string; arguments: string } } => Boolean(x))
-
-            msg = { role: role || 'assistant', content: contentText }
-            if (toolCallsRaw.length) msg.tool_calls = toolCallsRaw
-            else if (legacyFnName.trim()) msg.function_call = { name: legacyFnName, arguments: legacyFnArgs }
+            msg = accumulator.toMessage()
           } else {
             const data = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: AssistantMessage }> }
             msg = (data.choices?.[0]?.message ?? {}) as AssistantMessage
@@ -2148,8 +1752,8 @@ export class TaskService {
           if (visionRetryAttempt === 0 && (await recoverFromMainVisionError(err, status ?? undefined))) {
             return callLlmNative(1, opts)
           }
-          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, err, status)) {
-            const delayMs = transientRetryDelayMs(transientAttempt)
+          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, transientRetryLimit, err, status)) {
+            const delayMs = transientRetryDelayMs(transientAttempt, transientRetryBaseDelayMs, transientRetryJitterMs)
             pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
             if (rt.canceled) throw new Error('canceled')
             await sleep(delayMs)
@@ -2168,7 +1772,7 @@ export class TaskService {
     const callLlmText = async (
       visionRetryAttempt = 0,
       opts?: { onDelta?: (delta: string) => void; stopOnToolRequest?: boolean },
-    ): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> => {
+    ): Promise<{ contentText: string; assistantMsgRaw: AssistantMessage; usage?: LlmUsage }> => {
       for (let transientAttempt = 0; transientAttempt <= transientRetryLimit; transientAttempt += 1) {
         const ac = new AbortController()
         const timer = setTimeout(() => ac.abort(new Error('llm timeout')), timeoutMs)
@@ -2178,7 +1782,14 @@ export class TaskService {
         try {
           const requestBody =
             apiMode === 'claude'
-              ? buildClaudeTextPayload(true)
+              ? buildClaudeTextPayload({
+                  messages,
+                  model,
+                  maxTokens,
+                  temperature,
+                  thinking: reasoningOptions.extra.thinking,
+                  stream: true,
+                })
               : {
                   model,
                   temperature,
@@ -2199,7 +1810,7 @@ export class TaskService {
           if (!res.ok) {
             const errData = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
             const errMsg = errData?.error?.message || `HTTP ${res.status}`
-            throw withHttpStatus(errMsg, res.status)
+            throw createHttpStatusError(errMsg, res.status)
           }
 
           if (!res.body) {
@@ -2208,9 +1819,9 @@ export class TaskService {
 
           const reader = res.body.getReader()
           const decoder = new TextDecoder('utf-8')
-          let buffer = ''
+          const sseBuffer = new SseDataBuffer()
           let contentText = ''
-          let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined
+          let usage: LlmUsage | undefined
           const throwIfCanceled = () => {
             if (rt.canceled) throw new Error('canceled')
           }
@@ -2223,67 +1834,22 @@ export class TaskService {
             throwIfCanceled()
             streamDone = done
             if (done) break
-            buffer += decoder.decode(value, { stream: true })
-
-            // Parse SSE lines
-            let hasMoreLines = true
-            while (hasMoreLines && !stoppedEarly) {
+            const dataValues = sseBuffer.push(decoder.decode(value, { stream: true }))
+            for (const dataString of dataValues) {
+              if (stoppedEarly) break
               throwIfCanceled()
-              const lineEnd = buffer.indexOf('\n')
-              if (lineEnd === -1) {
-                hasMoreLines = false
-                break
-              }
-              const line = buffer.slice(0, lineEnd).trim()
-              buffer = buffer.slice(lineEnd + 1)
-
-              if (!line.startsWith('data:')) continue
-              const dataStr = line.slice('data:'.length).trim()
-              if (!dataStr || dataStr === '[DONE]') continue
+              if (!dataString || dataString === '[DONE]') continue
 
               try {
-                const payload = JSON.parse(dataStr) as {
-                  type?: string
-                  error?: { message?: string }
-                  message?: unknown
-                  delta?: { text?: unknown }
-                  choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }>
-                  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-                }
+                const event = parseTextStreamPayload(JSON.parse(dataString), apiMode, usage)
+                usage = event.usage
+                if (event.done) streamDone = true
 
-                let delta = ''
-                if (apiMode === 'claude') {
-                  if (payload.type === 'error') {
-                    const err = new Error(payload.error?.message || 'Claude stream error') as Error & { streamFatal?: boolean }
-                    err.streamFatal = true
-                    throw err
-                  }
-                  usage = mergeLlmUsage(usage, readClaudeUsage(payload.message ?? payload))
-                  delta = typeof payload.delta?.text === 'string' ? payload.delta.text : ''
-                  if (payload.type === 'message_stop') {
-                    streamDone = true
-                    hasMoreLines = false
-                  }
-                } else {
-                  // Extract usage from stream (some APIs include it in the last chunk)
-                  if (payload.usage) {
-                    usage = {
-                      promptTokens: payload.usage.prompt_tokens ?? 0,
-                      completionTokens: payload.usage.completion_tokens ?? 0,
-                      totalTokens: payload.usage.total_tokens ?? 0,
-                    }
-                  }
-
-                  // Extract content delta
-                  const choice = payload.choices?.[0]
-                  delta = choice?.delta?.content ?? choice?.message?.content ?? ''
-                }
-
-                if (delta) {
+                if (event.delta) {
                   throwIfCanceled()
                   emittedAnyOutput = true
                   const prevLen = contentText.length
-                  contentText += delta
+                  contentText += event.delta
 
                   if (opts?.stopOnToolRequest) {
                     const lastEnd = findLastCompleteToolRequestEnd(contentText)
@@ -2296,8 +1862,9 @@ export class TaskService {
                     }
                   }
 
-                  opts?.onDelta?.(delta)
+                  opts?.onDelta?.(event.delta)
                 }
+                if (event.done) break
               } catch (err) {
                 if ((err as { streamFatal?: unknown })?.streamFatal === true) throw err
                 // Ignore parse errors for individual chunks
@@ -2325,8 +1892,8 @@ export class TaskService {
           if (visionRetryAttempt === 0 && (await recoverFromMainVisionError(err, status ?? undefined))) {
             return callLlmText(1, opts)
           }
-          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, err, status)) {
-            const delayMs = transientRetryDelayMs(transientAttempt)
+          if (!emittedAnyOutput && shouldRetryTransientError(transientAttempt, transientRetryLimit, err, status)) {
+            const delayMs = transientRetryDelayMs(transientAttempt, transientRetryBaseDelayMs, transientRetryJitterMs)
             pushLog(`[Agent] LLM 请求失败，${delayMs}ms 后重试 (${transientAttempt + 2}/${transientRetryLimit + 1})：${clampText(msg, 120)}`, true)
             if (rt.canceled) throw new Error('canceled')
             await sleep(delayMs)

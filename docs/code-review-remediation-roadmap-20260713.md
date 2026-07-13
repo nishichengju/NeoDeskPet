@@ -729,6 +729,15 @@ AI 与能力
 - 打包 IPC smoke 新增真实 `agent.run` 文本协议往返：假 OpenAI-compatible 服务先返回 `TOOL_REQUEST`，打包应用解析并执行 `delay.sleep`、记录成功 toolRun，再把 `TOOL_RESULT` 送入第二轮并持久化最终答复，最后 dismiss 清理；两轮请求均验证主进程密钥注入。
 - `npm test` 共 42 个测试文件、174 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 Agent/Task/Chat/Memory/AI/TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task Agent 的 LLM provider payload、SSE 与重试传输边界。
 
+### P2-1 进展记录（2026-07-13，第二十二批）
+
+- 新增 `electron/task/taskAgentLlmProtocol.ts`，集中管理 OpenAI-compatible/Claude 端点与鉴权、Claude Messages payload 转换、usage 读取/合并、SSE 分片缓冲、native content/tool_calls/function_call 累加与归一化，以及 HTTP/网络瞬时错误重试判断和退避时间。
+- `TaskService` 继续负责请求取消、任务进度和视觉 fallback，但 native/text 两条 HTTP 循环统一复用 provider 协议模块；模型参数、最大回合、视觉重试、工具执行和最终消息契约保持不变。
+- 修复 Claude 分段 usage 合并：后续事件只带 output tokens 时，`totalTokens` 现在至少等于已合并的 prompt+completion，不再出现 `prompt=3`、`completion=4`、`total=4` 的不一致记录。
+- `taskService.ts` 从第二十一批后的 3108 行降至 2675 行；新增 9 个 provider 协议测试，覆盖端点/鉴权、Claude 文本/图片/相邻角色 payload、重试分类与确定性退避、usage、native/legacy 调用归一化、分片 tool_calls、SSE 缓冲和 OpenAI/Claude 流事件。
+- 打包 IPC smoke 扩展三条真实 Agent provider 路径：OpenAI-compatible 首次 503 后重试并跨网络 chunk 完成文本工具协议；native 模式合并拆开的 function name/JSON 参数、执行 `delay.sleep` 并通过 `role=tool` 完成第二轮；Claude 使用 `/v1/messages`、`x-api-key` 和规范 payload，跨 chunk 合并 usage 为 3/4/7。
+- `npm test` 共 43 个测试文件、183 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 OpenAI text/native 与 Claude Agent smoke、其余 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Agent HTTP 请求生命周期、取消/重试编排和视觉 fallback 边界。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

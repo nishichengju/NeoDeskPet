@@ -443,3 +443,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改工具定义/schema、启用策略、Task IPC、任务存储、模型参数、最大回合、视觉回执或界面样式。打包 smoke 已覆盖 OpenAI-compatible 文本工具协议和真实内置工具执行，但未连接真实 provider 验证 native `tool_calls`/legacy `function_call`、Claude Messages 流事件或供应商特有分块；native 名称与前缀解析目前由新增单元测试覆盖，这些传输差异将在下一批 LLM provider/SSE 拆分时扩大回归。
+
+## P2-1：大型模块拆分与领域边界（第二十二批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task Agent provider payload、SSE 分片、native 调用累加、usage 与重试策略
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 43 个测试文件、183 个用例通过 |
+| Agent provider 协议测试 | OpenAI/Claude 端点与鉴权、Claude system/角色/文本/图片/thinking payload、重试状态/取消/网络错误/退避、usage、native/legacy 调用、分片名称/参数、SSE 缓冲和双 provider 流事件通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | OpenAI text 首次 503 后重试并跨 chunk 完成 TOOL_REQUEST/RESULT；native 分片 tool_calls 合并后执行 `delay.sleep` 并通过 role=tool 往返；Claude `/v1/messages`、x-api-key、payload、分片 SSE 和 3/4/7 usage 均通过 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 Task IPC、任务 store/schema、工具定义、模型配置字段、最大回合、视觉路由策略或界面样式。打包 smoke 使用本地可控 provider 验证了 OpenAI text/native、Claude Messages、503 重试和跨 chunk 分帧，但未连接真实云端 provider 覆盖其私有事件、代理中断、长流断线或限流头，也未在真实视觉请求失败时触发外挂 fallback；这些请求生命周期和视觉编排仍留在 `TaskService`，由下一批继续拆分并扩大故障回归。
