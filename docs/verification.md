@@ -798,3 +798,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、数据库 schema、召回设置字段、各层权重、排序公式、debug 字段、向量 worker 协议或界面样式。Node SQLite 聚焦测试直接覆盖 FTS、Tag、KG 表和强化 UPDATE，注入 embedding/vector 客户端覆盖按需调用与故障降级；打包 smoke 则复用生产 `better-sqlite3`、真实 worker、加密 embeddings/KG 密钥和 renderer IPC 证明旧库、四类候选与最终回执继续闭环。时间范围解析尚未在打包 smoke 中按系统时区逐项覆盖，真实十万级 FTS/Tag/KG/Vector 混合候选的延迟和 worker 扫描成本也未做基线；聊天/手工写入、向量去重、版本和冲突流程仍留在 `MemoryService`，由下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第三十九批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory 聊天/手工写入、embedding 即时水合、向量去重合并、记录读取与版本写入
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 66 个测试文件、296 个用例通过 |
+| Memory 写入协调器测试 | 6 个用例通过：采集门禁/聊天 upsert、向量重复合并与重定向、手工重复刷新、键值替换/版本/索引、provider 故障降级、offset typed-array 精确 32 字节 BLOB |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功 |
+| `npm run ipc:smoke` | 真实聊天持久化与重启、手工记忆 CRUD、versionCount=1、旧库 FTS、Tag/Vector/KG 后台索引与召回、Agent/MCP/媒体/任务路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；0 failure、0 console error、无横向或纵向溢出，Memory、Settings 与 Chat 截图无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`、`artifacts/ui-baseline/chat-default-720x620-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、SQLite schema、设置字段、去重阈值含义、索引队列语义或界面样式。Node SQLite 聚焦测试直接验证聊天与手工写入的数据库结果、版本行、软删除、队列和精确 BLOB；打包 smoke 使用生产 `better-sqlite3` 证明聊天摄取、手工写入、版本/索引/召回和重启路径继续闭环。尚未连接真实云端 embedding provider 验证语义相似度分布、限流与网络抖动，也未对 400 条候选扫描和高并发聊天写入建立性能基线；版本查询/回滚、冲突列表及 accept/merge/keepBoth 仍由 `MemoryService` 编排，下一批继续拆分并增加事务覆盖。
