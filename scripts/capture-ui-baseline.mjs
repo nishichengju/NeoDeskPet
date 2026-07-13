@@ -42,7 +42,7 @@ async function waitForPreview() {
 }
 
 function installChatMock(page, options = {}) {
-  return page.addInitScript(({ seedImage, seedTool }) => {
+  return page.addInitScript(({ seedImage, seedTool, messageCount }) => {
     const now = Date.now()
     const settings = {
       activePersonaId: 'default',
@@ -106,7 +106,14 @@ function installChatMock(page, options = {}) {
           }],
         }]
       : []
-    const initialMessages = seedImage
+    const initialMessages = messageCount > 0
+      ? Array.from({ length: messageCount }, (_, index) => ({
+          id: `baseline-chat-message-${index}`,
+          role: index % 2 === 0 ? 'user' : 'assistant',
+          content: `Baseline chat message ${index + 1}`,
+          createdAt: now - messageCount + index,
+        }))
+      : seedImage
       ? [{
           id: 'baseline-image-message',
           role: 'assistant',
@@ -256,11 +263,15 @@ function installChatMock(page, options = {}) {
       },
     )
     Object.defineProperty(window, 'neoDeskPet', { configurable: true, value: api })
-  }, { seedImage: options.seedImage === true, seedTool: options.seedTool === true })
+  }, {
+    seedImage: options.seedImage === true,
+    seedTool: options.seedTool === true,
+    messageCount: Math.max(0, Math.trunc(options.messageCount ?? 0)),
+  })
 }
 
 function installOrbMock(page, options) {
-  return page.addInitScript(({ initialState, seedContent, seedHistory }) => {
+  return page.addInitScript(({ initialState, seedContent, seedHistory, messageCount }) => {
     const now = Date.now()
     const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nT8AAAAASUVORK5CYII='
     const secondImageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1/8AAAAASUVORK5CYII='
@@ -288,7 +299,14 @@ function installOrbMock(page, options) {
         },
       ],
     }
-    const messages = seedContent
+    const messages = messageCount > 0
+      ? Array.from({ length: messageCount }, (_, index) => ({
+          id: `baseline-orb-message-${index}`,
+          role: index % 2 === 0 ? 'user' : 'assistant',
+          content: `Baseline orb message ${index + 1}`,
+          createdAt: now - messageCount + index,
+        }))
+      : seedContent
       ? [
           { id: 'orb-user', role: 'user', content: 'Run the baseline tool.', createdAt: now - 2000 },
           {
@@ -378,6 +396,7 @@ function installOrbMock(page, options) {
     initialState: options.state,
     seedContent: options.seedContent === true,
     seedHistory: options.seedHistory === true,
+    messageCount: Math.max(0, Math.trunc(options.messageCount ?? 0)),
   })
 }
 
@@ -548,6 +567,8 @@ const baselines = [
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
   { name: 'chat-tool-card-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyToolCard: true },
+  { name: 'chat-long-history-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, seedChatMessageCount: 180, verifyProgressiveHistory: true },
+  { name: 'orb-long-history-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbMessageCount: 180, verifyProgressiveHistory: true },
   { name: 'settings-min-640x500-scale100', route: 'settings', width: 640, height: 500, scale: 1, mockSettings: true, verifySettingsNavigation: true },
   { name: 'memory-min-640x500-scale100', route: 'memory', width: 640, height: 500, scale: 1, mockMemory: true },
   { name: 'chat-default-720x620-scale125', route: 'chat', width: 720, height: 620, scale: 1.25, mockChat: true, compactChat: true },
@@ -584,11 +605,13 @@ try {
     if (baseline.mockChat) await installChatMock(page, {
       seedImage: baseline.verifyImageViewer,
       seedTool: baseline.verifyToolCard,
+      messageCount: baseline.seedChatMessageCount,
     })
     if (baseline.mockOrbState) await installOrbMock(page, {
       state: baseline.mockOrbState,
       seedContent: baseline.seedOrbContent,
       seedHistory: baseline.seedOrbHistory,
+      messageCount: baseline.seedOrbMessageCount,
     })
     if (baseline.mockMemory) await installMemoryMock(page)
     if (baseline.mockSettings) await installSettingsMock(page)
@@ -658,7 +681,11 @@ try {
     }
     const markdownAssets = loadedAssetNames.filter((name) => name.startsWith('MarkdownMessage-'))
     const shouldLoadMarkdown = Boolean(
-      baseline.seedOrbContent || baseline.verifyImageViewer || baseline.verifyToolCard,
+      baseline.seedOrbContent
+        || baseline.verifyImageViewer
+        || baseline.verifyToolCard
+        || baseline.seedChatMessageCount
+        || baseline.seedOrbMessageCount,
     )
     if (shouldLoadMarkdown && markdownAssets.length === 0) {
       failures.push('seeded messages did not load the Markdown renderer chunk')
@@ -896,6 +923,50 @@ try {
         editState: { originalValue: editOriginalValue, savedText: editSavedText, screenshot: editScreenshot },
         clearCount,
         clearDialogScreenshot,
+      }
+    }
+
+    let progressiveHistory = null
+    if (baseline.verifyProgressiveHistory) {
+      const messageSelector = baseline.route === 'chat' ? '.ndp-msg-row' : '.ndp-orbpanel-msg'
+      const anchorId = baseline.route === 'chat' ? 'baseline-chat-message-120' : 'baseline-orb-message-120'
+      const historyButton = page.locator('.ndp-message-history-more')
+      await historyButton.waitFor({ state: 'visible' })
+      const initialCount = await page.locator(messageSelector).count()
+      const initialLabel = (await historyButton.textContent())?.trim() ?? ''
+      await historyButton.scrollIntoViewIfNeeded()
+      await page.waitForTimeout(100)
+      const anchor = page.locator(`[data-message-id="${anchorId}"]`)
+      const anchorTopBefore = await anchor.evaluate((element) => element.getBoundingClientRect().top)
+      const beforeScreenshotPath = path.join(outputDir, `${baseline.name}-window.png`)
+      await page.screenshot({ path: beforeScreenshotPath })
+
+      await historyButton.click()
+      await page.waitForFunction(
+        ({ selector, expectedCount }) => document.querySelectorAll(selector).length === expectedCount,
+        { selector: messageSelector, expectedCount: 120 },
+      )
+      await page.waitForTimeout(100)
+      const expandedCount = await page.locator(messageSelector).count()
+      const expandedLabel = (await historyButton.textContent())?.trim() ?? ''
+      const anchorTopAfter = await anchor.evaluate((element) => element.getBoundingClientRect().top)
+      const expandedScreenshotPath = path.join(outputDir, `${baseline.name}-expanded.png`)
+      await page.screenshot({ path: expandedScreenshotPath })
+      progressiveHistory = {
+        initialCount,
+        initialLabel,
+        expandedCount,
+        expandedLabel,
+        anchorDelta: anchorTopAfter - anchorTopBefore,
+        beforeScreenshot: path.relative(projectRoot, beforeScreenshotPath),
+        expandedScreenshot: path.relative(projectRoot, expandedScreenshotPath),
+      }
+      if (initialCount !== 60) failures.push(`progressive history initially rendered ${initialCount} messages`)
+      if (!initialLabel.includes('120')) failures.push(`progressive history initial label is ${initialLabel || 'missing'}`)
+      if (expandedCount !== 120) failures.push(`progressive history expanded to ${expandedCount} messages`)
+      if (!expandedLabel.includes('60')) failures.push(`progressive history expanded label is ${expandedLabel || 'missing'}`)
+      if (Math.abs(progressiveHistory.anchorDelta) > 12) {
+        failures.push(`progressive history shifted the anchor by ${progressiveHistory.anchorDelta}px`)
       }
     }
 
@@ -1319,6 +1390,7 @@ try {
       metrics,
       expandedChat,
       chatUi,
+      progressiveHistory,
       imageViewer,
       orbImageViewer,
       orbMessageMenu,

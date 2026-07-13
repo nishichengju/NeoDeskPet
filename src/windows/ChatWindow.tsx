@@ -3,6 +3,7 @@
 import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolRegistry'
 import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
+import { useProgressiveMessageWindow } from '../hooks/useProgressiveMessageWindow'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
 import { ChatComposer, type PendingChatAttachment } from './chat/ChatComposer'
 import { ChatMessageBody } from './chat/ChatMessageBody'
@@ -103,6 +104,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [pendingAttachments, setPendingAttachments] = useState<PendingChatAttachment[]>([])
   // 存储最近一次 API 返回的真实 token usage（用于精确上下文统计）
   const [lastApiUsage, setLastApiUsage] = useState<ChatUsage | null>(null)
+  const messagesListRef = useRef<HTMLElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
@@ -740,7 +742,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
   // Auto scroll to bottom
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    messagesEndRef.current?.scrollIntoView({ block: 'end' })
   }, [messages, ttsRevealedSegments])
 
   const reloadCurrentSessionMessages = useCallback(async () => {
@@ -820,6 +822,22 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const userAvatar = chatProfile?.userAvatar
   const assistantAvatar = chatProfile?.assistantAvatar
   const ttsSegmentedUi = (settings?.tts?.enabled ?? false) && (settings?.tts?.segmented ?? false)
+  const {
+    visibleItems: visibleMessages,
+    hiddenCount: hiddenMessageCount,
+    loadEarlier: loadEarlierMessageWindow,
+  } = useProgressiveMessageWindow(messages, currentSessionId ?? '')
+  const loadEarlierMessages = useCallback(() => {
+    const list = messagesListRef.current
+    const previousScrollHeight = list?.scrollHeight ?? 0
+    loadEarlierMessageWindow()
+    if (!list) return
+    window.requestAnimationFrame(() => {
+      const current = messagesListRef.current
+      if (!current) return
+      current.scrollTop += Math.max(0, current.scrollHeight - previousScrollHeight)
+    })
+  }, [loadEarlierMessageWindow])
 
   useEffect(() => {
     plannerPendingRef.current = false
@@ -3593,7 +3611,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         onEditingSessionNameChange={setEditingSessionName}
       />
 
-      <main className="ndp-chat-messages">
+      <main className="ndp-chat-messages" ref={messagesListRef}>
         {messages.length === 0 ? (
           <div className="ndp-chat-empty">
             <div className="ndp-chat-empty-kicker">{currentPersona?.name ?? '默认角色'}</div>
@@ -3616,7 +3634,12 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             </div>
           </div>
         ) : null}
-        {messages.map((m) => (
+        {hiddenMessageCount > 0 ? (
+          <button type="button" className="ndp-message-history-more" onClick={loadEarlierMessages}>
+            加载更早消息（还有 {hiddenMessageCount} 条）
+          </button>
+        ) : null}
+        {visibleMessages.map((m) => (
           <ChatMessageItem
             key={m.id}
             m={m}

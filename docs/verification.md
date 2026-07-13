@@ -1128,3 +1128,26 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png` 与 `artifacts/ui-baseline/orb-panel-content-560x720-scale100.png`。本批未修改自动刷新周期、Memory 查询参数与 loading 防重入、手动刷新、工具卡文案/状态/展开行为或完成时长计算；只改变周期任务在页面不可见时的生命周期。纯调度测试以可控时钟和可见性源证明隐藏期间没有 callback，恢复时立即调用并重新计时；浏览器和 packaged smoke 证明接入后没有渲染或运行错误。当前自动化尚未驱动真实 Windows 最小化/恢复并采集 IPC 调用计数，也未覆盖操作系统休眠后恢复的计时偏差；超长 Chat/Orb 会话列表仍未窗口化。
+
+## P2-2：前端加载与运行性能（第五十四批）
+
+- 验证日期：2026-07-14
+- 优化范围：Chat/Orb 超长会话渐进式尾部窗口、旧消息加载滚动锚定与长历史 UI 门禁
+
+| 检查 | 结果 |
+| --- | --- |
+| 消息窗口聚焦测试 | 3 个测试文件、11 个用例通过；覆盖最新 60 条、扩展到 120 条、短会话全量、Orb 加载委托与既有 Chat/Orb 消息渲染 |
+| Renderer bundle | renderer 主 chunk 146.30 kB、Chat 126.44 kB、Orb 50.25 kB；共享渐进窗口逻辑进入 Chat/Orb 公共小 chunk |
+| `npm test` | 81 个测试文件、348 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，Chat/Orb 渐进窗口、动态 chunk、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Pet/Chat/Settings/Memory/Orb preload 与运行正常，五类窗口 `runtimeErrors` 全为空；聊天/任务/Memory/Agent/MCP/TTS/ASR、权限、持久化与重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 24 个场景通过；新增 Chat/Orb 各 180 条消息场景，初始 60 条、加载后 120 条、剩余计数 120→60，锚点偏移均为 0.625px；0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-long-history-720x620-scale100-window.png`、`artifacts/ui-baseline/chat-long-history-720x620-scale100-expanded.png`、`artifacts/ui-baseline/orb-long-history-560x720-scale100-window.png` 与 `artifacts/ui-baseline/orb-long-history-560x720-scale100-expanded.png`。本批未截断会话存储、AI 上下文或任务/附件数据，也未修改编辑、删除、重发、右键菜单和会话计数语义；只限制初始消息 DOM，并允许用户显式向前扩展。Chat 去掉平滑自动滚动后，消息更新仍立即定位到底部，但不再维持可能与用户滚动冲突的长动画。当前方案不是可变高度虚拟列表：用户反复点击后仍可把全部历史挂载到 DOM，超大单条 Markdown/媒体消息的自身解析成本也没有降低；尚未覆盖数千条消息、操作系统级滚轮连发或加载旧消息同时收到新流式 delta 的真实交互。

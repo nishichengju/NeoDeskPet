@@ -55,6 +55,7 @@ export function ChatMessageBody({
       <>
         <div
           className="ndp-msg-row ndp-msg-row-pet"
+          data-message-id={message.id}
           onContextMenu={(event) => onContextMenu(event, message.id)}
           title={new Date(message.createdAt).toLocaleString()}
         >
@@ -86,6 +87,7 @@ export function ChatMessageBody({
     <>
       <div
         className={`ndp-msg-row ${isUser ? 'ndp-msg-row-user' : 'ndp-msg-row-pet'}`}
+        data-message-id={message.id}
         onContextMenu={(event) => onContextMenu(event, message.id)}
         title={new Date(message.createdAt).toLocaleString()}
       >

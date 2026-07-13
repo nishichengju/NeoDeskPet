@@ -8,6 +8,7 @@ export type OrbPanelViewProps = {
   loading: boolean
   error: string | null
   messages: ChatMessageRecord[]
+  hiddenMessageCount: number
   listRef: RefObject<HTMLDivElement>
   endRef: RefObject<HTMLDivElement>
   editingMessageId: string | null
@@ -15,6 +16,7 @@ export type OrbPanelViewProps = {
   renderAssistantMessage: (message: ChatMessageRecord) => ReactNode
   renderAttachments: (message: ChatMessageRecord) => ReactNode
   onOpenFullChat: () => void
+  onLoadEarlierMessages: () => void
   onMessageContextMenu: (event: ReactMouseEvent<HTMLDivElement>, messageId: string) => void
   onEditingMessageContentChange: (value: string) => void
   onSaveEdit: (resend: boolean) => void
@@ -49,6 +51,12 @@ export function OrbPanelView(props: OrbPanelViewProps) {
           <div className="ndp-orbpanel-empty">还没有消息</div>
         ) : null}
 
+        {props.hiddenMessageCount > 0 ? (
+          <button type="button" className="ndp-message-history-more" onClick={props.onLoadEarlierMessages}>
+            加载更早消息（还有 {props.hiddenMessageCount} 条）
+          </button>
+        ) : null}
+
         {props.messages.map((message) => {
           const isUser = message.role === 'user'
           const isEditing = props.editingMessageId === message.id
@@ -56,6 +64,7 @@ export function OrbPanelView(props: OrbPanelViewProps) {
             <div
               key={message.id}
               className={isUser ? 'ndp-orbpanel-msg ndp-orbpanel-msg-user' : 'ndp-orbpanel-msg ndp-orbpanel-msg-assistant'}
+              data-message-id={message.id}
               onContextMenu={(event) => props.onMessageContextMenu(event, message.id)}
             >
               {isEditing ? (

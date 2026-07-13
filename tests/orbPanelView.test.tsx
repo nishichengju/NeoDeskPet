@@ -24,6 +24,7 @@ function props(overrides: Partial<OrbPanelViewProps> = {}): OrbPanelViewProps {
     loading: false,
     error: null,
     messages: [],
+    hiddenMessageCount: 0,
     listRef: createRef<HTMLDivElement>(),
     endRef: createRef<HTMLDivElement>(),
     editingMessageId: null,
@@ -31,6 +32,7 @@ function props(overrides: Partial<OrbPanelViewProps> = {}): OrbPanelViewProps {
     renderAssistantMessage: (item) => createElement('span', { className: 'assistant-body' }, item.content),
     renderAttachments: () => null,
     onOpenFullChat: vi.fn(),
+    onLoadEarlierMessages: vi.fn(),
     onMessageContextMenu: vi.fn(),
     onEditingMessageContentChange: vi.fn(),
     onSaveEdit: vi.fn(),
@@ -80,6 +82,18 @@ describe('Orb panel view', () => {
     expect(html).toContain('assistant-body')
     expect(html).toContain('attachment-user-1')
     expect(html).toContain('attachment-assistant-1')
+  })
+
+  it('shows the hidden message count and delegates loading earlier messages', () => {
+    const onLoadEarlierMessages = vi.fn()
+    const tree = OrbPanelView(props({ hiddenMessageCount: 120, onLoadEarlierMessages }))
+    const button = findElement(
+      tree,
+      (element) => element.type === 'button' && String(element.props.children).includes('120'),
+    )
+
+    button.props.onClick()
+    expect(onLoadEarlierMessages).toHaveBeenCalledOnce()
   })
 
   it('shows resend only for user edits and delegates edit actions', () => {

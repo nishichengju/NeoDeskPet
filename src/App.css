@@ -688,6 +688,23 @@
   overflow: auto;
 }
 
+.ndp-message-history-more {
+  align-self: center;
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+}
+
+.ndp-message-history-more:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+}
+
 .ndp-muted {
   color: rgba(255, 255, 255, 0.6);
 }

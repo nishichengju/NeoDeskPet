@@ -1027,6 +1027,14 @@ AI 与能力
 - 新增 2 个可见性调度测试，覆盖可见计时、隐藏暂停、恢复立即刷新、初始隐藏不启动、卸载清理与订阅移除；共享 hook 构建为 0.77 kB chunk，Memory Console 为 30.94 kB，Orb 为 49.74 kB，renderer 主 chunk 为 146.30 kB。
 - `npm test` 共 80 个测试文件、344 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过；基线为 0 failure、0 console error、无横向或纵向溢出。下一批继续评估超长 Chat/Orb 消息列表的渲染成本与可验证的窗口化方案。
 
+第五十四批进展（2026-07-14）：
+
+- 新增 `src/hooks/useProgressiveMessageWindow.ts`，Chat 与 Orb 默认只渲染当前会话最近 60 条消息，并通过顶部“加载更早消息”按钮每次向前扩展 60 条；完整消息数组仍由窗口状态持有并继续用于 AI 上下文、任务关联、编辑、删除、重发、附件和持久化，优化只作用于视图 DOM。
+- 长历史加载使用消息容器加载前后的 `scrollHeight` 差值补偿 `scrollTop`，新增稳定的 `data-message-id` 作为运行时锚点；切换会话时窗口计数按 session key 回到 60 条。Chat 自动滚动同时移除 `smooth` 动画，避免大列表载入或流式更新时持续动画与用户查看旧消息竞争。
+- `App.css` 增加统一的历史加载按钮样式，Orb Panel 复用同一视觉入口；曾评估 `content-visibility` 离屏跳绘，但在 Chat flex 消息行截图中发现短暂漏绘，因此最终仅保留确定性的渐进 DOM 限流，没有引入该 CSS 优化。
+- 新增 3 个窗口计算测试和 1 个 Orb 视图交互测试，覆盖最新 60 条、扩展到 120 条、短会话全量渲染、隐藏计数和加载委托。UI baseline 新增 Chat/Orb 各 180 条消息的长历史场景，总场景从 22 增至 24；两端均验证 `60 → 120` 条 DOM、剩余计数 `120 → 60`，加载前后锚点偏移均为 0.625px。
+- renderer 主 chunk 为 146.30 kB，Chat 为 126.44 kB，Orb 为 50.25 kB；`npm test` 共 81 个测试文件、348 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 24 个 UI baseline 场景均通过，基线为 0 failure、0 console error、无横向或纵向溢出。下一批继续收敛 Chat/Orb 重复的附件 URL 缓存和图片预览解析。
+
 ## 15. P2-3：无障碍与交互一致性
 
 ### 实施步骤

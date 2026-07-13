@@ -11,6 +11,7 @@ import type {
   TaskRecord,
 } from '../../electron/types'
 import { getApi } from '../neoDeskPetApi'
+import { useProgressiveMessageWindow } from '../hooks/useProgressiveMessageWindow'
 import { ABORTED_ERROR, getAIService, type ChatMessage } from '../services/aiService'
 import {
   computeAppendDelta,
@@ -1760,6 +1761,23 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     [api, openAttachment, openImageViewer],
   )
 
+  const {
+    visibleItems: visiblePanelMessages,
+    hiddenCount: hiddenPanelMessageCount,
+    loadEarlier: loadEarlierPanelMessageWindow,
+  } = useProgressiveMessageWindow(panelMessages, currentSessionId ?? '')
+  const loadEarlierPanelMessages = useCallback(() => {
+    const list = panelListRef.current
+    const previousScrollHeight = list?.scrollHeight ?? 0
+    loadEarlierPanelMessageWindow()
+    if (!list) return
+    window.requestAnimationFrame(() => {
+      const current = panelListRef.current
+      if (!current) return
+      current.scrollTop += Math.max(0, current.scrollHeight - previousScrollHeight)
+    })
+  }, [loadEarlierPanelMessageWindow])
+
   const messageMenuTarget = useMemo(() => {
     const id = String(messageMenu?.messageId ?? '').trim()
     if (!id) return null
@@ -1873,7 +1891,8 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
               summary={currentSummary}
               loading={panelLoading}
               error={panelError}
-              messages={panelMessages}
+              messages={visiblePanelMessages}
+              hiddenMessageCount={hiddenPanelMessageCount}
               listRef={panelListRef}
               endRef={panelEndRef}
               editingMessageId={editingMessageId}
@@ -1886,6 +1905,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
                   .finally(() => openBar())
                   .catch(() => undefined)
               }}
+              onLoadEarlierMessages={loadEarlierPanelMessages}
               onMessageContextMenu={openMessageMenu}
               onEditingMessageContentChange={setEditingMessageContent}
               onSaveEdit={(resend) => void handleSaveEdit(resend ? { resend: true } : undefined)}
