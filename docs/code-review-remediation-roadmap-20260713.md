@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十五批：Chat ASR hook 已拆分）
+- 状态：P2-1 进行中（第十六批：Chat TTS hook 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -675,6 +675,16 @@ AI 与能力
 - `ChatWindow.tsx` 从第十四批后的 4881 行降至 4691 行；相较 Chat 拆分开始时累计减少 945 行。
 - 新增 5 个 ASR 控制器测试，覆盖 compose preview 去重/强制清空、手动追加、无会话排队、FIFO 冲刷、发送串行化、pending transcript drain 合并和禁用态忽略输入。
 - `npm test` 共 36 个测试文件、136 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 的 AI/TTS hooks。
+
+### P2-1 进展记录（2026-07-13，第十六批）
+
+- 将 Chat renderer 的分段 TTS pending 占位、消息分段标记、逐段揭示计数、utterance 元数据、结束/失败事件订阅和停止重置迁移到 `src/windows/chat/useChatTts.ts`；AI 请求、文本分句和 TTS enqueue/finalize IPC 调用仍由原业务路径负责。
+- 新 controller 为普通发送与重新生成提供 `begin/register/update/clear/clearAll` 生命周期接口，替代散落的多组 state/ref 手工更新；事件订阅只随 API 变化，不再因当前会话、自动提炼回调或调试状态变化反复注销和重建。
+- TTS segment index 继续按原范围归一化并保持揭示计数单调递增；正常结束会按 utterance 原始 session 触发自动提炼，失败会清理状态并显示原错误，统一停止仍清空所有活跃 utterance 但保留已完成消息的分段展示标记。
+- 修复 metadata 注册前 TTS 已失败/结束时 pending 占位无法清理的边角；中断重新生成时同时移除未完成消息的分段控制和元数据，避免后续迟到事件重新揭示已中断内容。
+- `ChatWindow.tsx` 从第十五批后的 4691 行降至 4597 行；相较 Chat 拆分开始时累计减少 1039 行。
+- 新增 6 个 TTS 控制器测试，覆盖 pending/注册、乱序 segment 单调揭示、未知/非法事件、注册前失败清理、结束后原会话回调、中断移除分段控制、全量停止重置和三类事件订阅清理。
+- `npm test` 共 37 个测试文件、142 个用例通过；TypeScript、lint、Windows unpacked 打包、TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 的 AI 请求与流式响应 hooks。
 
 ## 14. P2-2：前端加载与运行性能
 

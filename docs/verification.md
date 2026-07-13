@@ -326,3 +326,22 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100-attachment-preview.png`。本批未修改 ASR preload/IPC 协议、Pet 麦克风采集、AI 请求主体、聊天持久化或样式；未连接真实麦克风/OpenTypeless 服务做端到端识别，实际服务兼容性仍由后续人工 ASR 回归矩阵验证。`ChatWindow.tsx` 后续继续拆分 AI/TTS hooks。
+
+## P2-1：大型模块拆分与领域边界（第十六批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 分段 TTS renderer 生命周期、逐段揭示与事件订阅
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 37 个测试文件、142 个用例通过 |
+| TTS 控制器测试 | pending/注册、乱序 segment 单调揭示、非法事件、注册前失败、结束回调、中断/停止清理和订阅注销通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 真实 TTS JSON/二进制/流代理、Chat → Pet enqueue、Pet → Chat segmentStarted 和五类窗口运行通过 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；紧凑 Chat 统一停止同时取消任务并调用 `stopTtsAll`，默认/紧凑布局无回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100.png`。本批未修改 TTS preload/IPC 协议、Pet 音频播放、文本分句算法、AI 请求协议、消息持久化或样式；未连接真实 GPT-SoVITS 服务和声卡做端到端音频播放，服务端兼容性、音频设备错误与长文本连续播放仍由后续人工 TTS 回归矩阵验证。`ChatWindow.tsx` 后续继续拆分 AI 请求与流式响应 hooks。

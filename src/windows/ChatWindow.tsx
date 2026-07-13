@@ -10,6 +10,7 @@ import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
 import { ChatToolUseCard } from './chat/ChatToolUseCard'
 import { ChatSessionList } from './chat/ChatSessionList'
 import { useAsrComposePreview, useChatAsr } from './chat/useChatAsr'
+import { useChatTts } from './chat/useChatTts'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
@@ -108,21 +109,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null)
   const confirmClearButtonRef = useRef<HTMLButtonElement>(null)
-  const [ttsSegmentedMessageFlags, setTtsSegmentedMessageFlags] = useState<Record<string, true>>({})
-  const [ttsRevealedSegments, setTtsRevealedSegments] = useState<Record<string, number>>({})
-  const [ttsPendingUtteranceId, setTtsPendingUtteranceId] = useState<string | null>(null)
-  const ttsUtteranceMetaRef = useRef<
-    Record<
-      string,
-      {
-        sessionId: string
-        createdAt: number
-        messageId: string
-        displayedSegments: number
-        fallbackContent?: string
-      }
-    >
-  >({})
   const aiAbortRef = useRef<AbortController | null>(null)
   const chatStopSeqRef = useRef(0)
   const plannerPendingRef = useRef(false)
@@ -590,6 +576,23 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   }, [messages])
 
   const syncAsrComposePreview = useAsrComposePreview(api)
+  const {
+    beginTtsUtterance,
+    clearAllTtsUtterances,
+    clearTtsUtterance,
+    hasActiveTts,
+    registerTtsUtterance,
+    ttsPendingUtteranceId,
+    ttsRevealedSegments,
+    ttsSegmentedMessageFlags,
+    updateTtsUtteranceFallback,
+  } = useChatTts({
+    api,
+    onError: setError,
+    onUtteranceEnded: (sessionId) => {
+      void runAutoExtractIfNeeded(sessionId)
+    },
+  })
 
   const sendBubblePreview = useCallback(
     (
@@ -649,63 +652,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   useEffect(() => {
     tasksRef.current = tasks
   }, [tasks])
-
-  useEffect(() => {
-    if (!api) return
-
-    const unsubSegmentStarted = api.onTtsSegmentStarted((payload) => {
-      const meta = ttsUtteranceMetaRef.current[payload.utteranceId]
-      if (!meta) return
-
-      const idx = clampIntValue(payload.segmentIndex, -1, 0, 1_000_000)
-      if (idx < 0) return
-
-      meta.displayedSegments = Math.max(meta.displayedSegments, idx + 1)
-
-      if (idx === 0) {
-        setTtsPendingUtteranceId((prev) => (prev === payload.utteranceId ? null : prev))
-      }
-
-      setTtsRevealedSegments((prev) => ({ ...prev, [meta.messageId]: meta.displayedSegments }))
-    })
-
-    const unsubUtteranceFailed = api.onTtsUtteranceFailed((payload) => {
-      const meta = ttsUtteranceMetaRef.current[payload.utteranceId]
-      if (meta) {
-        setTtsPendingUtteranceId((prev) => (prev === payload.utteranceId ? null : prev))
-        setTtsRevealedSegments((prev) => {
-          const next = { ...prev }
-          delete next[meta.messageId]
-          return next
-        })
-        delete ttsUtteranceMetaRef.current[payload.utteranceId]
-      }
-      setError(payload.error)
-    })
-
-    const unsubUtteranceEnded = api.onTtsUtteranceEnded((payload) => {
-      const meta = ttsUtteranceMetaRef.current[payload.utteranceId]
-      delete ttsUtteranceMetaRef.current[payload.utteranceId]
-      if (meta) {
-        setTtsPendingUtteranceId((prev) => (prev === payload.utteranceId ? null : prev))
-        setTtsRevealedSegments((prev) => {
-          const next = { ...prev }
-          delete next[meta.messageId]
-          return next
-        })
-      }
-      const sessionId = meta?.sessionId
-      if (sessionId) {
-        void runAutoExtractIfNeeded(sessionId)
-      }
-    })
-
-    return () => {
-      unsubSegmentStarted()
-      unsubUtteranceFailed()
-      unsubUtteranceEnded()
-    }
-  }, [api, currentSessionId, debugLog, runAutoExtractIfNeeded])
 
   // Load settings
   useEffect(() => {
@@ -2397,20 +2343,17 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     [api, sendBubblePreview],
   )
 
-  const hasActiveTts = ttsPendingUtteranceId != null || Object.keys(ttsRevealedSegments).length > 0
   const isAssistantOutputting = isLoading || currentActiveChatTaskIds.length > 0 || hasActiveTts
 
   const stopAssistantOutput = useCallback(() => {
     interrupt()
-    setTtsPendingUtteranceId(null)
-    setTtsRevealedSegments({})
-    ttsUtteranceMetaRef.current = {}
+    clearAllTtsUtterances()
     if (!api || currentActiveChatTaskIds.length === 0) return
 
     for (const taskId of currentActiveChatTaskIds) {
       void api.cancelTask(taskId).catch((err) => console.error('[ChatStop] cancel task failed:', err))
     }
-  }, [api, currentActiveChatTaskIds, interrupt])
+  }, [api, clearAllTtsUtterances, currentActiveChatTaskIds, interrupt])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -2991,8 +2934,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
       if (ttsSegmented) {
         const utteranceId = newMessageId()
-        setTtsPendingUtteranceId(utteranceId)
-        setTtsRevealedSegments((prev) => ({ ...prev, [utteranceId]: 0 }))
+        beginTtsUtterance(utteranceId)
         const segmentedStopSeq = chatStopSeqRef.current
         const isSegmentedStopped = () => abort.signal.aborted || chatStopSeqRef.current !== segmentedStopSeq
 
@@ -3022,36 +2964,21 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
           if (isSegmentedStopped()) {
             sendBubblePreview({ clear: true }, { force: true })
-            setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
-            setTtsRevealedSegments((prev) => {
-              const next = { ...prev }
-              delete next[utteranceId]
-              return next
-            })
+            clearTtsUtterance(utteranceId)
             return
           }
 
           if (response.error) {
             if (response.error === ABORTED_ERROR) {
               sendBubblePreview({ clear: true }, { force: true })
-              setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
-              setTtsRevealedSegments((prev) => {
-                const next = { ...prev }
-                delete next[utteranceId]
-                return next
-              })
+              clearTtsUtterance(utteranceId)
               return
             }
             sendBubblePreview({ clear: true }, { force: true })
             const errUi = formatAiErrorForUser(response.error)
             setError(errUi.message)
             if (errUi.shouldAlert) window.alert(errUi.message)
-            setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
-            setTtsRevealedSegments((prev) => {
-              const next = { ...prev }
-              delete next[utteranceId]
-              return next
-            })
+            clearTtsUtterance(utteranceId)
             const msg: ChatMessageRecord = {
               id: newMessageId(),
               role: 'assistant',
@@ -3077,16 +3004,16 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           }
           setMessages((prev) => [...prev, assistantMessage])
           await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-          setTtsSegmentedMessageFlags((prev) => ({ ...prev, [utteranceId]: true }))
 
           const segs = splitTextIntoTtsSegments(content, { lang: 'zh', textSplitMethod: 'cut5' })
-          ttsUtteranceMetaRef.current[utteranceId] = {
+          registerTtsUtterance({
+            utteranceId,
             sessionId: currentSessionId,
             createdAt: assistantCreatedAt,
             messageId: utteranceId,
             displayedSegments: 0,
             fallbackContent: content,
-          }
+          })
 
           api.enqueueTtsUtterance({ utteranceId, mode: 'replace', segments: segs.length ? segs : [content], fullText: content })
           api.finalizeTtsUtterance(utteranceId)
@@ -3097,12 +3024,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           sendBubblePreview({ clear: true }, { force: true })
           const msg = err instanceof Error ? err.message : String(err)
           setError(msg)
-          setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
-          setTtsRevealedSegments((prev) => {
-            const next = { ...prev }
-            delete next[utteranceId]
-            return next
-          })
+          clearTtsUtterance(utteranceId)
           const assistantMessage: ChatMessageRecord = {
             id: newMessageId(),
             role: 'assistant',
@@ -3281,10 +3203,12 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     }
   }, [
     api,
+    beginTtsUtterance,
     buildVisionPartsFromImagePaths,
     canUseMainVision,
     canUseVision,
     collectRecentVisualArtifacts,
+    clearTtsUtterance,
     currentSessionId,
     debugLog,
     getActivePersonaId,
@@ -3294,6 +3218,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     removeDuplicatedPersonaFromMemoryAddon,
     buildSessionToolFactsAddon,
     refreshSessions,
+    registerTtsUtterance,
     retrieveEnabled,
     interrupt,
     runAutoExtractIfNeeded,
@@ -3813,8 +3738,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
         if (ttsSegmented) {
           const utteranceId = newMessageId()
-          setTtsPendingUtteranceId(utteranceId)
-          setTtsRevealedSegments((prev) => ({ ...prev, [utteranceId]: 0 }))
+          beginTtsUtterance(utteranceId)
 
           try {
             const assistantCreatedAt = Date.now()
@@ -3836,14 +3760,14 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               }
               setMessages((prev) => [...prev, assistantMessage])
               api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-              setTtsSegmentedMessageFlags((prev) => ({ ...prev, [utteranceId]: true }))
-              ttsUtteranceMetaRef.current[utteranceId] = {
+              registerTtsUtterance({
+                utteranceId,
                 sessionId: currentSessionId,
                 createdAt: assistantCreatedAt,
                 messageId: utteranceId,
                 displayedSegments: 0,
                 fallbackContent: content,
-              }
+              })
             }
 
             const enqueueStableSegments = (displayText: string, forceAll: boolean) => {
@@ -3853,7 +3777,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               if (stableCount <= sentSegments) {
                 if (created) {
                   setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: display } : m)))
-                  ttsUtteranceMetaRef.current[utteranceId].fallbackContent = display
+                  updateTtsUtteranceFallback(utteranceId, display)
                 }
                 return
               }
@@ -3863,7 +3787,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
               ensureMessageCreated(display)
               setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: display } : m)))
-              ttsUtteranceMetaRef.current[utteranceId].fallbackContent = display
+              updateTtsUtteranceFallback(utteranceId, display)
 
               api.enqueueTtsUtterance({
                 utteranceId,
@@ -3917,20 +3841,8 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                 } catch {
                   /* ignore */
                 }
-                setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
-                setTtsRevealedSegments((prev) => {
-                  const next = { ...prev }
-                  delete next[utteranceId]
-                  return next
-                })
                 // aborted：保留已生成的部分（若已创建 message），但不再走分句控制
-                if (created) {
-                  setTtsSegmentedMessageFlags((prev) => {
-                    const next = { ...prev }
-                    delete next[utteranceId]
-                    return next
-                  })
-                }
+                clearTtsUtterance(utteranceId, { removeSegmentedFlag: created })
                 return
               }
               const errUi = formatAiErrorForUser(response.error)
@@ -3941,12 +3853,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               } catch {
                 /* ignore */
               }
-              setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
-              setTtsRevealedSegments((prev) => {
-                const next = { ...prev }
-                delete next[utteranceId]
-                return next
-              })
+              clearTtsUtterance(utteranceId)
               const msg: ChatMessageRecord = {
                 id: newMessageId(),
                 role: 'assistant',
@@ -3966,7 +3873,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             } else {
               setMessages((prev) => prev.map((m) => (m.id === utteranceId ? { ...m, content: finalContent } : m)))
               api.updateChatMessage(currentSessionId, utteranceId, finalContent).catch(() => undefined)
-              ttsUtteranceMetaRef.current[utteranceId].fallbackContent = finalContent
+              updateTtsUtteranceFallback(utteranceId, finalContent)
             }
 
             enqueueStableSegments(finalContent, true)
@@ -3977,12 +3884,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             setError(msg)
-            setTtsPendingUtteranceId((prev) => (prev === utteranceId ? null : prev))
-            setTtsRevealedSegments((prev) => {
-              const next = { ...prev }
-              delete next[utteranceId]
-              return next
-            })
+            clearTtsUtterance(utteranceId)
             const assistantMessage: ChatMessageRecord = {
               id: newMessageId(),
               role: 'assistant',
@@ -4146,7 +4048,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     },
     [
       api,
+      beginTtsUtterance,
       canUseVision,
+      clearTtsUtterance,
       currentSessionId,
       getActivePersonaId,
       interrupt,
@@ -4156,11 +4060,13 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       personaSystemAddon,
       removeDuplicatedPersonaFromMemoryAddon,
       refreshSessions,
+      registerTtsUtterance,
       sendBubblePreview,
       settings,
       runAutoExtractIfNeeded,
       maybeCompressChatHistoryToMaxContext,
       formatAiErrorForUser,
+      updateTtsUtteranceFallback,
     ],
   )
 
