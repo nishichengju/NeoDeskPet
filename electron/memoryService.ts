@@ -33,6 +33,7 @@ import type {
   Persona,
   PersonaSummary,
 } from './types'
+import { normalizePersonaStorageRow, type PersonaStorageRow } from './personaRecord'
 
 type DatabaseHandle = import('better-sqlite3').Database
 
@@ -1164,8 +1165,8 @@ export class MemoryService {
         WHERE id = ?
         `,
       )
-      .get(personaId) as Persona | undefined
-    return row ?? null
+      .get(personaId) as PersonaStorageRow | undefined
+    return normalizePersonaStorageRow(row)
   }
 
   createPersona(name: string): Persona {

@@ -49,29 +49,6 @@ import type {
   OrbUiState,
   McpStateSnapshot,
   ContextUsageSnapshot,
-  MemoryDeleteArgs,
-  MemoryDeleteByFilterArgs,
-  MemoryDeleteManyArgs,
-  MemoryListArgs,
-  MemoryListConflictsArgs,
-  MemoryListConflictsResult,
-  MemoryListResult,
-  MemoryListVersionsArgs,
-  MemoryRecord,
-  MemoryResolveConflictArgs,
-  MemoryResolveConflictResult,
-  MemoryRollbackVersionArgs,
-  MemoryRetrieveArgs,
-  MemoryRetrieveResult,
-  MemoryUpdateArgs,
-  MemoryUpdateByFilterMetaArgs,
-  MemoryUpdateManyMetaArgs,
-  MemoryUpdateMetaArgs,
-  MemoryUpdateMetaResult,
-  MemoryUpsertManualArgs,
-  MemoryVersionRecord,
-  Persona,
-  PersonaSummary,
   TaskListResult,
   SettingsNavigationTarget,
 } from './types'
@@ -95,6 +72,7 @@ import { registerSettingsIpc } from './ipc/registerSettingsIpc'
 import { registerChatPersistenceIpc } from './ipc/registerChatPersistenceIpc'
 import { ChatAttachmentIpcService } from './ipc/registerChatAttachmentIpc'
 import { registerTaskIpc } from './ipc/registerTaskIpc'
+import { registerMemoryIpc } from './ipc/registerMemoryIpc'
 
 const APP_ID = 'io.github.nishichengju.neodeskpet'
 app.setName('NeoDeskPet')
@@ -1046,95 +1024,7 @@ function registerIpc() {
 
   registerTaskIpc({ handle: handleIpc, getTaskService: () => taskService })
 
-  // Long-term memory / personas
-  handleIpc('memory:listPersonas', (): PersonaSummary[] => memoryService?.listPersonas() ?? [])
-  handleIpc('memory:getPersona', (_event, personaId: string): Persona | null => memoryService?.getPersona(personaId) ?? null)
-  handleIpc('memory:createPersona', (_event, name: string): Persona => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.createPersona(name)
-  })
-  handleIpc(
-    'memory:updatePersona',
-    (
-      _event,
-      personaId: string,
-      patch: {
-        name?: string
-        prompt?: string
-        captureEnabled?: boolean
-        captureUser?: boolean
-        captureAssistant?: boolean
-        retrieveEnabled?: boolean
-      },
-    ): Persona => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.updatePersona(personaId, patch)
-    },
-  )
-  handleIpc('memory:deletePersona', (_event, personaId: string): { ok: true } => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    memoryService.deletePersona(personaId)
-    return { ok: true }
-  })
-  handleIpc('memory:retrieve', async (_event, args: MemoryRetrieveArgs): Promise<MemoryRetrieveResult> => {
-    if (!memoryService) return { addon: '' }
-    const settings = getSettings()
-    if (!settings.memory.enabled) return { addon: '' }
-    return memoryService.retrieveContext(args, settings.memory, settings.ai)
-  })
-  handleIpc('memory:list', (_event, args: MemoryListArgs): MemoryListResult => {
-    if (!memoryService) return { total: 0, items: [] }
-    return memoryService.listMemory(args)
-  })
-  handleIpc('memory:upsertManual', async (_event, args: MemoryUpsertManualArgs): Promise<MemoryRecord> => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    const settings = getSettings()
-    return memoryService.upsertManualMemory(args, settings.memory, settings.ai)
-  })
-  handleIpc('memory:update', (_event, args: MemoryUpdateArgs): MemoryRecord => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.updateMemory(args)
-  })
-  handleIpc('memory:updateMeta', (_event, args: MemoryUpdateMetaArgs): MemoryUpdateMetaResult => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.updateMemoryMeta(args)
-  })
-  handleIpc('memory:updateManyMeta', (_event, args: MemoryUpdateManyMetaArgs): MemoryUpdateMetaResult => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.updateManyMemoryMeta(args)
-  })
-  handleIpc('memory:updateByFilterMeta', (_event, args: MemoryUpdateByFilterMetaArgs): MemoryUpdateMetaResult => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.updateMemoryByFilterMeta(args)
-  })
-  handleIpc('memory:listVersions', (_event, args: MemoryListVersionsArgs): MemoryVersionRecord[] => {
-    if (!memoryService) return []
-    return memoryService.listMemoryVersions(args)
-  })
-  handleIpc('memory:rollbackVersion', (_event, args: MemoryRollbackVersionArgs): MemoryRecord => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.rollbackMemoryVersion(args)
-  })
-  handleIpc('memory:listConflicts', (_event, args: MemoryListConflictsArgs): MemoryListConflictsResult => {
-    if (!memoryService) return { total: 0, items: [] }
-    return memoryService.listMemoryConflicts(args)
-  })
-  handleIpc('memory:resolveConflict', (_event, args: MemoryResolveConflictArgs): MemoryResolveConflictResult => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.resolveMemoryConflict(args)
-  })
-  handleIpc('memory:delete', (_event, args: MemoryDeleteArgs): { ok: true } => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.deleteMemory(args)
-  })
-  handleIpc('memory:deleteMany', (_event, args: MemoryDeleteManyArgs): { deleted: number } => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.deleteManyMemory(args)
-  })
-  handleIpc('memory:deleteByFilter', (_event, args: MemoryDeleteByFilterArgs): { deleted: number } => {
-    if (!memoryService) throw new Error('Memory service not ready')
-    return memoryService.deleteMemoryByFilter(args)
-  })
+  registerMemoryIpc({ handle: handleIpc, getMemoryService: () => memoryService, getSettings })
 
   // TTS options (scan local GPT-SoVITS directory)
   handleIpc('tts:listOptions', () => {

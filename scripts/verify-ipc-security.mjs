@@ -269,6 +269,60 @@ try {
     'chat current session was not persisted',
   )
 
+  const memoryCrudSeed = await settings.evaluate(async () => {
+    const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
+    const updatedPersona = await window.neoDeskPet.updatePersona(persona.id, {
+      name: 'IPC Memory Updated',
+      captureUser: false,
+    })
+    const created = await window.neoDeskPet.upsertManualMemory({
+      personaId: persona.id,
+      scope: 'persona',
+      content: 'IPC manual memory',
+      source: 'ipc-smoke',
+      memoryType: 'semantic',
+    })
+    return { persona, updatedPersona, created }
+  })
+  const memoryCrud = await memory.evaluate(async ({ personaId, rowid }) => {
+    const updated = await window.neoDeskPet.updateMemory({
+      rowid,
+      content: 'IPC updated memory',
+      reason: 'ipc_smoke',
+      source: 'ipc_smoke',
+    })
+    const versions = await window.neoDeskPet.listMemoryVersions({ rowid, limit: 10 })
+    const meta = await window.neoDeskPet.updateMemoryMeta({ rowid, patch: { pinned: 1 } })
+    const listed = await window.neoDeskPet.listMemory({
+      personaId,
+      scope: 'all',
+      limit: 50,
+    })
+    await window.neoDeskPet.deleteMemory({ rowid })
+    const afterDelete = await window.neoDeskPet.listMemory({
+      personaId,
+      scope: 'all',
+      limit: 50,
+    })
+    return { updated, versions, meta, listed, afterDelete }
+  }, { personaId: memoryCrudSeed.persona.id, rowid: memoryCrudSeed.created.rowid })
+  const memoryPersonaCleanup = await settings.evaluate(async (personaId) => {
+    await window.neoDeskPet.deletePersona(personaId)
+    const personasAfterDelete = await window.neoDeskPet.listPersonas()
+    return { personasAfterDelete }
+  }, memoryCrudSeed.persona.id)
+  assert(memoryCrudSeed.updatedPersona.name === 'IPC Memory Updated', 'memory persona update failed')
+  assert(memoryCrudSeed.updatedPersona.captureUser === false, 'memory persona capture settings were not updated')
+  assert(memoryCrud.updated.content === 'IPC updated memory', 'manual memory update failed')
+  assert(memoryCrud.versions.length > 0, 'memory update did not create a version')
+  assert(memoryCrud.meta.updated === 1, 'memory metadata update failed')
+  assert(memoryCrud.listed.items.some((item) => item.rowid === memoryCrudSeed.created.rowid), 'manual memory was not listed')
+  assert(!memoryCrud.afterDelete.items.some((item) => item.rowid === memoryCrudSeed.created.rowid), 'manual memory deletion failed')
+  assert(
+    !memoryPersonaCleanup.personasAfterDelete.some((item) => item.id === memoryCrudSeed.persona.id),
+    'memory persona deletion failed',
+  )
+
   const keys = {
     pet: await apiKeys(pet),
     chat: await apiKeys(chat),
@@ -450,6 +504,15 @@ try {
       deleteMessage: chatPersistenceAfterRestart.afterMessageDelete.messages.length === 1,
       clear: chatPersistenceAfterRestart.afterClear.messages.length === 0,
       deleteSession: true,
+    },
+    memoryCrud: {
+      personaId: memoryCrudSeed.persona.id,
+      memoryRowid: memoryCrudSeed.created.rowid,
+      update: memoryCrud.updated.content === 'IPC updated memory',
+      versionCount: memoryCrud.versions.length,
+      metadata: memoryCrud.meta,
+      deleteMemory: true,
+      deletePersona: true,
     },
     runtimeErrors,
     aiProxy: {

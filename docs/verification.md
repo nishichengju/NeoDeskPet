@@ -116,3 +116,23 @@
 | `npm run ui:baseline` | 13 个场景通过 |
 
 本批未修改 TaskService 调度、任务存储、renderer、preload API 或 IPC 权限矩阵。P2-1 后续继续拆分 Memory、TTS 和 Window IPC。
+
+## P2-1：大型模块拆分与领域边界（第五批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Memory persona、检索、管理、版本与冲突 IPC 适配层
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 26 个测试文件、96 个用例通过 |
+| Memory IPC 行为测试 | 19 通道、未就绪差异、禁用检索、CRUD、批量元数据、版本与冲突委托通过 |
+| Persona 存储归一化测试 | SQLite `0/1` 正确转换为 boolean，空记录返回 `null` |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 真实 persona 创建/更新/删除、手工记忆写入/编辑/版本/元数据/列表/删除通过 |
+| `npm run media:smoke` | 路径拒绝、opaque URL、Range 206 与删除后 404 通过 |
+| `npm run ui:baseline` | 13 个场景通过 |
+| `git diff --check` | 通过 |
+
+本批未修改 renderer、preload API、IPC 权限矩阵或 Memory SQLite schema。P2-1 后续继续拆分 TTS 与 Window IPC；记忆检索质量、维护任务和冲突算法属于后续 `memoryService.ts` 领域拆分范围。

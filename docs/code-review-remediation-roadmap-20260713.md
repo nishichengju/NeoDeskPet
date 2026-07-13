@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第四批：Settings、Chat 与 Task IPC 已拆分）
+- 状态：P2-1 进行中（第五批：Settings、Chat、Task 与 Memory IPC 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -570,6 +570,15 @@ AI 与能力
 - `electron/main.ts` 从第三批后的 2099 行降至 2083 行；相较 P2-1 开始时累计减少 660 行。
 - 新增 3 个 Task IPC 测试，覆盖 8 通道注册、未就绪返回差异以及所有参数/返回值委托。
 - `npm test` 共 90 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC 双启动 smoke 和 13 个 UI baseline 场景均通过。
+
+### P2-1 进展记录（2026-07-13，第五批）
+
+- 将 19 个 `memory:*` IPC 通道迁移到 `electron/ipc/registerMemoryIpc.ts`，覆盖 persona 管理、记忆检索、手工写入、编辑、批量元数据、版本回滚、冲突处理和删除。
+- 保留 MemoryService 未就绪时的差异化语义：persona/list/conflict/version 查询返回对应空结果，`getPersona` 返回 `null`，检索返回空 addon，写操作继续抛出 `Memory service not ready`；全局关闭记忆时检索不触发服务调用。
+- 修复 SQLite persona 布尔列以 `0/1` 返回的问题，新增 `normalizePersonaStorageRow()`，确保 `captureEnabled`、`captureUser`、`captureAssistant` 与 `retrieveEnabled` 对 renderer 始终为真正的 boolean。
+- `electron/main.ts` 从第四批后的 2083 行降至 1972 行；相较 P2-1 开始时累计减少 771 行。
+- 新增 Memory IPC 与 persona 存储行测试，覆盖 19 个通道、未就绪/禁用路径、CRUD、版本、冲突、批量操作和 SQLite 布尔归一化；打包 IPC smoke 增加真实 persona 与手工记忆往返。
+- `npm test` 共 96 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
 
 ## 14. P2-2：前端加载与运行性能
 
