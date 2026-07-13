@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十七批：Chat AI 请求与流式响应 hook 已拆分）
+- 状态：P2-1 进行中（第十八批：Chat 上下文预算与压缩 hook 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -694,6 +694,15 @@ AI 与能力
 - 重新生成的分段 TTS 流补充统一停止检查：中断后不再接受迟到 delta、创建消息或追加音频段，并清理未完成的 segmented 控制状态。
 - `ChatWindow.tsx` 本批净减少 291 个物理行，当前为 4358 行；新增 8 个 AI 控制器/响应 runner 测试，覆盖新旧请求 loading 竞态、前后台统一中断、流式成功、占位插入/最终更新顺序、Live2D 标签去重、部分失败保留、迟到结果拒绝、非流式 metadata 和上下文错误提示。
 - `npm test` 共 38 个测试文件、150 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 AI/TTS IPC 代理、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 上下文预算/压缩状态，再进入 `taskService.ts` 领域拆分。
+
+### P2-1 进展记录（2026-07-13，第十八批）
+
+- 新增 `src/windows/chat/useChatContext.ts`，集中管理 Chat 的 MCP 工具快照、工具目录 addon、输入停顿后的记忆预取、世界书/角色上下文用量拼装、token 估算、历史截断、自动上下文压缩和 context usage 发布；`ChatWindow` 只保留发送、planner、Tool Agent 与任务完成编排。
+- 将上下文预算和压缩算法拆成可独立测试的纯函数，并为压缩器增加可注入工厂；主 API、专用 profile/model、思考关闭、视觉/流式关闭、摘要长度限制、失败回退、用户提示和 debug 事件均保持原契约。
+- 将 context usage 的 250ms 合并发布封装为独立 publisher，连续输入只发布窗口内最新快照；真实 provider usage 继续优先于本地预测，预测值继续计入 system prompt、角色/记忆/世界书/工具 addon、历史、待发送文本、图片成本和输出预留。
+- 修复记忆预取的迟到结果竞态：每次输入、API 或记忆开关变化都会先推进请求代次，清空输入或关闭召回后，旧请求完成时不再把过期 addon 写回当前上下文。
+- `ChatWindow.tsx` 本批净减少 486 个物理行，当前为 3872 行；新增 8 个上下文测试，覆盖文本/图片 token 估算、按预算保留最近消息、内置/MCP 工具目录、真实/预测 usage、压缩成功、失败回退和发布节流。
+- `npm test` 共 39 个测试文件、158 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 AI/TTS IPC 代理、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批进入 `taskService.ts` 的领域拆分。
 
 ## 14. P2-2：前端加载与运行性能
 

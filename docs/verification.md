@@ -364,3 +364,22 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100.png`。本批未修改 AI HTTP/preload/IPC 协议、provider 请求体、planner/Tool Agent 决策、记忆召回、上下文压缩算法、TTS 分句算法、消息 schema 或样式。未连接真实 OpenAI-compatible/Claude 模型做端到端生成，真实 provider 的 SSE 分块差异、长响应网络中断和计费 usage 仍需后续人工 AI 回归矩阵验证；当前证据覆盖 renderer runner、打包后的主进程普通/流代理和窗口运行。
+
+## P2-1：大型模块拆分与领域边界（第十八批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 上下文预算、MCP/记忆 addon、自动压缩与 usage 发布
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 39 个测试文件、158 个用例通过 |
+| 上下文测试 | 文本/图片 token 估算、最近消息截断、内置/MCP 工具目录、真实/预测 usage、压缩成功/失败回退和 250ms 最新值发布通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功 |
+| `npm run ipc:smoke` | 真实 AI 普通/流代理、鉴权注入、TTS 双向 relay、Chat 持久化和五类窗口运行通过，renderer 无运行时错误 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；默认/紧凑 Chat、状态面板和工具卡无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100-expanded.png`、`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 AI HTTP/preload/IPC 协议、provider 请求体、token 估算系数、上下文阈值默认值、planner/Tool Agent 决策、消息 schema、TTS/ASR 或样式；仅修复清空输入/关闭召回后的迟到记忆结果写回。未连接真实 OpenAI-compatible/Claude 模型触发超长上下文压缩，也未连接外部 MCP server 验证实时工具刷新；provider tokenizer 差异、专用压缩 profile 可用性和真实长会话压缩质量仍由后续 AI/MCP 人工回归矩阵验证。

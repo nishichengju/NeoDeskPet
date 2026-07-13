@@ -1,7 +1,7 @@
 // 聊天窗口：会话管理、流式对话、TTS/规划器与消息渲染（自 App.tsx 拆出）
 
 import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolRegistry'
-import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, ContextUsageSnapshot, McpStateSnapshot, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
+import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
 import { ChatComposer, type PendingChatAttachment } from './chat/ChatComposer'
@@ -11,12 +11,13 @@ import { ChatToolUseCard } from './chat/ChatToolUseCard'
 import { ChatSessionList } from './chat/ChatSessionList'
 import { useAsrComposePreview, useChatAsr } from './chat/useChatAsr'
 import { formatChatAiErrorForUser, useChatAi } from './chat/useChatAi'
+import { useChatContext } from './chat/useChatContext'
 import { useChatTts } from './chat/useChatTts'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
 import { splitTextIntoTtsSegments } from '../services/textSegmentation'
-import { BUBBLE_PREVIEW_FALLBACK_PREFIX, buildContextCompressionSummaryPrompt, canonicalizeLocalImagePath, collapseAssistantRuns, computeAppendDelta, filterVisibleToolRuns, joinTextBlocks, mergeLeadingPunctuationAcrossToolBoundary, normalizeAssistantDisplayText, normalizeInterleavedTextSegment, normalizeMessageBlocks, pickRicherToolBlocks, sliceTail, toLocalMediaSrc } from '../utils/chatMessages'
+import { BUBBLE_PREVIEW_FALLBACK_PREFIX, canonicalizeLocalImagePath, collapseAssistantRuns, computeAppendDelta, filterVisibleToolRuns, joinTextBlocks, mergeLeadingPunctuationAcrossToolBoundary, normalizeAssistantDisplayText, normalizeInterleavedTextSegment, normalizeMessageBlocks, pickRicherToolBlocks, sliceTail, toLocalMediaSrc } from '../utils/chatMessages'
 import { createStreamFlushThrottle, extractLastLive2DTags, extractLive2DTags, extractTailLive2DTags } from '../utils/live2dStream'
 import { buildPlannerSystemPrompt, parsePlannerDecision, requestLikelyNeedsToolAction } from '../utils/planner'
 import { buildToolResultSystemAddon, buildWorldBookAddon } from '../utils/promptAddons'
@@ -82,7 +83,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [lastRetrieveDebug, setLastRetrieveDebug] = useState<MemoryRetrieveResult['debug'] | null>(null)
   // 最近一轮 agent.run 的图片注入结果（来自任务日志 [Vision] 行），用于区分“真的看到图”与文本幻觉
   const [lastVisionDebug, setLastVisionDebug] = useState<string | null>(null)
-  const [mcpSnapshotForContext, setMcpSnapshotForContext] = useState<McpStateSnapshot | null>(null)
   const settingsRef = useRef<AppSettings | null>(null)
   const inputRef = useRef('')
   const messagesRef = useRef<ChatMessageRecord[]>([])
@@ -284,12 +284,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     }
     return out.slice(-Math.max(1, Math.trunc(limit)))
   }, [])
-  const contextUsageLastSentAtRef = useRef(0)
-  const contextUsagePendingRef = useRef<ContextUsageSnapshot | null>(null)
-  const contextUsageSendTimerRef = useRef<number | null>(null)
   const debugLogLastSentAtRef = useRef<Map<string, number>>(new Map())
-  const [contextRetrieveAddon, setContextRetrieveAddon] = useState<string>('')
-  const contextRetrieveAddonReqIdRef = useRef(0)
 
   const debugLog = useCallback(
     (event: string, data?: unknown) => {
@@ -1772,507 +1767,26 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     settings?.ai?.visionRoutingMode !== 'fallback-only' &&
     settings?.ai?.visionCapability !== 'unsupported'
 
-  const chatOrbEnabled = settings?.chatUi?.contextOrbEnabled ?? false
-  const chatOrbX = settings?.chatUi?.contextOrbX ?? 6
-  const chatOrbY = settings?.chatUi?.contextOrbY ?? 14
-
-  useEffect(() => {
-    if (!api) return
-    let disposed = false
-    api
-      .getMcpState()
-      .then((snap) => {
-        if (disposed) return
-        setMcpSnapshotForContext(snap)
-      })
-      .catch(() => {
-        /* ignore */
-      })
-    const off = api.onMcpChanged((snap) => {
-      if (disposed) return
-      setMcpSnapshotForContext(snap)
-    })
-    return () => {
-      disposed = true
-      off()
-    }
-  }, [api])
-
-  const estimateTokensFromText = useCallback((text: string): number => {
-    const cleaned = (text ?? '').trim()
-    if (!cleaned) return 0
-    return Math.max(1, Math.ceil(cleaned.length / 4))
-  }, [])
-
-  const estimateTokensForChatMessage = useCallback(
-    (m: ChatMessage): number => {
-      if (!m) return 0
-      if (typeof m.content === 'string') return estimateTokensFromText(m.content)
-
-      let total = 0
-      for (const part of m.content) {
-        if (part.type === 'text') total += estimateTokensFromText(part.text)
-        else total += 800 // 图片大致占用（粗略估计）
-      }
-      return total
-    },
-    [estimateTokensFromText],
-  )
-
-  const toolDirectoryAddon = useMemo(() => {
-    const defs = getBuiltinToolDefinitions()
-    const lines: string[] = defs.map((d) => `- ${d.name}：${d.description}`)
-
-    const servers = Array.isArray(mcpSnapshotForContext?.servers) ? mcpSnapshotForContext!.servers : []
-    for (const s of servers) {
-      const tools = Array.isArray(s.tools) ? s.tools : []
-      for (const t of tools) {
-        const toolName = typeof t?.toolName === 'string' ? t.toolName : ''
-        if (!toolName) continue
-        const desc =
-          (typeof t?.description === 'string' && t.description.trim()) ||
-          (typeof t?.title === 'string' && t.title.trim()) ||
-          (typeof t?.name === 'string' && t.name.trim()) ||
-          ''
-        lines.push(`- ${toolName}：${desc || 'MCP tool'}`)
-      }
-    }
-
-    const MAX_TOOL_LINES = 80
-    const toolLines =
-      lines.length > MAX_TOOL_LINES ? [...lines.slice(0, MAX_TOOL_LINES), `- ...（${lines.length - MAX_TOOL_LINES} 项已省略）`] : lines
-
-    const toolSwitch = toolCallingEnabled ? `已启用（mode=${toolCallingMode}）` : '已关闭'
-    const plannerSwitch = plannerEnabled ? `已启用（mode=${plannerMode}）` : '已关闭'
-
-    return [
-      '【可用工具（权威，本地注册表）】',
-      toolLines.join('\n'),
-      '',
-      `当前开关：任务规划器${plannerSwitch}；工具执行${toolSwitch}`,
-      '规则：只有当用户在问“你能做什么/有哪些工具/能力说明”时，才解释并列出工具；否则不要主动输出工具清单。',
-      '注意：当“工具执行”为关闭时，不要承诺你会真的去执行这些工具；只能聊天/解释用法。',
-    ]
-      .filter(Boolean)
-      .join('\n')
-  }, [
-    mcpSnapshotForContext,
-    plannerEnabled,
-    plannerMode,
-    toolCallingEnabled,
-    toolCallingMode,
-  ])
-
-  useEffect(() => {
-    if (!api) return
-
-    if (!memEnabled || !retrieveEnabled) {
-      setContextRetrieveAddon('')
-      return
-    }
-
-    const queryText = (input ?? '').trim()
-    if (!queryText) {
-      setContextRetrieveAddon('')
-      return
-    }
-
-    const nowId = (contextRetrieveAddonReqIdRef.current += 1)
-    const includeShared = settingsRef.current?.memory?.includeSharedOnRetrieve ?? true
-    const personaId = getActivePersonaId()
-
-    const timer = window.setTimeout(() => {
-      void api
-        .retrieveMemory({
-          personaId,
-          query: queryText,
-          limit: 12,
-          maxChars: 3200,
-          includeShared,
-          reinforce: false,
-        })
-        .then((res) => {
-          if (contextRetrieveAddonReqIdRef.current !== nowId) return
-          const addon = removeDuplicatedPersonaFromMemoryAddon(res.addon?.trim() ?? '')
-          setContextRetrieveAddon(addon)
-        })
-        .catch(() => {
-          if (contextRetrieveAddonReqIdRef.current !== nowId) return
-          setContextRetrieveAddon('')
-        })
-    }, 800)
-
-    return () => window.clearTimeout(timer)
-  }, [api, getActivePersonaId, input, memEnabled, removeDuplicatedPersonaFromMemoryAddon, retrieveEnabled])
-
-  const worldBookAddonForUsage = useMemo(() => {
-    const activePersonaId = settings?.activePersonaId?.trim() || 'default'
-    return buildWorldBookAddon(settings, activePersonaId)
-  }, [settings])
-
-  const systemAddonForUsage = useMemo(() => {
-    const parts = [personaSystemAddon.trim(), contextRetrieveAddon.trim(), worldBookAddonForUsage.trim(), toolDirectoryAddon.trim()].filter(Boolean)
-    return parts.join('\n\n')
-  }, [contextRetrieveAddon, personaSystemAddon, toolDirectoryAddon, worldBookAddonForUsage])
-
-  const trimChatHistoryToMaxContext = useCallback(
-    (history: ChatMessage[], systemAddon: string): { history: ChatMessage[]; trimmedCount: number } => {
-      const ai = settingsRef.current?.ai
-      const maxContextTokensRaw = ai?.maxContextTokens ?? 128000
-      const maxContextTokens = Math.max(2048, Math.trunc(Number.isFinite(maxContextTokensRaw) ? maxContextTokensRaw : 128000))
-
-      const maxTokensRaw = ai?.maxTokens ?? 2048
-      const outputReserve = Math.max(512, Math.min(8192, Math.trunc(Number.isFinite(maxTokensRaw) ? maxTokensRaw : 2048)))
-
-      const systemPromptTokens = estimateTokensFromText(ai?.systemPrompt ?? '')
-      const addonTokens = estimateTokensFromText(systemAddon ?? '')
-
-      let budget = maxContextTokens - outputReserve - systemPromptTokens - addonTokens
-      if (!Number.isFinite(budget) || budget < 256) budget = 256
-
-      const kept: ChatMessage[] = []
-      let total = 0
-      for (let i = history.length - 1; i >= 0; i--) {
-        const cost = estimateTokensForChatMessage(history[i])
-        if (kept.length > 0 && total + cost > budget) break
-        kept.push(history[i])
-        total += cost
-      }
-      kept.reverse()
-      return { history: kept, trimmedCount: Math.max(0, history.length - kept.length) }
-    },
-    [estimateTokensForChatMessage, estimateTokensFromText],
-  )
-
-  const maybeCompressChatHistoryToMaxContext = useCallback(
-    async (
-      _aiService: AIService,
-      history: ChatMessage[],
-      systemAddon: string,
-      opts?: { signal?: AbortSignal; notify?: boolean; reason?: string },
-    ): Promise<{ history: ChatMessage[]; trimmedCount: number; compressed: boolean }> => {
-      const notify = opts?.notify ?? false
-      const applyTrimOnly = (): { history: ChatMessage[]; trimmedCount: number; compressed: boolean } => {
-        const trimmed = trimChatHistoryToMaxContext(history, systemAddon)
-        if (notify && trimmed.trimmedCount > 0) {
-          setError(`提示：对话上下文过长，已自动截断为最近 ${trimmed.history.length} 条消息（本地仍保存全部）。可右键“一键总结”或清空对话。`)
-        }
-        return { ...trimmed, compressed: false }
-      }
-
-      const settingsSnapshot = settingsRef.current
-      const ai = settingsSnapshot?.ai
-      if (!ai) return applyTrimOnly()
-
-      const compressionEnabled = ai.autoContextCompressionEnabled ?? true
-      if (!compressionEnabled || history.length < 8) return applyTrimOnly()
-
-      const maxContextTokensRaw = ai.maxContextTokens ?? 128000
-      const maxContextTokens = Math.max(2048, Math.trunc(Number.isFinite(maxContextTokensRaw) ? maxContextTokensRaw : 128000))
-
-      const maxTokensRaw = ai.maxTokens ?? 2048
-      const outputReserve = Math.max(512, Math.min(8192, Math.trunc(Number.isFinite(maxTokensRaw) ? maxTokensRaw : 2048)))
-
-      const systemPromptTokens = estimateTokensFromText(ai.systemPrompt ?? '')
-      const addonTokens = estimateTokensFromText(systemAddon ?? '')
-      const historyTokens = history.reduce((sum, msg) => sum + estimateTokensForChatMessage(msg), 0)
-      const estimatedUsed = systemPromptTokens + addonTokens + historyTokens + outputReserve
-
-      const thresholdPctRaw = ai.autoContextCompressionThresholdPct ?? 85
-      const targetPctRaw = ai.autoContextCompressionTargetPct ?? 65
-      const compressionModel = String(ai.autoContextCompressionModel ?? '').trim()
-      const compressionApiSource = ai.autoContextCompressionApiSource === 'profile' ? 'profile' : 'main'
-      const compressionProfileId = String(ai.autoContextCompressionProfileId ?? '').trim()
-      const compressionProfile =
-        compressionApiSource === 'profile'
-          ? (Array.isArray(settingsSnapshot?.aiProfiles)
-              ? settingsSnapshot.aiProfiles.find((p) => p.id === compressionProfileId) ?? null
-              : null)
-          : null
-      const thresholdPct = Math.max(50, Math.min(99, Math.trunc(Number.isFinite(thresholdPctRaw) ? thresholdPctRaw : 85)))
-      const targetPct = Math.max(35, Math.min(thresholdPct - 5, Math.trunc(Number.isFinite(targetPctRaw) ? targetPctRaw : 65)))
-
-      const triggerTokens = Math.floor((maxContextTokens * thresholdPct) / 100)
-      if (estimatedUsed <= triggerTokens) return applyTrimOnly()
-
-      const targetUsedTokens = Math.floor((maxContextTokens * targetPct) / 100)
-      let allowedHistoryTokensAfter = targetUsedTokens - outputReserve - systemPromptTokens - addonTokens
-      if (!Number.isFinite(allowedHistoryTokensAfter) || allowedHistoryTokensAfter < 512) {
-        allowedHistoryTokensAfter = 512
-      }
-
-      let keepRecentCount = Math.max(6, Math.min(12, history.length))
-      while (keepRecentCount > 4) {
-        const recent = history.slice(history.length - keepRecentCount)
-        const recentTokens = recent.reduce((sum, msg) => sum + estimateTokensForChatMessage(msg), 0)
-        if (recentTokens <= Math.max(256, allowedHistoryTokensAfter - 256)) break
-        keepRecentCount -= 2
-      }
-
-      const oldMessages = history.slice(0, Math.max(0, history.length - keepRecentCount))
-      const recentMessages = history.slice(Math.max(0, history.length - keepRecentCount))
-      if (oldMessages.length < 4 || recentMessages.length === 0) return applyTrimOnly()
-
-      const rawCompressionInput = buildContextCompressionSummaryPrompt(oldMessages)
-      const compressionInput = rawCompressionInput.trim()
-      if (!compressionInput) return applyTrimOnly()
-
-      if (notify) {
-        setError('提示：上下文接近阈值，正在自动压缩上下文…')
-      }
-
-        debugLog('chat:context.compress.start', {
-          reason: opts?.reason ?? 'chat',
-          totalMessages: history.length,
-          oldMessages: oldMessages.length,
-          keepRecentMessages: recentMessages.length,
-          compressionApiSource,
-          compressionProfileId: compressionProfile?.id ?? '',
-          compressionModel: compressionModel || ai.model,
-          estimatedUsed,
-          maxContextTokens,
-          thresholdPct,
-        targetPct,
-      })
-
-      try {
-        const compressionMaxTokens = Math.max(512, Math.min(2200, Math.trunc((ai.maxTokens ?? 2048) / 2)))
-        const compressionAiSettings = {
-          ...ai,
-          apiMode: compressionProfile?.apiMode ?? ai.apiMode,
-          apiKey: compressionProfile?.apiKey?.trim() || ai.apiKey,
-          hasApiKey: compressionProfile?.hasApiKey ?? ai.hasApiKey,
-          baseUrl: compressionProfile?.baseUrl?.trim() || ai.baseUrl,
-          model: compressionModel || compressionProfile?.model?.trim() || ai.model,
-        }
-        const compactor = new AIService(
-          {
-            ...compressionAiSettings,
-            maxTokens: compressionMaxTokens,
-            thinkingEffort: 'disabled',
-            openaiReasoningEffort: 'disabled',
-            claudeThinkingEffort: 'disabled',
-            geminiThinkingEffort: 'disabled',
-            enableVision: false,
-            enableChatStreaming: false,
-          },
-          compressionProfile ? { kind: 'profile', profileId: compressionProfile.id } : { kind: 'main' },
-        )
-        const summaryTargetChars = Math.max(600, Math.min(12000, allowedHistoryTokensAfter * 4))
-        const compressionPrompt = compressionInput.length > 20000 ? `${compressionInput.slice(0, 20000)}\n\n（已截断过长历史）` : compressionInput
-
-        const res = await compactor.chat(
-          [
-            {
-              role: 'system',
-              content:
-                '你是“对话上下文压缩器”。请把更早对话压缩成可供后续回答继续使用的摘要。\n' +
-                '要求：1) 只保留事实、偏好、约束、目标、已完成事项、未完成事项、关键结论；2) 不要编造；3) 用简体中文；4) 输出纯文本，不要 Markdown 标题/代码块；5) 尽量精简。',
-            },
-            {
-              role: 'user',
-              content:
-                `请压缩以下较早对话（目标尽量简洁，约 ${summaryTargetChars} 字以内，不必严格）：\n\n` +
-                compressionPrompt,
-            },
-          ],
-          { signal: opts?.signal },
-        )
-
-        if (res.error) {
-          if (res.error === ABORTED_ERROR) throw new DOMException('Aborted', 'AbortError')
-          throw new Error(res.error)
-        }
-
-        let summaryText = normalizeAssistantDisplayText(res.content, { trim: true })
-        if (!summaryText) throw new Error('压缩结果为空')
-        if (summaryText.length > summaryTargetChars) {
-          summaryText = `${summaryText.slice(0, summaryTargetChars).trim()}\n（摘要已截断）`
-        }
-
-        const summaryMessage: ChatMessage = {
-          role: 'assistant',
-          content: `【自动压缩上下文摘要（系统生成）】\n${summaryText}`,
-        }
-
-        const compressedHistory = [summaryMessage, ...recentMessages]
-        const trimmed = trimChatHistoryToMaxContext(compressedHistory, systemAddon)
-
-        debugLog('chat:context.compress.done', {
-          reason: opts?.reason ?? 'chat',
-          compressed: true,
-          compressionApiSource,
-          compressionProfileId: compressionProfile?.id ?? '',
-          compressionModel: compressionAiSettings.model,
-          oldMessages: oldMessages.length,
-          keepRecentMessages: recentMessages.length,
-          finalMessages: trimmed.history.length,
-          trimmedCount: trimmed.trimmedCount,
-        })
-
-        if (notify) {
-          const extraTrim = trimmed.trimmedCount > 0 ? `；另外又截断 ${trimmed.trimmedCount} 条` : ''
-          setError(`提示：已自动压缩上下文（压缩 ${oldMessages.length} 条，保留最近 ${recentMessages.length} 条原文${extraTrim}）。`)
-        }
-        return { history: trimmed.history, trimmedCount: trimmed.trimmedCount, compressed: true }
-      } catch (err) {
-        if (!(err instanceof DOMException && err.name === 'AbortError')) {
-          console.warn('[ContextCompression] failed:', err)
-          debugLog('chat:context.compress.fail', {
-            reason: opts?.reason ?? 'chat',
-            error: err instanceof Error ? err.message : String(err),
-          })
-          if (notify) {
-            setError('提示：自动压缩上下文失败，已回退为普通截断。')
-          }
-        }
-        return applyTrimOnly()
-      }
-    },
-    [debugLog, estimateTokensForChatMessage, estimateTokensFromText, trimChatHistoryToMaxContext],
-  )
-
-  const chatContextUsage = useMemo<ContextUsageSnapshot | null>(() => {
-    const ai = settings?.ai
-    if (!ai) return null
-
-    const maxContextTokensRaw = ai.maxContextTokens ?? 128000
-    const maxContextTokens = Math.max(2048, Math.trunc(Number.isFinite(maxContextTokensRaw) ? maxContextTokensRaw : 128000))
-
-    const maxTokensRaw = ai.maxTokens ?? 2048
-    const outputReserve = Math.max(512, Math.min(8192, Math.trunc(Number.isFinite(maxTokensRaw) ? maxTokensRaw : 2048)))
-
-    // 如果有 API 返回的真实 usage，优先使用真实值
-    if (lastApiUsage && lastApiUsage.promptTokens > 0) {
-      // 真实的 usedTokens = 上次请求的 prompt_tokens + 上次请求的 completion_tokens
-      // 这代表了当前上下文实际消耗的 token 数
-      const realUsedTokens = lastApiUsage.promptTokens + lastApiUsage.completionTokens
-      return {
-        usedTokens: realUsedTokens,
-        maxContextTokens,
-        outputReserveTokens: outputReserve,
-        systemPromptTokens: 0, // 真实 usage 时这些细分不再需要估算
-        addonTokens: 0,
-        historyTokens: lastApiUsage.promptTokens, // prompt_tokens 包含了 system + history
-        trimmedCount: 0,
-        updatedAt: Date.now(),
-        isRealUsage: true, // 标记这是真实值
-      }
-    }
-
-    // 没有真实 usage 时，使用估算值（发送前预测）
-    const systemPromptTokens = estimateTokensFromText(ai.systemPrompt ?? '')
-    const addonTokens = estimateTokensFromText(systemAddonForUsage ?? '')
-
-    const chatHistory: ChatMessage[] = messages.map((m) => {
-      if (m.role !== 'user') return { role: 'assistant', content: m.content }
-
-      const imgCountFromAttachments = Array.isArray(m.attachments)
-        ? m.attachments.filter((a) => a && typeof a === 'object' && (a as { kind?: unknown }).kind === 'image').length
-        : 0
-
-      if ((m.image || imgCountFromAttachments > 0) && canUseVision) {
-        const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
-        const text = m.content === '[图片]' ? '' : m.content
-        if (text.trim().length > 0) parts.push({ type: 'text', text })
-        if (m.image) {
-          parts.push({ type: 'image_url', image_url: { url: m.image } })
-        } else {
-          const n = Math.max(0, Math.min(4, imgCountFromAttachments))
-          for (let i = 0; i < n; i += 1) parts.push({ type: 'image_url', image_url: { url: 'data:image/png;base64,' } })
-        }
-        return { role: 'user', content: parts }
-      }
-
-      const plain = m.content.trim().length > 0 ? m.content : '[消息]'
-      return { role: 'user', content: plain }
-    })
-
-    // 估算"下一次发送"时会附带的内容：把当前输入（以及待发送图片）也视为会进入上下文
-    const inputText = (input ?? '').trim()
-    const withPending: ChatMessage[] = [...chatHistory]
-    const pendingImageCount = pendingAttachments.filter((a) => a.kind === 'image').length
-    if (inputText || pendingImageCount > 0) {
-      if (pendingImageCount > 0 && canUseVision) {
-        const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
-        if (inputText) parts.push({ type: 'text', text: inputText })
-        const n = Math.max(0, Math.min(4, pendingImageCount))
-        for (let i = 0; i < n; i += 1) parts.push({ type: 'image_url', image_url: { url: 'data:image/png;base64,' } })
-        withPending.push({ role: 'user', content: parts })
-      } else {
-        withPending.push({ role: 'user', content: inputText || '[消息]' })
-      }
-    }
-
-    const trimmed = trimChatHistoryToMaxContext(withPending, systemAddonForUsage)
-    const historyTokens = trimmed.history.reduce((sum, msg) => sum + estimateTokensForChatMessage(msg), 0)
-    return {
-      usedTokens: systemPromptTokens + addonTokens + historyTokens + outputReserve,
-      maxContextTokens,
-      outputReserveTokens: outputReserve,
-      systemPromptTokens,
-      addonTokens,
-      historyTokens,
-      trimmedCount: trimmed.trimmedCount,
-      updatedAt: Date.now(),
-    }
-  }, [
+  const { chatContextUsage, maybeCompressChatHistoryToMaxContext } = useChatContext({
+    api,
     canUseVision,
-    estimateTokensForChatMessage,
-    estimateTokensFromText,
+    debugLog,
+    getActivePersonaId,
     input,
     lastApiUsage,
     messages,
     pendingAttachments,
-    settings?.ai,
-    systemAddonForUsage,
-    trimChatHistoryToMaxContext,
-  ])
+    personaSystemAddon,
+    removeDuplicatedPersonaFromMemoryAddon,
+    retrieveEnabled,
+    settings,
+    settingsRef,
+    setNotice: setError,
+  })
 
-  useEffect(() => {
-    if (!api) return
-    if (!chatContextUsage) return
-    contextUsagePendingRef.current = chatContextUsage
-
-    const flushPending = () => {
-      const pending = contextUsagePendingRef.current
-      if (!pending) return
-      contextUsagePendingRef.current = null
-      contextUsageLastSentAtRef.current = Date.now()
-      try {
-        api.setContextUsage(pending)
-      } catch {
-        /* ignore */
-      }
-    }
-
-    const nowTs = Date.now()
-    const waitMs = 250 - (nowTs - contextUsageLastSentAtRef.current)
-    if (waitMs <= 0) {
-      if (contextUsageSendTimerRef.current != null) {
-        window.clearTimeout(contextUsageSendTimerRef.current)
-        contextUsageSendTimerRef.current = null
-      }
-      flushPending()
-      return
-    }
-
-    if (contextUsageSendTimerRef.current != null) return
-    contextUsageSendTimerRef.current = window.setTimeout(() => {
-      contextUsageSendTimerRef.current = null
-      flushPending()
-    }, waitMs)
-  }, [api, chatContextUsage])
-
-  useEffect(() => {
-    return () => {
-      if (contextUsageSendTimerRef.current != null) {
-        window.clearTimeout(contextUsageSendTimerRef.current)
-        contextUsageSendTimerRef.current = null
-      }
-      contextUsagePendingRef.current = null
-    }
-  }, [])
+  const chatOrbEnabled = settings?.chatUi?.contextOrbEnabled ?? false
+  const chatOrbX = settings?.chatUi?.contextOrbX ?? 6
+  const chatOrbY = settings?.chatUi?.contextOrbY ?? 14
 
   const pickAvatar = useCallback(
     (role: 'user' | 'assistant') => {
@@ -2572,7 +2086,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             .slice(0, -1)
             .map((m) => ({ role: m.role, content: toPlainText(m.content).trim() }))
             .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.length > 0)
-          const preparedHistory = await maybeCompressChatHistoryToMaxContext(aiService, historyForAgent, toolContext, {
+          const preparedHistory = await maybeCompressChatHistoryToMaxContext(historyForAgent, toolContext, {
             signal: abort.signal,
             notify: true,
             reason: 'tool-agent',
@@ -2670,7 +2184,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             content: typeof m.content === 'string' ? m.content : '',
           }))
           const plannerContext = [personaSystemAddon, worldBookAddon, attachmentAddon].filter(Boolean).join('\n\n')
-          const plannerPrepared = await maybeCompressChatHistoryToMaxContext(aiService, plannerHistoryRaw, plannerContext, {
+          const plannerPrepared = await maybeCompressChatHistoryToMaxContext(plannerHistoryRaw, plannerContext, {
             signal: abort.signal,
             notify: true,
             reason: 'planner',
@@ -2817,7 +2331,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                 .join('\n\n')
 
               const historyWithPreface = [...chatHistory, { role: 'assistant' as const, content: assistantMessage.content }]
-              const trimmed = await maybeCompressChatHistoryToMaxContext(aiService, historyWithPreface, mergedSystemAddon, {
+              const trimmed = await maybeCompressChatHistoryToMaxContext(historyWithPreface, mergedSystemAddon, {
                 signal: abort.signal,
                 notify: false,
                 reason: 'task-finalize',
@@ -2878,7 +2392,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       const systemAddon = systemAddonParts.filter(Boolean).join('\n\n')
 
       {
-        const prepared = await maybeCompressChatHistoryToMaxContext(aiService, chatHistory, systemAddon, {
+        const prepared = await maybeCompressChatHistoryToMaxContext(chatHistory, systemAddon, {
           signal: abort.signal,
           notify: true,
           reason: 'chat-send',
@@ -3543,7 +3057,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         }
 
         {
-          const prepared = await maybeCompressChatHistoryToMaxContext(aiService, chatHistory, systemAddon, {
+          const prepared = await maybeCompressChatHistoryToMaxContext(chatHistory, systemAddon, {
             signal: abort.signal,
             notify: true,
             reason: 'chat-regenerate',
