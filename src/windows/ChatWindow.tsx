@@ -3,8 +3,8 @@
 import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolRegistry'
 import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, ContextUsageSnapshot, McpStateSnapshot, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
-import { LocalVideo, MmvectorImagePreview } from '../components/MediaPreviews'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
+import { ChatComposer, type PendingChatAttachment } from './chat/ChatComposer'
 import { ChatMessageBody } from './chat/ChatMessageBody'
 import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
 import { ChatToolUseCard } from './chat/ChatToolUseCard'
@@ -99,27 +99,14 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [sessionContextMenu, setSessionContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [editingMessageContent, setEditingMessageContent] = useState('')
-  type PendingAttachment = {
-    id: string
-    kind: 'image' | 'video'
-    path: string
-    resourceId?: string
-    filename: string
-    previewDataUrl?: string
-  }
-  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
+  const [pendingAttachments, setPendingAttachments] = useState<PendingChatAttachment[]>([])
   // 存储最近一次 API 返回的真实 token usage（用于精确上下文统计）
   const [lastApiUsage, setLastApiUsage] = useState<ChatUsage | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null)
-  const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
-  const composerComposingRef = useRef(false)
   const confirmClearButtonRef = useRef<HTMLButtonElement>(null)
-  const imageInputRef = useRef<HTMLInputElement>(null)
-  const videoInputRef = useRef<HTMLInputElement>(null)
-  const attachmentInputRef = useRef<HTMLInputElement>(null)
   const [ttsSegmentedMessageFlags, setTtsSegmentedMessageFlags] = useState<Record<string, true>>({})
   const [ttsRevealedSegments, setTtsRevealedSegments] = useState<Record<string, number>>({})
   const [ttsPendingUtteranceId, setTtsPendingUtteranceId] = useState<string | null>(null)
@@ -1776,7 +1763,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
   }, [])
 
-  const addPendingAttachment = useCallback((att: Omit<PendingAttachment, 'id'>) => {
+  const addPendingAttachment = useCallback((att: Omit<PendingChatAttachment, 'id'>) => {
     setPendingAttachments((prev) => [...prev, { id: newAttachmentId(), ...att }])
   }, [newAttachmentId])
 
@@ -2463,13 +2450,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     el.style.height = '0px'
     el.style.height = `${el.scrollHeight}px`
   }, [editingMessageId, editingMessageContent])
-
-  useEffect(() => {
-    const el = composerTextareaRef.current
-    if (!el) return
-    el.style.height = '0px'
-    el.style.height = `${Math.min(el.scrollHeight, 152)}px`
-  }, [input])
 
   useEffect(() => {
     if (!confirmClearOpen) return
@@ -3464,13 +3444,16 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     syncAsrComposePreview(inputRef.current)
   }, [currentSessionId, input, settings?.asr?.enabled, settings?.asr?.autoSend, syncAsrComposePreview])
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !composerComposingRef.current) {
-      e.preventDefault()
-      if (isAssistantOutputting) stopAssistantOutput()
-      else send()
-    }
-  }
+  const handleComposerInputChange = useCallback(
+    (next: string) => {
+      inputRef.current = next
+      setInput(next)
+      if ((settingsRef.current?.asr?.enabled ?? false) && !(settingsRef.current?.asr?.autoSend ?? false)) {
+        syncAsrComposePreview(next)
+      }
+    },
+    [syncAsrComposePreview],
+  )
 
   const clearMessages = async () => {
     if (!api) return
@@ -4686,131 +4669,21 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         </div>
       )}
 
-      <footer className="ndp-chat-input">
-        {pendingAttachments.length > 0 ? (
-          <div className="ndp-input-previews" onMouseDown={(e) => e.stopPropagation()}>
-            {pendingAttachments.map((a) => (
-              <div key={a.id} className="ndp-input-preview">
-                {a.kind === 'video' ? (
-                  <LocalVideo api={api} videoPath={a.path} resourceId={a.resourceId} controls={false} muted playsInline preload="metadata" />
-                ) : a.previewDataUrl ? (
-                  <img src={a.previewDataUrl} alt="preview" />
-                ) : (
-                  <MmvectorImagePreview api={api} imagePath={a.path} resourceId={a.resourceId} alt="preview" />
-                )}
-                <div className="ndp-input-preview-meta" title={a.path}>
-                  {a.filename || a.kind}
-                </div>
-                <button className="ndp-preview-remove" onClick={() => removePendingAttachment(a.id)} title="移除">
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        <div className="ndp-chat-input-row">
-          <div className="ndp-chat-menu-anchor ndp-chat-attachment-anchor">
-            <button
-              type="button"
-              className="ndp-chat-icon-button ndp-chat-composer-button"
-              onClick={() => setShowAttachmentMenu((value) => !value)}
-              title="添加附件"
-              aria-label="添加附件"
-              aria-haspopup="menu"
-              aria-expanded={showAttachmentMenu}
-              onMouseDown={(event) => event.stopPropagation()}
-            >
-              ＋
-            </button>
-            {showAttachmentMenu ? (
-              <div className="ndp-chat-popover ndp-chat-attachment-menu" role="menu" aria-label="添加附件">
-                <button type="button" role="menuitem" onClick={() => { setShowAttachmentMenu(false); imageInputRef.current?.click() }}>
-                  图片
-                </button>
-                <button type="button" role="menuitem" onClick={() => { setShowAttachmentMenu(false); videoInputRef.current?.click() }}>
-                  视频
-                </button>
-                <button type="button" role="menuitem" onClick={() => { setShowAttachmentMenu(false); attachmentInputRef.current?.click() }}>
-                  图片或视频
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <textarea
-            ref={composerTextareaRef}
-            value={input}
-            onChange={(e) => {
-              const next = e.target.value
-              inputRef.current = next
-              setInput(next)
-              if ((settingsRef.current?.asr?.enabled ?? false) && !(settingsRef.current?.asr?.autoSend ?? false)) {
-                syncAsrComposePreview(next)
-              }
-            }}
-            onKeyDown={handleKeyDown}
-            onCompositionStart={() => {
-              composerComposingRef.current = true
-            }}
-            onCompositionEnd={() => {
-              composerComposingRef.current = false
-            }}
-            onPaste={(e) => {
-              const dt = e.clipboardData
-              if (!dt) return
-
-              const files = Array.from(dt.files ?? []).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
-              if (files.length > 0) {
-                e.preventDefault()
-                for (const f of files) {
-                  if (f.type.startsWith('image/')) void readChatImageFile(f)
-                  else void readChatVideoFile(f)
-                }
-                return
-              }
-
-              const items = dt.items
-              if (!items) return
-              const mediaItems = Array.from(items).filter((it) => it.type.startsWith('image/') || it.type.startsWith('video/'))
-              if (mediaItems.length === 0) return
-              e.preventDefault()
-              for (const item of mediaItems) {
-                const file = item.getAsFile()
-                if (!file) continue
-                if (file.type.startsWith('image/')) void readChatImageFile(file)
-                else void readChatVideoFile(file)
-              }
-            }}
-            onDrop={(e) => {
-              e.preventDefault()
-              const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
-              if (files.length === 0) {
-                setError('只支持拖拽图片或视频文件')
-                return
-              }
-              for (const file of files) {
-                if (file.type.startsWith('image/')) void readChatImageFile(file)
-                else void readChatVideoFile(file)
-              }
-            }}
-            onDragOver={(e) => e.preventDefault()}
-            placeholder="输入消息"
-            aria-label="消息输入"
-            rows={1}
-          />
-          <button
-            className={`ndp-chat-icon-button ndp-chat-composer-button ${isAssistantOutputting ? 'ndp-btn-stop' : 'ndp-chat-send-button'}`}
-            onClick={() => {
-              if (isAssistantOutputting) stopAssistantOutput()
-              else send()
-            }}
-            disabled={!isAssistantOutputting && !input.trim() && pendingAttachments.length === 0}
-            title={isAssistantOutputting ? '停止当前输出' : '发送'}
-            aria-label={isAssistantOutputting ? '停止当前输出' : '发送'}
-          >
-            <span aria-hidden="true">{isAssistantOutputting ? '■' : '↑'}</span>
-          </button>
-        </div>
-      </footer>
+      <ChatComposer
+        api={api}
+        input={input}
+        pendingAttachments={pendingAttachments}
+        attachmentMenuOpen={showAttachmentMenu}
+        isAssistantOutputting={isAssistantOutputting}
+        onInputChange={handleComposerInputChange}
+        onAttachmentMenuOpenChange={setShowAttachmentMenu}
+        onReadImageFile={readChatImageFile}
+        onReadVideoFile={readChatVideoFile}
+        onRemoveAttachment={removePendingAttachment}
+        onInvalidDrop={setError}
+        onSend={send}
+        onStop={stopAssistantOutput}
+      />
 
       {confirmClearOpen ? (
         <div className="ndp-dialog-backdrop" onMouseDown={() => setConfirmClearOpen(false)}>
@@ -4842,55 +4715,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           </div>
         </div>
       ) : null}
-
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        style={{ display: 'none' }}
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? [])
-          for (const file of files) {
-            if (!file) continue
-            void readChatImageFile(file)
-          }
-          e.currentTarget.value = ''
-        }}
-      />
-
-      <input
-        ref={videoInputRef}
-        type="file"
-        accept="video/*"
-        multiple
-        style={{ display: 'none' }}
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? [])
-          for (const file of files) {
-            if (!file) continue
-            void readChatVideoFile(file)
-          }
-          e.currentTarget.value = ''
-        }}
-      />
-
-      <input
-        ref={attachmentInputRef}
-        type="file"
-        accept="image/*,video/*"
-        multiple
-        style={{ display: 'none' }}
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? [])
-          for (const file of files) {
-            if (!file) continue
-            if (file.type.startsWith('image/')) void readChatImageFile(file)
-            else if (file.type.startsWith('video/')) void readChatVideoFile(file)
-          }
-          e.currentTarget.value = ''
-        }}
-      />
 
       <input
         ref={userAvatarInputRef}

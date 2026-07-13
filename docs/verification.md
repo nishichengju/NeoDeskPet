@@ -288,3 +288,22 @@
 | `git diff --check` | 通过 |
 
 会话重命名截图：`artifacts/ui-baseline/chat-compact-420x560-scale100-session-rename.png`。本批未修改会话持久化结构、IPC 通道、样式 class、preload API 或删除/切换语义；`ChatWindow.tsx` 后续继续拆分 composer。
+
+## P2-1：大型模块拆分与领域边界（第十四批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat composer、媒体选择与待发送附件预览
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 35 个测试文件、131 个用例通过 |
+| composer 测试 | MIME 分类、禁用发送、隐藏 input、附件菜单、媒体预览、移除按钮和停止态通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 通过，Chat 附件/发送所需 preload 权限与五类窗口运行正常 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；真实文件选择、附件预览/移除、多行输入、IME、发送和停止通过 |
+| `git diff --check` | 通过 |
+
+附件预览截图：`artifacts/ui-baseline/chat-compact-420x560-scale100-attachment-preview.png`。本批未修改附件大小限制、持久化结构、ASR 同步规则、发送链路、样式 class、preload API 或 IPC 权限；`ChatWindow.tsx` 后续继续拆分 AI/TTS/ASR hooks。

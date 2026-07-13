@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十三批：Chat 会话列表已拆分）
+- 状态：P2-1 进行中（第十四批：Chat composer 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -654,6 +654,17 @@ AI 与能力
 - 新增 3 个会话列表测试，覆盖关闭态空输出、当前会话/消息计数/活动态、操作按钮可访问名称和受控重命名输入。
 - 紧凑 Chat UI baseline 新增打开会话列表、进入重命名、截图、Enter 提交、名称更新与单次 API 调用断言；连同消息编辑、图片查看器和工具卡共 15 个场景全部通过。
 - `npm test` 共 127 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 composer。
+
+### P2-1 进展记录（2026-07-13，第十四批）
+
+- 将输入框、自动增高、输入法组合态、Enter/Shift+Enter、附件菜单、三类隐藏文件 input、粘贴/拖拽媒体、待发送预览、移除操作和发送/停止按钮迁移到 `src/windows/chat/ChatComposer.tsx`。
+- 将 MIME 类型分类迁移到纯工具 `composerMedia.ts`，并导出 `PendingChatAttachment` 契约；`ChatWindow` 继续持有输入文本、附件数据、ASR compose 同步、文件保存、发送流程和停止任务业务。
+- composer 内部持有 textarea、composition 与文件 input refs，保留 152px 最大高度、IME 防误发、只接受图片/视频、无合法拖拽时错误提示、附件为空时禁用发送以及输出期间切换停止按钮的原语义。
+- 待发送附件移除按钮补充包含文件名的 `aria-label`；附件选择菜单、预览样式和媒体保存路径/API 契约没有改变。
+- `ChatWindow.tsx` 从第十三批后的 5057 行降至 4881 行；相较 Chat 拆分开始时累计减少 755 行。
+- 新增 4 个 composer 测试，覆盖 MIME 分类、空输入禁用发送、隐藏文件 input、附件菜单、图片/视频预览、可访问移除按钮和输出期间停止按钮。
+- 紧凑 Chat UI baseline 通过真实 file chooser 注入 PNG，验证保存后的附件预览、文件名、截图与移除；原有多行输入、IME 防误发、发送和停止任务/TTS 断言继续通过。
+- `npm test` 共 131 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 的 AI/TTS/ASR hooks。
 
 ## 14. P2-2：前端加载与运行性能
 

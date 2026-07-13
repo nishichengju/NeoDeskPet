@@ -200,6 +200,14 @@ function installChatMock(page, options = {}) {
           summary.messageCount = messages.length
           return session
         },
+        saveChatAttachmentFile: async (file, kind, filename) => ({
+          ok: true,
+          kind,
+          path: `C:\\baseline\\${filename || file.name}`,
+          resourceId: `baseline-${kind}-resource`,
+          filename: filename || file.name,
+          mimeType: file.type,
+        }),
         listTasks: async () => ({ items: initialTasks }),
         onTasksChanged: (listener) => {
           tasksListener = listener
@@ -614,7 +622,23 @@ try {
       if (attachmentChoices.map((value) => value.trim()).join(',') !== '图片,视频,图片或视频') {
         failures.push(`chat attachment menu choices are ${attachmentChoices.join(',') || 'missing'}`)
       }
-      await page.keyboard.press('Escape')
+      const fileChooserPromise = page.waitForEvent('filechooser')
+      await attachmentMenu.getByRole('menuitem', { name: '图片', exact: true }).click()
+      const fileChooser = await fileChooserPromise
+      await fileChooser.setFiles({
+        name: 'baseline.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1/8AAAAASUVORK5CYII=', 'base64'),
+      })
+      const attachmentPreview = page.locator('.ndp-input-preview')
+      await attachmentPreview.waitFor({ state: 'visible' })
+      const attachmentPreviewName = (await attachmentPreview.locator('.ndp-input-preview-meta').textContent())?.trim() ?? ''
+      const attachmentPreviewScreenshotPath = path.join(outputDir, `${baseline.name}-attachment-preview.png`)
+      const attachmentPreviewScreenshot = path.relative(projectRoot, attachmentPreviewScreenshotPath)
+      await page.screenshot({ path: attachmentPreviewScreenshotPath })
+      await attachmentPreview.getByRole('button', { name: '移除 baseline.png' }).click()
+      await attachmentPreview.waitFor({ state: 'hidden' })
+      if (attachmentPreviewName !== 'baseline.png') failures.push(`chat attachment preview is ${attachmentPreviewName || 'missing'}`)
 
       const composer = page.getByRole('textbox', { name: '消息输入' })
       await composer.fill('第一行')
@@ -697,6 +721,8 @@ try {
         },
         settingsTargets,
         attachmentChoices,
+        attachmentPreviewName,
+        attachmentPreviewScreenshot,
         multilineValue,
         singleLineHeight,
         multilineHeight,
