@@ -307,3 +307,22 @@
 | `git diff --check` | 通过 |
 
 附件预览截图：`artifacts/ui-baseline/chat-compact-420x560-scale100-attachment-preview.png`。本批未修改附件大小限制、持久化结构、ASR 同步规则、发送链路、样式 class、preload API 或 IPC 权限；`ChatWindow.tsx` 后续继续拆分 AI/TTS/ASR hooks。
+
+## P2-1：大型模块拆分与领域边界（第十五批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat ASR renderer hook、compose preview 与自动发送队列
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 36 个测试文件、136 个用例通过 |
+| ASR 控制器测试 | preview 去重/强制清空、手动追加、无会话排队、FIFO/串行发送、缓存 drain 合并和禁用态通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 五类窗口无运行时错误，ASR compose preview 与 transcript 双向 relay 通过 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；默认与紧凑 Chat 输入区、附件预览无位移、遮挡或溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100-attachment-preview.png`。本批未修改 ASR preload/IPC 协议、Pet 麦克风采集、AI 请求主体、聊天持久化或样式；未连接真实麦克风/OpenTypeless 服务做端到端识别，实际服务兼容性仍由后续人工 ASR 回归矩阵验证。`ChatWindow.tsx` 后续继续拆分 AI/TTS hooks。

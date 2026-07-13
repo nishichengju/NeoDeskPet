@@ -9,6 +9,7 @@ import { ChatMessageBody } from './chat/ChatMessageBody'
 import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
 import { ChatToolUseCard } from './chat/ChatToolUseCard'
 import { ChatSessionList } from './chat/ChatSessionList'
+import { useAsrComposePreview, useChatAsr } from './chat/useChatAsr'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
@@ -125,9 +126,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const aiAbortRef = useRef<AbortController | null>(null)
   const chatStopSeqRef = useRef(0)
   const plannerPendingRef = useRef(false)
-  const pendingAsrAutoSendRef = useRef<string[]>([])
-  const asrAutoSendFlushingRef = useRef(false)
-  const asrComposePreviewLastSigRef = useRef<string>('')
   const bubblePreviewLastSigRef = useRef<string>('')
   const bubblePreviewSendDebugAtRef = useRef(0)
   const tasksRef = useRef<TaskRecord[]>([])
@@ -591,22 +589,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     messagesRef.current = messages
   }, [messages])
 
-  const syncAsrComposePreview = useCallback(
-    (baseText: string, opts?: { clearFinals?: boolean; force?: boolean }) => {
-      if (!api) return
-      const normalizedBase = String(baseText ?? '')
-      const clearFinals = opts?.clearFinals === true
-      const sig = `${clearFinals ? '1' : '0'}\n${normalizedBase}`
-      if (!opts?.force && asrComposePreviewLastSigRef.current === sig) return
-      asrComposePreviewLastSigRef.current = sig
-      try {
-        api.syncAsrComposePreview({ baseText: normalizedBase, ...(clearFinals ? { clearFinals: true } : {}) })
-      } catch {
-        /* ignore */
-      }
-    },
-    [api],
-  )
+  const syncAsrComposePreview = useAsrComposePreview(api)
 
   const sendBubblePreview = useCallback(
     (
@@ -3320,140 +3303,19 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     sendBubblePreview,
   ])
 
-  const flushAsrAutoSendQueue = useCallback(() => {
-    if (!api) return
-    if (!currentSessionId) return
-    if (asrAutoSendFlushingRef.current) return
-
-    const asr = settingsRef.current?.asr
-    if (!asr?.enabled) return
-    if (!asr.autoSend) return
-
-    const pending = pendingAsrAutoSendRef.current
-    if (pending.length === 0) return
-
-    asrAutoSendFlushingRef.current = true
-    const batch = pending.slice(0, pending.length)
-    pendingAsrAutoSendRef.current = []
-
-    void (async () => {
-      try {
-        for (const text of batch) {
-          const cleaned = String(text ?? '').trim()
-          if (!cleaned) continue
-          await send({ text: cleaned, source: 'asr' })
-        }
-      } finally {
-        asrAutoSendFlushingRef.current = false
-      }
-      flushAsrAutoSendQueue()
-    })()
-  }, [api, currentSessionId, send])
-
-  // ASR transcript from pet window: manual mode fills input only; autoSend mode triggers send（chat window 可隐藏）
-  useEffect(() => {
-    if (!api) return
-
-    let cancelled = false
-    let drainingPending = false
-
-    const handleTranscript = (text: string) => {
-      const cleaned = String(text ?? '').trim()
-      if (!cleaned) return
-
-      const asr = settingsRef.current?.asr
-      if (!asr?.enabled) return
-
-      if (asr.autoSend) {
-        if (!currentSessionId) {
-          pendingAsrAutoSendRef.current.push(cleaned)
-          syncAsrComposePreview('', { clearFinals: true })
-          return
-        }
-        syncAsrComposePreview('', { clearFinals: true })
-        void send({ text: cleaned, source: 'asr', baseMessages: messagesRef.current }).then(() => flushAsrAutoSendQueue())
-        return
-      }
-
-      setInput((prev) => {
-        const base = prev.trim()
-        const next = !base ? cleaned : `${prev} ${cleaned}`
-        inputRef.current = next
-        queueMicrotask(() => syncAsrComposePreview(next))
-        return next
-      })
-    }
-
-    const notifyTranscriptReady = () => {
-      try {
-        api.notifyAsrTranscriptReady()
-      } catch {
-        /* ignore */
-      }
-    }
-
-    const drainPendingTranscript = () => {
-      if (drainingPending) return
-      drainingPending = true
-      void (async () => {
-        try {
-          // 告知主进程聊天窗口已可接收实时 transcript，避免文本长期堆积在 pending 队列里。
-          notifyTranscriptReady()
-          const asr = settingsRef.current?.asr
-          if (!asr?.enabled) return
-          const cached = await api.takeAsrTranscript().catch(() => '')
-          if (cancelled) return
-          handleTranscript(cached)
-        } finally {
-          drainingPending = false
-        }
-      })()
-    }
-
-    const off = api.onAsrTranscript(handleTranscript)
-    drainPendingTranscript()
-    const onWindowVisible = () => {
-      notifyTranscriptReady()
-      if (document.visibilityState !== 'visible') return
-      drainPendingTranscript()
-    }
-    window.addEventListener('focus', onWindowVisible)
-    document.addEventListener('visibilitychange', onWindowVisible)
-    return () => {
-      cancelled = true
-      window.removeEventListener('focus', onWindowVisible)
-      document.removeEventListener('visibilitychange', onWindowVisible)
-      off()
-    }
-  }, [api, currentSessionId, flushAsrAutoSendQueue, send, syncAsrComposePreview])
-
-  useEffect(() => {
-    flushAsrAutoSendQueue()
-  }, [flushAsrAutoSendQueue])
-
-  useEffect(() => {
-    const asr = settingsRef.current?.asr
-    if (!asr?.enabled) {
-      syncAsrComposePreview('', { clearFinals: true })
-      return
-    }
-    if (asr.autoSend) {
-      syncAsrComposePreview('', { clearFinals: true })
-      return
-    }
-    syncAsrComposePreview(inputRef.current)
-  }, [currentSessionId, input, settings?.asr?.enabled, settings?.asr?.autoSend, syncAsrComposePreview])
-
-  const handleComposerInputChange = useCallback(
-    (next: string) => {
-      inputRef.current = next
-      setInput(next)
-      if ((settingsRef.current?.asr?.enabled ?? false) && !(settingsRef.current?.asr?.autoSend ?? false)) {
-        syncAsrComposePreview(next)
-      }
-    },
-    [syncAsrComposePreview],
-  )
+  const { handleComposerInputChange } = useChatAsr({
+    api,
+    currentSessionId,
+    input,
+    asrEnabled: settings?.asr?.enabled ?? false,
+    asrAutoSend: settings?.asr?.autoSend ?? false,
+    settingsRef,
+    inputRef,
+    messagesRef,
+    setInput,
+    send,
+    syncComposePreview: syncAsrComposePreview,
+  })
 
   const clearMessages = async () => {
     if (!api) return

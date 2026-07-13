@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十四批：Chat composer 已拆分）
+- 状态：P2-1 进行中（第十五批：Chat ASR hook 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -665,6 +665,16 @@ AI 与能力
 - 新增 4 个 composer 测试，覆盖 MIME 分类、空输入禁用发送、隐藏文件 input、附件菜单、图片/视频预览、可访问移除按钮和输出期间停止按钮。
 - 紧凑 Chat UI baseline 通过真实 file chooser 注入 PNG，验证保存后的附件预览、文件名、截图与移除；原有多行输入、IME 防误发、发送和停止任务/TTS 断言继续通过。
 - `npm test` 共 131 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 的 AI/TTS/ASR hooks。
+
+### P2-1 进展记录（2026-07-13，第十五批）
+
+- 将 Chat renderer 的 ASR compose preview 去重、transcript 就绪握手、pending transcript 提取、手动追加、自动发送排队和窗口 focus/visibility 监听迁移到 `src/windows/chat/useChatAsr.ts`；`ChatWindow` 只保留通用发送业务并向 hook 提供稳定 refs。
+- ASR 监听不再随巨型 `send` 回调和会话切换反复注销/重建，避免旧 effect 已取走主进程缓存 transcript 后因 cleanup 丢弃文本；pending transcript drain 会合并并发调用，仍保留 renderer ready/take transcript 契约。
+- 自动发送统一进入单一 FIFO 队列：无当前会话时保留文本，会话就绪后继续发送；连续识别结果按顺序等待前一轮发送完成，不再因并发调用 `send` 互相中断。ASR 禁用或切到手动模式时队列暂停，不会越过当前设置发送。
+- 手动模式继续把最终识别文本追加到现有输入，composer 手工编辑会同步 Pet 侧 compose base；禁用 ASR、自动发送、手动发送完成和会话变化继续按原语义发送 `clearFinals` 或当前草稿 preview。
+- `ChatWindow.tsx` 从第十四批后的 4881 行降至 4691 行；相较 Chat 拆分开始时累计减少 945 行。
+- 新增 5 个 ASR 控制器测试，覆盖 compose preview 去重/强制清空、手动追加、无会话排队、FIFO 冲刷、发送串行化、pending transcript drain 合并和禁用态忽略输入。
+- `npm test` 共 36 个测试文件、136 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 的 AI/TTS hooks。
 
 ## 14. P2-2：前端加载与运行性能
 
