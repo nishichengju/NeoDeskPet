@@ -44,8 +44,6 @@ import type {
   AIHttpStreamStartPayload,
   AICredentialRef,
   AsrSettings,
-  DisplayMode,
-  OrbUiState,
   McpStateSnapshot,
   ContextUsageSnapshot,
   TaskListResult,
@@ -74,6 +72,7 @@ import { registerTaskIpc } from './ipc/registerTaskIpc'
 import { registerMemoryIpc } from './ipc/registerMemoryIpc'
 import { TtsIpcService } from './ipc/registerTtsIpc'
 import { PresentationIpcService } from './ipc/registerPresentationIpc'
+import { WindowIpcService } from './ipc/registerWindowIpc'
 
 const APP_ID = 'io.github.nishichengju.neodeskpet'
 app.setName('NeoDeskPet')
@@ -196,6 +195,21 @@ const ttsIpc = new TtsIpcService({
   getChatWindow: () => windowManager.getChatWindow(),
   appRoot: process.env.APP_ROOT,
 })
+const windowIpc = new WindowIpcService({
+  windowManager,
+  getSettings,
+  setSettings,
+  settingsNavigationTargets: SETTINGS_NAVIGATION_TARGETS,
+  setPendingSettingsNavigation: (target) => { pendingSettingsNavigationTarget = target },
+  broadcastSettingsChanged,
+  syncManagedAsrApi,
+  syncAsrHotkey,
+  fromWebContents: (webContents) => BrowserWindow.fromWebContents(webContents),
+  getCursorScreenPoint: () => screen.getCursorScreenPoint(),
+  getDisplayWorkArea: (point) => screen.getDisplayNearestPoint(point).workArea,
+  showPetContextMenu: (template, window) => Menu.buildFromTemplate(template).popup({ window }),
+  quitApp: () => app.quit(),
+})
 setWindowManagerInstance(windowManager)
 
 type SettingsSecretInitializationResult = {
@@ -259,108 +273,6 @@ const LIVE2D_MOUSE_POLL_MS = 33
 let live2dMouseTrackingTimer: NodeJS.Timeout | null = null
 let browserControlServicesClosed = false
 let browserControlServicesClosing: Promise<void> | null = null
-
-let orbUiState: OrbUiState = 'ball'
-
-type DragPoint = { x: number; y: number }
-
-type WindowDragSession = {
-  senderId: number
-  win: BrowserWindow
-  isPetWindow: boolean
-  isOrbWindow: boolean
-  lockedWidth: number
-  lockedHeight: number
-  startCursor: DragPoint
-  offsetX: number
-  offsetY: number
-  activated: boolean
-  lastX: number
-  lastY: number
-}
-
-const windowDragSessions = new Map<number, WindowDragSession>()
-
-function parseDragPoint(payload: unknown): DragPoint | null {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
-  const p = payload as Record<string, unknown>
-  const x = typeof p.x === 'number' ? p.x : Number.NaN
-  const y = typeof p.y === 'number' ? p.y : Number.NaN
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-  return { x, y }
-}
-
-function snapOrbToSide(win: BrowserWindow): void {
-  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
-  const wa = display.workArea
-  const b = win.getBounds()
-  const centerX = b.x + b.width / 2
-  const dockLeft = centerX < wa.x + wa.width / 2
-  const margin = 8
-  const x = dockLeft ? wa.x + margin : wa.x + wa.width - b.width - margin
-  const y = Math.max(wa.y + margin, Math.min(b.y, wa.y + wa.height - b.height - margin))
-  win.setBounds({ x, y, width: b.width, height: b.height })
-  windowManager.updateOrbBallBounds()
-}
-
-function cleanupWindowDragSession(session: WindowDragSession, opts?: { snapOrb?: boolean }): void {
-  windowDragSessions.delete(session.senderId)
-
-  if (session.isPetWindow) {
-    windowManager.setPetDragging(false)
-  }
-
-  if (opts?.snapOrb && session.isOrbWindow && session.activated && !session.win.isDestroyed()) {
-    try {
-      snapOrbToSide(session.win)
-    } catch {
-      // ignore
-    }
-  }
-}
-
-function applyWindowDragMove(session: WindowDragSession, cursor: DragPoint): void {
-  if (session.win.isDestroyed()) {
-    cleanupWindowDragSession(session)
-    return
-  }
-
-  // 拖动期间强制锁定窗口尺寸，避免异常 resize 造成“模型越拖越大”。
-  const boundsNow = session.win.getBounds()
-  if (boundsNow.width !== session.lockedWidth || boundsNow.height !== session.lockedHeight) {
-    session.win.setBounds(
-      {
-        x: boundsNow.x,
-        y: boundsNow.y,
-        width: session.lockedWidth,
-        height: session.lockedHeight,
-      },
-      false,
-    )
-  }
-
-  if (!session.activated) {
-    const dx = cursor.x - session.startCursor.x
-    const dy = cursor.y - session.startCursor.y
-    if (dx * dx + dy * dy < 10 * 10) return
-    session.activated = true
-  }
-
-  const nextX = Math.round(cursor.x - session.offsetX)
-  const nextY = Math.round(cursor.y - session.offsetY)
-  if (nextX === session.lastX && nextY === session.lastY) return
-  // 拖动阶段仅更新位置，避免 setBounds 带来的重排与闪烁。
-  session.win.setPosition(nextX, nextY, false)
-  session.lastX = nextX
-  session.lastY = nextY
-}
-
-function broadcastOrbStateChanged(state: OrbUiState): void {
-  for (const win of windowManager.getAllWindows()) {
-    if (win.isDestroyed()) continue
-    win.webContents.send('orb:stateChanged', { state })
-  }
-}
 
 function startLive2dMouseTrackingPump(): void {
   if (live2dMouseTrackingTimer) return
@@ -1039,282 +951,8 @@ function registerIpc() {
     setLive2dCapabilities: setLive2dCapabilitiesFromRenderer,
   }).register()
 
-  handleIpc('window:openChat', () => {
-    windowManager.ensureChatWindow()
-  })
-  handleIpc('window:openSettings', (_event, targetRaw?: unknown) => {
-    const target = typeof targetRaw === 'string' && SETTINGS_NAVIGATION_TARGETS.has(targetRaw as SettingsNavigationTarget)
-      ? (targetRaw as SettingsNavigationTarget)
-      : null
-    if (target) pendingSettingsNavigationTarget = target
-    const existing = windowManager.getSettingsWindow()
-    const win = windowManager.ensureSettingsWindow()
-    if (!target) return
-    if (existing && !win.webContents.isLoadingMainFrame()) win.webContents.send('settings:navigate', target)
-  })
-  handleIpc('window:openMemory', () => {
-    windowManager.ensureMemoryWindow()
-  })
+  windowIpc.register(handleIpc, onIpc)
 
-  // 显示模式切换入口：支持 live2d / orb / hidden。
-  handleIpc('window:setDisplayMode', (_event, modeRaw: unknown) => {
-    const mode = typeof modeRaw === 'string' ? (modeRaw.trim() as DisplayMode) : ''
-    if (mode !== 'live2d' && mode !== 'orb' && mode !== 'hidden') return
-    windowManager.setDisplayMode(mode)
-    if (mode === 'orb') {
-      // 切换到 orb 时同步 Orb UI 状态，避免窗口状态不一致。
-      broadcastOrbStateChanged(orbUiState)
-      windowManager.setOrbUiState(orbUiState, { focus: true, animate: false })
-    }
-    broadcastSettingsChanged()
-  })
-  handleIpc('window:hideAll', () => {
-    windowManager.hideAll()
-  })
-
-  // Close current window (not all windows)
-  handleIpc('window:closeCurrent', (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (win && !win.isDestroyed()) {
-      win.close()
-    }
-  })
-
-  handleIpc('app:quit', () => {
-    app.quit()
-  })
-
-  // =====================
-  // Orb（球/条/面板）IPC
-  // =====================
-
-  handleIpc('orb:getUiState', () => {
-    return { state: orbUiState }
-  })
-
-  handleIpc('orb:setUiState', (_event, stateRaw: unknown, optsRaw: unknown) => {
-    const state = typeof stateRaw === 'string' ? (stateRaw.trim() as OrbUiState) : ''
-    if (state !== 'ball' && state !== 'bar' && state !== 'panel') return { state: orbUiState }
-
-    const opts = optsRaw && typeof optsRaw === 'object' && !Array.isArray(optsRaw)
-      ? (optsRaw as { focus?: unknown; animate?: unknown })
-      : null
-    const focus = opts ? Boolean(opts.focus) : false
-    const animate = opts ? Boolean(opts.animate) : false
-
-    orbUiState = state
-    windowManager.setOrbUiState(state, { focus, animate })
-    broadcastOrbStateChanged(state)
-    return { state }
-  })
-
-  handleIpc('orb:toggleUiState', () => {
-    const next: OrbUiState = orbUiState === 'ball' ? 'bar' : orbUiState === 'bar' ? 'panel' : 'ball'
-    orbUiState = next
-    windowManager.setOrbUiState(next, { focus: true, animate: false })
-    broadcastOrbStateChanged(next)
-    return { state: next }
-  })
-
-  handleIpc('orb:setOverlayBounds', (_event, payload: unknown) => {
-    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null
-    const width = typeof p?.width === 'number' ? p.width : Number.NaN
-    const height = typeof p?.height === 'number' ? p.height : Number.NaN
-    const focus = Boolean(p?.focus)
-    if (!Number.isFinite(width) || !Number.isFinite(height)) return { ok: true }
-    windowManager.setOrbOverlayBounds({ width, height, focus })
-    return { ok: true }
-  })
-
-  handleIpc('orb:clearOverlayBounds', (_event, payload: unknown) => {
-    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : null
-    const focus = Boolean(p?.focus)
-    windowManager.clearOrbOverlayBounds({ focus })
-    return { ok: true }
-  })
-
-  handleIpc('orb:showContextMenu', (_event, point: unknown) => {
-    const p = point && typeof point === 'object' && !Array.isArray(point) ? (point as Record<string, unknown>) : null
-    const x = typeof p?.x === 'number' ? p.x : Number.NaN
-    const y = typeof p?.y === 'number' ? p.y : Number.NaN
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: true }
-    windowManager.showOrbContextMenu({ x, y })
-    return { ok: true }
-  })
-
-  // Window drag support (event-driven): renderer sends start/move/stop with screen coords.
-  onIpc('window:startDrag', (event, payload: unknown) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win || win.isDestroyed()) return
-
-    const senderId = event.sender.id
-    const oldSession = windowDragSessions.get(senderId)
-    if (oldSession) cleanupWindowDragSession(oldSession)
-
-    const parsedCursor = parseDragPoint(payload)
-    const winBounds = win.getBounds()
-    const petWin = windowManager.getPetWindow()
-    const orbWin = windowManager.getOrbWindow()
-    const isPetWindow = Boolean(petWin && petWin.id === win.id)
-    const isOrbWindow = Boolean(orbWin && orbWin.id === win.id)
-    const cursor = parsedCursor ?? screen.getCursorScreenPoint()
-    const lockedWidth = winBounds.width
-    const lockedHeight = winBounds.height
-
-    if (isPetWindow) {
-      windowManager.setPetDragging(true)
-    }
-
-    windowDragSessions.set(senderId, {
-      senderId,
-      win,
-      isPetWindow,
-      isOrbWindow,
-      lockedWidth,
-      lockedHeight,
-      startCursor: { x: cursor.x, y: cursor.y },
-      offsetX: cursor.x - winBounds.x,
-      offsetY: cursor.y - winBounds.y,
-      activated: false,
-      lastX: winBounds.x,
-      lastY: winBounds.y,
-    })
-  })
-
-  onIpc('window:dragMove', (event, payload: unknown) => {
-    const session = windowDragSessions.get(event.sender.id)
-    if (!session) return
-    const cursor = parseDragPoint(payload) ?? screen.getCursorScreenPoint()
-    applyWindowDragMove(session, cursor)
-  })
-
-  onIpc('window:stopDrag', (event, payload: unknown) => {
-    const session = windowDragSessions.get(event.sender.id)
-    if (!session) {
-      const win = BrowserWindow.fromWebContents(event.sender)
-      const petWin = windowManager.getPetWindow()
-      if (win && petWin && win.id === petWin.id) {
-        windowManager.setPetDragging(false)
-      }
-      return
-    }
-
-    const cursor = parseDragPoint(payload)
-    if (cursor) {
-      applyWindowDragMove(session, cursor)
-    }
-
-    if (session.isPetWindow) {
-      try {
-        windowManager.persistPetBoundsNow()
-      } catch {
-        // ignore
-      }
-    }
-
-    cleanupWindowDragSession(session, { snapOrb: true })
-  })
-  // Pet window context menu
-  onIpc('pet:showContextMenu', (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win || win.isDestroyed()) return
-
-    const settings = getSettings()
-    const template: Electron.MenuItemConstructorOptions[] = [
-      {
-        label: '\u6253\u5f00\u804a\u5929',
-        click: () => windowManager.ensureChatWindow(),
-      },
-      {
-        label: '\u8bbe\u7f6e',
-        click: () => windowManager.ensureSettingsWindow(),
-      },
-      {
-        label: '\u5207\u6362\u5230\u60ac\u6d6e\u7403',
-        click: () => {
-          windowManager.setDisplayMode('orb')
-          broadcastSettingsChanged()
-        },
-      },
-      {
-        label: '\u4ec5\u6258\u76d8\u9690\u85cf',
-        click: () => {
-          windowManager.setDisplayMode('hidden')
-          broadcastSettingsChanged()
-        },
-      },
-      { type: 'separator' },
-      {
-        label: '\u7f6e\u9876\u663e\u793a',
-        type: 'checkbox',
-        checked: settings.alwaysOnTop,
-        click: () => {
-          windowManager.setAlwaysOnTop(!settings.alwaysOnTop)
-          broadcastSettingsChanged()
-        },
-      },
-      {
-        label: 'TTS \u8bed\u97f3\u64ad\u62a5',
-        type: 'checkbox',
-        checked: settings.tts?.enabled ?? false,
-        click: () => {
-          const current = getSettings()
-          setSettings({ tts: { ...current.tts, enabled: !current.tts.enabled } })
-          broadcastSettingsChanged()
-        },
-      },
-      {
-        label: '\u8bed\u97f3\u8bc6\u522b\uff08ASR\uff09',
-        type: 'checkbox',
-        checked: settings.asr?.enabled ?? false,
-        click: () => {
-          const current = getSettings()
-          setSettings({ asr: { ...current.asr, enabled: !current.asr.enabled } })
-          void syncManagedAsrApi('menu:toggle-asr')
-          syncAsrHotkey()
-          broadcastSettingsChanged()
-        },
-      },
-      { type: 'separator' },
-      {
-        label: '\u9690\u85cf\u5ba0\u7269',
-        click: () => windowManager.hideAll(),
-      },
-      {
-        label: '\u9000\u51fa',
-        click: () => app.quit(),
-      },
-    ]
-
-    const menu = Menu.buildFromTemplate(template)
-    menu.popup({ window: win })
-  })
-
-  // Pet overlay hover: when a UI overlay (e.g. task panel) needs mouse interaction in click-through mode
-  onIpc('pet:setOverlayHover', (event, hovering: boolean) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    const petWin = windowManager.getPetWindow()
-    if (!win || !petWin) return
-    if (win.id !== petWin.id) return
-    windowManager.setPetOverlayHover(Boolean(hovering))
-  })
-
-  // Pet model hover: 渲染进程对 Live2D 画布做像素级命中检测后上报，
-  // 主进程据此在点击穿透模式下切换 ignoreMouseEvents（事件驱动，无轮询）。
-  onIpc('pet:setModelHover', (event, hovering: boolean) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    const petWin = windowManager.getPetWindow()
-    if (!win || !petWin) return
-    if (win.id !== petWin.id) return
-    windowManager.setPetModelHover(Boolean(hovering))
-  })
-
-  // Dynamic mouse events ignore for transparent click-through
-  onIpc('window:setIgnoreMouseEvents', (event, ignore: boolean, forward: boolean) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win || win.isDestroyed()) return
-    win.setIgnoreMouseEvents(ignore, { forward })
-  })
 }
 
 app.on('second-instance', () => {
@@ -1349,6 +987,7 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   aiHttpProxy.close()
   ttsIpc.close()
+  windowIpc.close()
   void chatAttachmentIpc.close()
   if (live2dMouseTrackingTimer) {
     clearInterval(live2dMouseTrackingTimer)
@@ -1639,8 +1278,7 @@ app.whenReady().then(async () => {
   // 启动后按 displayMode 恢复窗口形态，并在 orb 模式恢复 Orb UI 状态。
   windowManager.applyDisplayMode()
   if (getSettings().displayMode === 'orb') {
-    broadcastOrbStateChanged(orbUiState)
-    windowManager.setOrbUiState(orbUiState, { focus: false, animate: false })
+    windowIpc.syncOrbWindow({ focus: false, animate: false })
   }
   startLive2dMouseTrackingPump()
   createTray(windowManager)

@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第七批：Settings、Chat、Task、Memory、TTS 与 Presentation IPC 已拆分）
+- 状态：P2-1 进行中（第八批：`electron/main.ts` 计划内领域 IPC 拆分完成）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -597,6 +597,15 @@ AI 与能力
 - `electron/main.ts` 从第六批后的 1766 行降至 1661 行；相较 P2-1 开始时累计减少 1082 行。
 - 新增 5 个 Presentation IPC 测试，覆盖 9 通道、Live2D 能力报告、气泡归一化、ASR 排队/清空/就绪直发、错误 sender 和 auto-send 隐藏窗口创建。
 - 打包 IPC smoke 新增 Live2D 表情、气泡消息/preview、ASR compose preview、capabilities 上报和 ASR transcript 双向转发；`npm test` 共 106 个用例通过，其余构建与 smoke 门禁全部通过。
+
+### P2-1 进展记录（2026-07-13，第八批）
+
+- 将 20 个 Window、Orb、Drag 与 Pet 协调通道迁移到 `electron/ipc/registerWindowIpc.ts`，覆盖窗口打开/关闭、显示模式、Orb 状态与 overlay、拖拽、右键菜单、hover 和点击穿透。
+- `WindowIpcService` 集中持有 Orb UI 状态和拖拽会话，保留 10 像素激活阈值、拖动期间尺寸锁定、Pet 边界持久化、Orb 侧边吸附和退出清理；应用启动恢复 Orb 模式时通过同一服务广播并设置窗口状态。
+- 保留窗口 IPC 的 `void` 返回契约，避免 `ensureChatWindow()` / `ensureMemoryWindow()` 返回的 BrowserWindow 被 Electron 尝试序列化；设置深链、非法 Orb 输入和无效拖拽 sender 仍按原语义处理。
+- `electron/main.ts` 从第七批后的 1661 行降至 1299 行；相较 P2-1 开始时累计减少 1444 行，路线图中的 settings/chat/task/memory/tts/window IPC 分域注册目标已完成。
+- 新增 5 个 Window IPC 测试，覆盖 20 通道、窗口/深链、Orb 往返、overlay、拖拽阈值与尺寸锁定、吸附、菜单副作用、hover 身份和 ignore-mouse 参数。
+- 打包 IPC smoke 新增真实 Orb `ball → panel → ball`、overlay 设置/清理与启动 displayMode 接线；`npm test` 共 111 个用例通过，其余构建、媒体和 UI 门禁全部通过。P2-1 下一步进入 `ChatWindow.tsx` 组件与 hooks 拆分。
 
 ## 14. P2-2：前端加载与运行性能
 

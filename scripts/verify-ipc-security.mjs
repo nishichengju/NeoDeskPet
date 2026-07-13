@@ -145,6 +145,20 @@ try {
   }
   await waitForApi(orb, 'orb')
 
+  const orbStateRoundTrip = await orb.evaluate(async () => {
+    const initial = await window.neoDeskPet.getOrbUiState()
+    const panel = await window.neoDeskPet.setOrbUiState('panel', { focus: false, animate: false })
+    const toggled = await window.neoDeskPet.toggleOrbUiState()
+    const overlay = await window.neoDeskPet.setOrbOverlayBounds({ width: 560, height: 320, focus: false })
+    const cleared = await window.neoDeskPet.clearOrbOverlayBounds({ focus: false })
+    const final = await window.neoDeskPet.getOrbUiState()
+    return { initial, panel, toggled, overlay, cleared, final }
+  })
+  assert(orbStateRoundTrip.initial.state === 'ball', 'Orb initial UI state was not ball')
+  assert(orbStateRoundTrip.panel.state === 'panel', 'Orb panel state update failed')
+  assert(orbStateRoundTrip.toggled.state === 'ball' && orbStateRoundTrip.final.state === 'ball', 'Orb state toggle failed')
+  assert(orbStateRoundTrip.overlay.ok && orbStateRoundTrip.cleared.ok, 'Orb overlay bounds round trip failed')
+
   const defaultWindowSizes = {
     chat: await windowSize(chat),
     settings: await windowSize(settings),
@@ -681,6 +695,7 @@ try {
     keys,
     windowSizes: {
       defaults: defaultWindowSizes,
+      orbStateRoundTrip,
     },
     settingsNavigation: {
       onCreate: settingsNavigationOnCreate?.trim() ?? '',

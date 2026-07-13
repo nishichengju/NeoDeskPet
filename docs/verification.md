@@ -174,3 +174,22 @@
 | `git diff --check` | 通过 |
 
 本批未修改 renderer、preload API、IPC 权限矩阵、ASR 设置或 Live2D 数据契约。P2-1 下一批继续拆分 Window/Orb/Drag/Pet 菜单与点击穿透协调逻辑。
+
+## P2-1：大型模块拆分与领域边界（第八批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Window、Orb、Drag 与 Pet 协调 IPC
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 29 个测试文件、111 个用例通过 |
+| Window IPC 行为测试 | 20 通道、void 返回、深链、Orb、overlay、拖拽阈值/尺寸锁定/吸附、菜单与 hover 身份通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | Orb `ball → panel → ball`、overlay 设置/清理、displayMode、深链与五类窗口运行通过 |
+| `npm run media:smoke` | 路径拒绝、opaque URL、Range 206 与删除后 404 通过 |
+| `npm run ui:baseline` | 13 个场景通过，Orb ball/bar/panel 布局保持正常 |
+| `git diff --check` | 通过 |
+
+本批未修改 renderer、preload API、IPC 权限矩阵、WindowManager 行为或设置结构。`electron/main.ts` 计划内的 settings/chat/task/memory/tts/window 分域注册已完成；P2-1 后续按路线图进入 `ChatWindow.tsx`、`taskService.ts`、`memoryService.ts` 与 `OrbApp.tsx` 拆分。
