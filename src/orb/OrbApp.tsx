@@ -22,6 +22,7 @@ import {
   normalizeInterleavedTextSegment,
 } from '../utils/chatMessages'
 import { OrbBallView } from './OrbBallView'
+import { OrbBarView, type OrbPendingAttachment } from './OrbBarView'
 import { OrbImagePreview, OrbLocalVideo, ToolUseDuration } from './OrbMessageMedia'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
@@ -114,17 +115,9 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     dockSideRef.current = dockSide
   }, [dockSide])
 
-  type PendingAttachment = {
-    id: string
-    kind: 'image' | 'video'
-    path: string
-    resourceId?: string
-    filename: string
-    previewDataUrl?: string
-  }
   type ImageViewerRequestItem = { source: string; title?: string }
   type ImageViewerItem = { src: string; title: string }
-  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
+  const [pendingAttachments, setPendingAttachments] = useState<OrbPendingAttachment[]>([])
   const [imageViewer, setImageViewer] = useState<{ open: boolean; items: ImageViewerItem[]; index: number; scale: number }>({
     open: false,
     items: [],
@@ -132,7 +125,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     scale: 1,
   })
   const imageViewerReqRef = useRef(0)
-  const pendingAttachmentsRef = useRef<PendingAttachment[]>([])
+  const pendingAttachmentsRef = useRef<OrbPendingAttachment[]>([])
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments
   }, [pendingAttachments])
@@ -229,7 +222,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
   }, [])
 
   const addPendingAttachment = useCallback(
-    (att: Omit<PendingAttachment, 'id'>) => {
+    (att: Omit<OrbPendingAttachment, 'id'>) => {
       setPendingAttachments((prev) => [...prev, { id: newAttachmentId(), ...att }])
     },
     [newAttachmentId],
@@ -1001,7 +994,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     [api, setOverlayDataset],
   )
 
-  const onSend = useCallback(async (opts?: { text?: string; attachments?: PendingAttachment[]; seedMessages?: ChatMessageRecord[] }) => {
+  const onSend = useCallback(async (opts?: { text?: string; attachments?: OrbPendingAttachment[]; seedMessages?: ChatMessageRecord[] }) => {
     if (Array.isArray(opts?.seedMessages)) {
       panelMessagesRef.current = opts.seedMessages
       setPanelMessages(opts.seedMessages)
@@ -1506,7 +1499,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
               ...(userMsg.videoPath ? [{ kind: 'video' as const, path: userMsg.videoPath }] : []),
             ]
 
-      const resendAttachments: PendingAttachment[] = resendAttachmentsRaw
+      const resendAttachments: OrbPendingAttachment[] = resendAttachmentsRaw
         .map((a) => {
           const kind = (a as { kind?: unknown }).kind === 'video' ? ('video' as const) : ('image' as const)
           const path = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
@@ -1524,7 +1517,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
             filename: filename || (kind === 'video' ? 'video.mp4' : 'image.png'),
           }
         })
-        .filter((a): a is PendingAttachment => !!a)
+        .filter((a): a is OrbPendingAttachment => !!a)
 
       await onSend({ text: resendText, attachments: resendAttachments, seedMessages: baseMessages })
     },
@@ -2060,6 +2053,46 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     return panelMessages.find((m) => m.id === id) ?? null
   }, [messageMenu?.messageId, panelMessages])
 
+  const startNewConversation = useCallback(() => {
+    void (async () => {
+      const personaId = activePersonaIdRef.current?.trim() || 'default'
+      const session = await api?.createChatSession(undefined, personaId).catch(() => null)
+      if (session?.id) setCurrentSessionId(session.id)
+      void refreshSessions().catch(() => undefined)
+      setPanelSession(null)
+      setPanelMessages([])
+      setPanelError(null)
+      openBar()
+      closePopover()
+    })().catch((error) => console.error(error))
+  }, [api, closePopover, openBar, refreshSessions])
+
+  const toggleHistoryFromBar = useCallback(
+    (anchorCenterX: number) => {
+      if (popover?.kind === 'history') {
+        closePopover()
+        return
+      }
+      if (mode !== 'panel') {
+        openPanel()
+        window.setTimeout(() => openHistoryPopover(anchorCenterX), 120)
+        return
+      }
+      openHistoryPopover(anchorCenterX)
+    },
+    [closePopover, mode, openHistoryPopover, openPanel, popover?.kind],
+  )
+
+  const addBarMediaFiles = useCallback(
+    (files: File[]) => {
+      for (const file of files) {
+        if (file.type.startsWith('image/')) void readChatImageFile(file)
+        else if (file.type.startsWith('video/')) void readChatVideoFile(file)
+      }
+    },
+    [readChatImageFile, readChatVideoFile],
+  )
+
   if (renderMode === 'ball') {
     return (
       <div
@@ -2103,159 +2136,23 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       <div className="ndp-orbapp-shell">
         <div className="ndp-orbapp-shell-skin" aria-hidden="true"></div>
         <div className="ndp-orbapp-shell-main">
-        <div className="ndp-orbapp-bar-frame">
-          <div className="ndp-orbapp-bar-pill" aria-hidden="true">
-            <div className="ndp-orbapp-ball-icon"></div>
-          </div>
-          <div className="ndp-orbapp-bar" title="输入栏" onMouseDown={onBarMouseDown} onMouseUp={(e) => onBarMouseUp(e)}>
-            <div className="ndp-orbapp-bar-left" data-orb-nodrag="true">
-              <button
-                className="ndp-orbapp-btn"
-                onClick={() => {
-                  void (async () => {
-                    const pid = activePersonaIdRef.current?.trim() || 'default'
-                  const s = await api?.createChatSession(undefined, pid).catch(() => null)
-                  if (s?.id) setCurrentSessionId(s.id)
-                  void refreshSessions().catch(() => undefined)
-                  setPanelSession(null)
-                  setPanelMessages([])
-                  setPanelError(null)
-                  openBar()
-                  closePopover()
-                })().catch((err) => console.error(err))
-              }}
-              title="新对话"
-            >
-              ＋
-            </button>
-              <button
-                className="ndp-orbapp-btn"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (popover?.kind === 'history') {
-                    closePopover()
-                    return
-                  }
-                  const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect()
-                  const anchorX = rect.left + rect.width / 2
-                  if (mode !== 'panel') {
-                    openPanel()
-                    window.setTimeout(() => openHistoryPopover(anchorX), 120)
-                    return
-                  }
-                  openHistoryPopover(anchorX)
-                }}
-                title="历史对话"
-                data-orb-noclose="true"
-              >
-                🕒
-              </button>
-
-              {pendingAttachments.length > 0 ? (
-                <div className="ndp-orbapp-pending" data-orb-nodrag="true" title={`已添加附件：${pendingAttachments.length}个`}>
-                  {pendingAttachments.slice(0, 3).map((a) => {
-                    const label = a.filename || a.kind
-                    return (
-                      <button
-                        key={a.id}
-                        type="button"
-                        className="ndp-orbapp-pending-item"
-                        onClick={() => removePendingAttachment(a.id)}
-                        title={`移除${label}`}
-                      >
-                        {a.kind === 'video' ? (
-                          <span className="ndp-orbapp-pending-video">🎞</span>
-                        ) : a.previewDataUrl ? (
-                          <img className="ndp-orbapp-pending-img" src={a.previewDataUrl} alt={label} />
-                        ) : (
-                          <OrbImagePreview
-                            api={api}
-                            className="ndp-orbapp-pending-img"
-                            imagePath={a.path}
-                            resourceId={a.resourceId}
-                            alt={label}
-                          />
-                        )}
-                        <span className="ndp-orbapp-pending-x">×</span>
-                      </button>
-                    )
-                  })}
-                  {pendingAttachments.length > 3 ? <span className="ndp-orbapp-pending-more">+{pendingAttachments.length - 3}</span> : null}
-                </div>
-              ) : null}
-            </div>
-
-          <input
-            ref={inputRef}
-            className="ndp-orbapp-input"
-            data-orb-nodrag="true"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onPaste={(e) => {
-              const dt = e.clipboardData
-              if (!dt) return
-
-              const files = Array.from(dt.files ?? []).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
-              if (files.length > 0) {
-                e.preventDefault()
-                for (const f of files) {
-                  if (f.type.startsWith('image/')) void readChatImageFile(f)
-                  else void readChatVideoFile(f)
-                }
-                return
-              }
-
-              const items = dt.items
-              if (!items) return
-              const mediaItems = Array.from(items).filter((it) => it.type.startsWith('image/') || it.type.startsWith('video/'))
-              if (mediaItems.length === 0) return
-              e.preventDefault()
-              for (const item of mediaItems) {
-                const file = item.getAsFile()
-                if (!file) continue
-                if (file.type.startsWith('image/')) void readChatImageFile(file)
-                else void readChatVideoFile(file)
-              }
-            }}
-            onDrop={(e) => {
-              e.preventDefault()
-              const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/'))
-              if (files.length === 0) {
-                setPanelError('只支持拖拽图片或视频文件')
-                return
-              }
-              for (const file of files) {
-                if (file.type.startsWith('image/')) void readChatImageFile(file)
-                else void readChatVideoFile(file)
-              }
-            }}
-            onDragOver={(e) => e.preventDefault()}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                if (e.repeat) return
-                if (e.nativeEvent.isComposing) return
-                e.preventDefault()
-                void onSend()
-              }
-              if (e.key === 'Escape') {
-                openBall()
-              }
-            }}
-            placeholder="描述任务需求（可拖拽图片/视频或粘贴截图）"
+          <OrbBarView
+            api={api}
+            inputRef={inputRef}
+            input={input}
+            pendingAttachments={pendingAttachments}
+            sending={sending}
+            onBarMouseDown={onBarMouseDown}
+            onBarMouseUp={onBarMouseUp}
+            onNewConversation={startNewConversation}
+            onToggleHistory={toggleHistoryFromBar}
+            onRemoveAttachment={removePendingAttachment}
+            onInputChange={setInput}
+            onMediaFiles={addBarMediaFiles}
+            onInvalidDrop={() => setPanelError('只支持拖拽图片或视频文件')}
+            onSubmit={() => void onSend()}
+            onClose={openBall}
           />
-
-          <div className="ndp-orbapp-bar-right" data-orb-nodrag="true">
-            <button
-              className="ndp-orbapp-send"
-              onClick={() => void onSend()}
-              disabled={!input.trim() && pendingAttachments.length === 0 && !sending}
-              title={sending ? '点击取消' : '发送'}
-            >
-              ▶
-            </button>
-          </div>
-        </div>
-      </div>
 
       {renderMode === 'panel' ? (
         <div className="ndp-orbpanel">

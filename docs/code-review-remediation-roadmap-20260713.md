@@ -927,6 +927,14 @@ AI 与能力
 - UI baseline 将 Orb mock 归一为可配置 state，并新增 `orb-ball-80x80-scale100.png`；基线从 15 增至 16 个场景，Ball 与 Panel 均无横向/纵向溢出、console error 或 failure，Ball 截图经人工检查无视觉回归。
 - `npm test` 共 72 个测试文件、320 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 16 个 UI baseline 场景均通过。下一批继续拆分 Bar 输入/附件展示边界，再进入 Panel 消息列表。
 
+第四十四批进展（2026-07-14）：
+
+- 新增 `src/orb/OrbBarView.tsx`，抽离 Bar 外壳、新对话/历史按钮、待发送附件前三项与 `+N`、输入框、发送/取消按钮，以及 paste/drop/Enter/Escape 的 DOM 事件适配；会话创建、历史 popover 状态、附件文件读取、错误状态和发送状态机继续由 `OrbApp` 编排。
+- 将待发送附件契约提升为 `OrbPendingAttachment`，聊天发送、用户消息重发和 Bar 预览复用同一类型；历史按钮只向父层回传锚点中心坐标，媒体事件只回传过滤后的图片/视频 `File[]`，没有把主进程 API 或会话状态下沉到视图组件。
+- 新增 3 个 Bar 视图测试，覆盖四附件时前三项/`+1`/发送可用状态、历史锚点、Enter 提交、Escape 收起、图片视频过滤与非法拖放提示委托；`OrbApp.tsx` 从 2534 行降至 2431 行，原 class、文案、placeholder、附件移除和发送取消语义保持不变。
+- UI baseline 新增 `orb-bar-560x80-scale100.png`，Ball/Bar/Panel 三种 Orb 形态现在均有独立场景；基线从 16 增至 17 个场景，三种 Orb 尺寸均无横向/纵向溢出、console error 或 failure，Bar 截图经人工检查无视觉回归。
+- `npm test` 共 73 个测试文件、323 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 17 个 UI baseline 场景均通过。下一批进入 Panel header、空状态、消息列表与行内编辑边界。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

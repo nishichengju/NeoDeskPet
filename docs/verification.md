@@ -906,3 +906,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/orb-ball-80x80-scale100.png` 与 `artifacts/ui-baseline/orb-panel-560x720-scale100.png`。本批未修改 CSS、Orb 点击/拖拽阈值、dock side 判断、ball/bar/panel 状态迁移、主进程原生菜单实现或窗口尺寸；删除的两份自绘菜单 JSX 没有任何可达的状态写入，真实右键仍通过 `showOrbContextMenu` 闭环。服务端静态渲染测试验证 Ball DOM 和坐标适配，打包 IPC smoke 验证真实 Orb 状态往返，浏览器基线验证 80×80 小视口布局。当前自动化尚未模拟真实操作系统窗口上的长距离拖拽、多屏边界与不同 DPI 吸附位置；Bar 输入/附件、Panel 消息列表、历史 popover、图片查看器和消息菜单仍留在 `OrbApp`，下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第四十四批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Orb Bar 外壳、待发送附件、输入 DOM 事件与发送按钮
+
+| 检查 | 结果 |
+| --- | --- |
+| Orb Bar 视图测试 | 3 个用例通过：附件前三项/`+N`/发送状态、历史锚点与 Enter/Escape、拖放媒体过滤与非法类型委托 |
+| `npm test` | 73 个测试文件、323 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功；renderer 主 chunk 约 1.409 MB |
+| `npm run ipc:smoke` | Orb ball/panel/ball 状态往返、真实聊天/附件/任务/Memory/Agent/MCP/TTS/ASR 与重启路径全部通过，所有窗口 runtimeErrors 为空 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 17 个场景通过；新增 `orb-bar-560x80-scale100`，Ball/Bar/Panel 均为 0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/orb-bar-560x80-scale100.png` 与 `artifacts/ui-baseline/orb-panel-560x720-scale100.png`。本批未修改 Bar CSS、输入 placeholder、附件上限/存储结构、文件保存 API、发送取消条件、Enter/IME 门禁、Escape 收起、会话创建或历史 popover 时序。聚焦测试直接调用视图事件适配器验证锚点、键盘和拖放委托，媒体 smoke 继续验证生产附件保存与 URL 安全边界，独立 Bar 基线验证 560×80 窗口没有裁剪。当前自动化未在真实 Electron 输入框中注入操作系统剪贴板图片、拖拽超大视频或验证 IME 组合输入全过程；Panel 消息列表、工具卡、附件列表、历史 popover、图片查看器和消息操作仍留在 `OrbApp`，下一批继续拆分。
