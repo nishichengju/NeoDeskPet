@@ -19,14 +19,13 @@ import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
 import {
   buildToolResultBlock,
-  hasToolRequestMarker,
   TaskAgentToolCatalog,
 } from './task/taskAgentTools'
 import { TaskAgentConversation } from './task/taskAgentConversation'
+import { TaskAgentLoopRunner } from './task/taskAgentLoopRunner'
 import {
   buildAgentEndpoint,
   buildAgentHeaders,
-  isAbortLikeError,
 } from './task/taskAgentLlmProtocol'
 import { TaskAgentLlmClient } from './task/taskAgentLlmClient'
 import {
@@ -1025,8 +1024,7 @@ export class TaskService {
       return null
     }
 
-    const modeRaw = normalizeMode(obj?.mode) ?? normalizeMode(orch?.toolCallingMode) ?? 'text'
-    const mode: 'auto' | 'native' | 'text' = modeRaw
+    const mode: 'auto' | 'native' | 'text' = normalizeMode(obj?.mode) ?? normalizeMode(orch?.toolCallingMode) ?? 'text'
 
     // 桌宠“人设/语气”只允许来自 AI 设置里的 systemPrompt；agent.run 不允许覆盖 system（避免多处人设割裂）
     const system = typeof settings.ai.systemPrompt === 'string' ? settings.ai.systemPrompt.trim() : ''
@@ -1787,141 +1785,7 @@ export class TaskService {
       return { done: true, text: finalize(decision.text) }
     }
 
-    const runNative = async (): Promise<string> => {
-      for (let turn = 0; turn < maxTurns; turn += 1) {
-        await this.waitIfPaused(task.id)
-        if (rt.canceled) throw new Error('canceled')
-
-        pushLog(`[Agent] turn ${turn + 1}/${maxTurns}`)
-        let turnRaw = ''
-        const applyTurnDraft = conversation.beginTurn('native')
-
-        const { contentText, toolCalls, assistantMsgRaw } = await llmClient.callNative({
-          onDelta: (delta) => {
-            if (rt.canceled) throw new Error('canceled')
-            turnRaw += delta
-            if (applyTurnDraft(turnRaw)) updateProgress()
-          },
-        })
-        messages.push(assistantMsgRaw)
-        if (applyTurnDraft(contentText)) updateProgress(true)
-
-        if (!toolCalls.length) {
-          if (hasToolRequestMarker(contentText)) {
-            throw new Error('native response used text TOOL_REQUEST protocol without tool_calls')
-          }
-          pushLog('[Agent] done', true)
-          const fin = tryFinalizeOrContinue(contentText, turn)
-          if (fin.done) return fin.text
-          continue
-        }
-
-        pushLog(`[Agent] tool_calls: ${toolCalls.map((c) => c.function.name).join(', ')}`)
-        const pendingVisionMessages: Array<Record<string, unknown>> = []
-
-        for (const call of toolCalls) {
-          await this.waitIfPaused(task.id)
-          if (rt.canceled) throw new Error('canceled')
-
-          const result = await toolSession.executeNative(call)
-          messages.push({
-            role: 'tool',
-            tool_call_id: call.id,
-            name: call.function.name,
-            content: result.toolMessage,
-          })
-          if (result.visionParts.length > 0) {
-            pendingVisionMessages.push({
-              role: 'user',
-              content: [{ type: 'text', text: result.toolMessage }, ...result.visionParts],
-            })
-          }
-        }
-        if (pendingVisionMessages.length > 0) messages.push(...pendingVisionMessages)
-      }
-
-      pushLog('[Agent] reach maxTurns, stop', true)
-      return finalize('已达到最大回合，停止执行（可能需要你补充信息或换一种说法）。')
-    }
-
-    const runText = async (): Promise<string> => {
-      const guide = toolCatalog.buildTextModeGuide(settings.novelai?.promptRules)
-      const userIdx = messages.findIndex((m) => m.role === 'user')
-      if (userIdx > 0) messages.splice(userIdx, 0, { role: 'system', content: guide })
-      else messages.push({ role: 'system', content: guide })
-
-      for (let turn = 0; turn < maxTurns; turn += 1) {
-        await this.waitIfPaused(task.id)
-        if (rt.canceled) throw new Error('canceled')
-
-        pushLog(`[Agent] turn ${turn + 1}/${maxTurns}`)
-        let turnRaw = ''
-        const applyTurnDraft = conversation.beginTurn('text')
-
-        const { contentText, assistantMsgRaw, usage } = await llmClient.callText({
-          stopOnToolRequest: true,
-          onDelta: (delta) => {
-            if (rt.canceled) throw new Error('canceled')
-            turnRaw += delta
-            if (applyTurnDraft(turnRaw)) updateProgress()
-          },
-        })
-        messages.push(assistantMsgRaw)
-
-        conversation.addUsage(usage)
-
-        const { cleaned, calls } = toolCatalog.parseTextRequests(contentText)
-        if (applyTurnDraft(cleaned)) updateProgress(true)
-        if (!calls.length) {
-          pushLog('[Agent] done', true)
-          const fin = tryFinalizeOrContinue(cleaned, turn)
-          if (fin.done) return fin.text
-          continue
-        }
-
-        pushLog(`[Agent] tool_requests: ${calls.map((c) => c.toolName).join(', ')}`)
-
-        for (const c of calls) {
-          await this.waitIfPaused(task.id)
-          if (rt.canceled) throw new Error('canceled')
-
-          const result = await toolSession.executeText(c.toolName, c.input ?? {})
-          const toolResultBlock = buildToolResultBlock(c.toolName, result.toolMessage)
-          if (result.visionParts.length > 0) {
-            messages.push({
-              role: 'user',
-              content: [{ type: 'text', text: toolResultBlock }, ...result.visionParts],
-            })
-          } else {
-            messages.push({ role: 'user', content: toolResultBlock })
-          }
-        }
-      }
-
-      pushLog('[Agent] reach maxTurns, stop', true)
-      return finalize('已达到最大回合，停止执行（可能需要你补充信息或换一种说法）。')
-    }
-
-    if (apiMode === 'claude') {
-      if (mode !== 'text') pushLog('[Agent] Claude Messages API uses text tool protocol for compatibility', true)
-      return runText()
-    }
-    if (mode === 'text') return runText()
-    if (mode === 'native') return runNative()
-
-    try {
-      return await runNative()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (rt.canceled || isAbortLikeError(err) || /^cancell?ed$/i.test(msg.trim())) {
-        throw err
-      }
-      // 自适应：auto 模式下若检测到 thought_signature/thoughtSignature 兼容错误，则本次回退到 text（不修改用户设置）
-      if (modeRaw === 'auto' && /thought[_ ]?signature/i.test(msg)) {
-        pushLog('[Agent] auto detected native tools incompatibility, fallback to text', true)
-      }
-      pushLog(`[Agent] native tools failed, fallback to text: ${clampText(msg, 240)}`, true)
-
+    const prepareTextFallback = async () => {
       messages.splice(0, messages.length)
       messages.push({ role: 'system', content: system })
       if (extraContext) messages.push({ role: 'system', content: extraContext })
@@ -1975,9 +1839,27 @@ export class TaskService {
           messages.push({ role: 'user', content: buildToolResultBlock(r.toolName, toolMsg) })
         }
       }
-
-      return runText()
     }
+
+    const loopRunner = new TaskAgentLoopRunner({
+      apiMode,
+      mode,
+      maxTurns,
+      messages,
+      textGuide: toolCatalog.buildTextModeGuide(settings.novelai?.promptRules),
+      llmClient,
+      toolCatalog,
+      toolSession,
+      conversation,
+      waitIfPaused: () => this.waitIfPaused(task.id),
+      isCanceled: () => rt.canceled,
+      pushLog,
+      updateProgress,
+      tryFinalize: tryFinalizeOrContinue,
+      finalize,
+      prepareTextFallback,
+    })
+    return loopRunner.run()
   }
 
   private async runTask(id: string): Promise<void> {

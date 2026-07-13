@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二十五批：Task Agent 会话状态与最终回复策略已拆分）
+- 状态：P2-1 进行中（第二十六批：Task Agent 多轮循环与 auto fallback 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -764,6 +764,15 @@ AI 与能力
 - `taskService.ts` 从第二十四批后的 2243 行降至 2123 行；新增 7 个会话测试，覆盖 Live2D 标签清洗、跨 chunk/跨轮草稿、文本工具块隐藏、usage 累加、虚假操作/内部名拒绝、URL 证据与末轮净化，以及空最终答复回退草稿。
 - 打包 IPC smoke 继续验证文本/native 工具第二轮往返和最终答复持久化，并确认 Claude 分段 usage 经会话累加后仍落盘为 3/4/7；Windows unpacked、媒体 smoke 和 15 个 UI baseline 场景无回归。
 - `npm test` 共 46 个测试文件、202 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 均通过。下一批继续抽取 native/text 多轮循环、消息追加和 auto native→text fallback 编排。
+
+### P2-1 进展记录（2026-07-13，第二十六批）
+
+- 新增 `electron/task/taskAgentLoopRunner.ts`，集中管理 Claude/text/native 模式选择、每轮暂停/取消门禁、流式草稿回调、assistant/tool/user 消息追加、文本/native 工具结果往返、视觉 parts 注入、usage 交付、最大回合停止和 auto native→text fallback。
+- `TaskService` 通过回调保留 fallback 消息重建：重新注入 system/额外上下文、Live2D、视觉目录、外挂观察与 Skills，并把已执行工具按原顺序重放为文本 `TOOL_RESULT`；runner 负责在 native 兼容错误后先完成该回调，再启动文本轮次。
+- 新增 5 个 runner 测试，覆盖 native `role=tool` 第二轮、文本工具/视觉 parts/usage、Claude 强制文本协议、`thought_signature` auto fallback 顺序，以及任务已取消时不调用模型也不进入 fallback。
+- 打包 IPC smoke 新增真实 auto fallback 路径：第 1 次 native 请求返回 `delay.sleep`，第 2 次携带 `role=tool` 后收到模拟 400 `thought_signature` 错误，第 3 次文本请求必须包含重放的 `TOOL_RESULT` 才返回最终答复；全程仅生成 1 条成功 toolRun，证明外部副作用未重复执行。
+- `taskService.ts` 从第二十五批后的 2123 行降至 2005 行；Task IPC、任务 store/schema、工具定义、最大回合、视觉路由、消息角色和最终输出契约保持不变。
+- `npm test` 共 47 个测试文件、207 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Agent 视觉上下文、主/外挂路由和视觉恢复消息编排。
 
 ## 14. P2-2：前端加载与运行性能
 

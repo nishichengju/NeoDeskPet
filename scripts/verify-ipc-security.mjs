@@ -48,6 +48,7 @@ const aiServer = http.createServer(async (request, response) => {
   const hasNativeToolResult = Array.isArray(body.messages) && body.messages.some((message) => message?.role === 'tool')
   const isClaudeAgent = body.model === 'ipc-agent-claude-smoke'
   const isNativeAgent = body.model === 'ipc-agent-native-smoke'
+  const isAutoFallbackAgent = body.model === 'ipc-agent-auto-fallback-smoke'
   const recordedRequest = {
     path: request.url,
     authMatches: isClaudeAgent
@@ -63,7 +64,10 @@ const aiServer = http.createServer(async (request, response) => {
       Array.isArray(body.messages) &&
       body.messages.every((message) => message?.role === 'user' || message?.role === 'assistant'),
     nativePayloadMatches:
-      isNativeAgent && Array.isArray(body.tools) && body.tools.length > 0 && body.tool_choice === 'auto',
+      (isNativeAgent || isAutoFallbackAgent) &&
+      Array.isArray(body.tools) &&
+      body.tools.length > 0 &&
+      body.tool_choice === 'auto',
   }
   aiRequests.push(recordedRequest)
 
@@ -72,6 +76,13 @@ const aiServer = http.createServer(async (request, response) => {
     recordedRequest.simulatedStatus = 503
     response.writeHead(503, { 'Content-Type': 'application/json' })
     response.end(JSON.stringify({ error: { message: 'temporary agent smoke failure' } }))
+    return
+  }
+
+  if (isAutoFallbackAgent && recordedRequest.nativePayloadMatches && hasNativeToolResult) {
+    recordedRequest.simulatedStatus = 400
+    response.writeHead(400, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ error: { message: 'thought_signature is required for native tool continuation' } }))
     return
   }
 
@@ -130,6 +141,30 @@ const aiServer = http.createServer(async (request, response) => {
       response.end(frames.slice(splitAt))
       return
     }
+    if (isAutoFallbackAgent && recordedRequest.nativePayloadMatches) {
+      const payloads = [
+        {
+          choices: [
+            {
+              delta: {
+                role: 'assistant',
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'auto-fallback-smoke-call',
+                    type: 'function',
+                    function: { name: 'ndp_delay_sleep', arguments: '{"ms":1}' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ]
+      const frames = `${payloads.map((payload) => `data: ${JSON.stringify(payload)}\n\n`).join('')}data: [DONE]\n\n`
+      response.end(frames)
+      return
+    }
     const content =
       body.model === 'ipc-agent-smoke'
         ? hasAgentToolResult
@@ -140,7 +175,9 @@ const aiServer = http.createServer(async (request, response) => {
               'input_json:「始」{"ms":1}「末」',
               '<<<[END_TOOL_REQUEST]>>>',
             ].join('\n')
-        : '代理'
+        : isAutoFallbackAgent && hasAgentToolResult
+          ? 'Auto fallback smoke complete.'
+          : '代理'
     const frames = `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`
     const splitAt = Math.max(1, Math.floor(frames.length / 2))
     response.write(frames.slice(0, splitAt))
@@ -745,6 +782,61 @@ try {
   )
   assert(taskAgentNative.dismissed?.ok, 'agent native task cleanup failed')
 
+  await settings.evaluate(() =>
+    window.neoDeskPet.setAISettings({ model: 'ipc-agent-auto-fallback-smoke', apiMode: 'openai-compatible' }),
+  )
+  const taskAgentAutoFallback = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Agent Auto Fallback Task',
+      steps: [
+        {
+          title: 'Run native then fallback to text',
+          tool: 'agent.run',
+          input: JSON.stringify({ request: 'Run the fallback smoke delay tool, then finish.', mode: 'auto', maxTurns: 3 }),
+        },
+      ],
+    })
+    const deadline = Date.now() + 15_000
+    let completed = null
+    while (Date.now() < deadline) {
+      completed = await window.neoDeskPet.getTask(created.id)
+      if (completed && ['done', 'failed', 'canceled'].includes(completed.status)) break
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    }
+    const dismissed = await window.neoDeskPet.dismissTask(created.id)
+    return { taskId: created.id, completed, dismissed }
+  })
+  const taskAgentAutoFallbackRequests = aiRequests.filter(
+    (request) => request.model === 'ipc-agent-auto-fallback-smoke',
+  )
+  assert(
+    taskAgentAutoFallback.completed?.status === 'done',
+    `agent auto fallback task failed: ${taskAgentAutoFallback.completed?.lastError ?? 'missing'}`,
+  )
+  assert(
+    taskAgentAutoFallback.completed?.steps[0]?.output === 'Auto fallback smoke complete.',
+    'agent auto fallback final output was not persisted',
+  )
+  assert(
+    taskAgentAutoFallback.completed?.toolRuns?.filter(
+      (run) => run.toolName === 'delay.sleep' && run.status === 'done',
+    ).length === 1,
+    'agent auto fallback did not preserve the single native tool execution',
+  )
+  assert(
+    taskAgentAutoFallbackRequests.length === 3 &&
+      taskAgentAutoFallbackRequests[0]?.nativePayloadMatches === true &&
+      taskAgentAutoFallbackRequests[0]?.hasNativeToolResult === false &&
+      taskAgentAutoFallbackRequests[1]?.nativePayloadMatches === true &&
+      taskAgentAutoFallbackRequests[1]?.hasNativeToolResult === true &&
+      taskAgentAutoFallbackRequests[1]?.simulatedStatus === 400 &&
+      taskAgentAutoFallbackRequests[2]?.nativePayloadMatches === false &&
+      taskAgentAutoFallbackRequests[2]?.hasAgentToolResult === true,
+    'agent auto fallback did not replay the completed native tool result into text mode',
+  )
+  assert(taskAgentAutoFallback.dismissed?.ok, 'agent auto fallback task cleanup failed')
+
   await settings.evaluate(() => window.neoDeskPet.setAISettings({ model: 'ipc-agent-claude-smoke', apiMode: 'claude' }))
   const taskAgentClaude = await chat.evaluate(async () => {
     const created = await window.neoDeskPet.createTask({
@@ -1076,6 +1168,16 @@ try {
       payloadMatches: taskAgentNativeRequests.every((request) => request.nativePayloadMatches),
       resultRoundTrip: taskAgentNativeRequests[1]?.hasNativeToolResult === true,
       cleanup: taskAgentNative.dismissed?.ok === true,
+    },
+    taskAgentAutoFallback: {
+      status: taskAgentAutoFallback.completed?.status,
+      output: taskAgentAutoFallback.completed?.steps[0]?.output,
+      toolRuns: taskAgentAutoFallback.completed?.toolRuns,
+      requestCount: taskAgentAutoFallbackRequests.length,
+      nativeResultRoundTrip: taskAgentAutoFallbackRequests[1]?.hasNativeToolResult === true,
+      fallbackStatus: taskAgentAutoFallbackRequests[1]?.simulatedStatus,
+      textResultReplay: taskAgentAutoFallbackRequests[2]?.hasAgentToolResult === true,
+      cleanup: taskAgentAutoFallback.dismissed?.ok === true,
     },
     taskAgentClaude: {
       status: taskAgentClaude.completed?.status,

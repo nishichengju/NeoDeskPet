@@ -523,3 +523,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 Task IPC、任务 store/schema、工具定义、模型配置、最大回合、视觉路由、消息角色或界面样式。会话测试直接覆盖草稿锚定、工具协议隐藏、Live2D 元数据、usage 与最终回复防幻觉规则；打包 smoke 覆盖正常最终答复和 Claude usage 持久化，但未让可控 provider 故意输出内部工具名、虚假执行声明或未验证 URL，也未触发最大回合净化，相关异常分支目前由纯状态测试证明，后续循环拆分将把 provider 级失败/重答场景纳入集成回归。
+
+## P2-1：大型模块拆分与领域边界（第二十六批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task Agent native/text 多轮循环、消息追加、取消门禁与 auto fallback
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 47 个测试文件、207 个用例通过 |
+| Agent 循环 runner 测试 | 5 个用例通过：native role=tool 第二轮、文本工具/视觉 parts/usage、Claude 强制文本、thought_signature fallback 顺序、已取消任务不请求模型/不 fallback |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | 既有 text/native/Claude 路径通过；新增 auto 路径依次验证 native tool call、role=tool 后模拟 400、文本 TOOL_RESULT 重放，3 次请求且 `delay.sleep` 只执行一次 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 Task IPC、任务 store/schema、工具定义、模型配置、最大回合、视觉路由决策或界面样式。runner 单测覆盖模式选择、消息顺序、视觉 parts、usage、取消和 fallback 时序；扩展后的打包 smoke 进一步证明 native 已完成工具结果会在兼容失败后按文本协议重放，且不会重复执行工具。尚未在 auto fallback 场景中同时附带主模型图片、外挂视觉观察或多个工具结果，这些视觉/多结果组合将在下一批视觉会话拆分时扩大覆盖。
