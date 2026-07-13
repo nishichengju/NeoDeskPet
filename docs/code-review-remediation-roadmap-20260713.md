@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十一批：Chat 工具运行卡已拆分）
+- 状态：P2-1 进行中（第十二批：Chat 消息主体已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -634,6 +634,16 @@ AI 与能力
 - 新增 4 个工具卡测试，覆盖 mmvector 纯 JSON/日志包裹解析、`runId` 精确选择、Agent 外壳过滤、生成图片安全筛选、多模态图片/视频结果和旧步骤失败兜底。
 - UI baseline 新增工具卡浏览器场景，实际加载带 `runId` 的消息、展开卡片、验证输入/输出详情和无横向溢出，并保存展开态截图；同时将既有深层设置搜索从固定延迟改为状态条件等待，基线场景由 14 个增加到 15 个。
 - `npm test` 共 120 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 `ChatMessageItem` 消息主体。
+
+### P2-1 进展记录（2026-07-13，第十二批）
+
+- 将单条消息的头像、普通气泡、分段 TTS 气泡、Markdown/status/tool block 顺序、行内编辑器和附件/overlay 插槽迁移到 `src/windows/chat/ChatMessageBody.tsx`。
+- `ChatMessageItem` 继续负责附件 URL 到 ImageViewer item 的解析、任务查找与 ToolUse 卡组合；消息主体不接触会话状态、持久化 API 或任务更新，保持现有 block 与编辑保存契约。
+- 分段模式继续按 `revealCount` 截取可见段、清理尾逗号并只把附件放在最后一个可见气泡；存在工具 block 或编辑态时仍回到普通单气泡布局，零可见段继续不渲染消息与 overlay。
+- `ChatWindow.tsx` 从第十一批后的 5221 行降至 5106 行；相较 Chat 拆分开始时累计减少 530 行。
+- 新增 4 个消息主体测试，覆盖 Markdown/status/tool block 顺序、助手 fallback/头像/overlay、用户编辑态隐藏原内容与附件、分段增量揭示及零段空输出。
+- 既有紧凑 Chat UI baseline 增加真实用户消息右键编辑流程，验证编辑器初值、编辑态截图与保存后文本更新；连同图片查看器和工具卡场景共 15 个基线场景全部通过。
+- `npm test` 共 124 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分会话列表与 composer。
 
 ## 14. P2-2：前端加载与运行性能
 

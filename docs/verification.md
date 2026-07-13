@@ -250,3 +250,22 @@
 | `git diff --check` | 通过 |
 
 工具卡展开态截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改任务持久化结构、消息 block 契约、样式 class、preload API 或 IPC 权限；`ChatWindow.tsx` 后续继续拆分消息主体、会话列表与 composer。
+
+## P2-1：大型模块拆分与领域边界（第十二批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 消息主体、分段气泡与行内编辑态
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 33 个测试文件、124 个用例通过 |
+| 消息主体测试 | block 顺序、Markdown/status/tool、fallback、头像、overlay、编辑态和分段揭示通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 通过，Chat 与五类窗口无运行时错误，IPC/持久化/转发契约正常 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；用户消息右键编辑、初值、保存更新、图片查看器和工具卡通过 |
+| `git diff --check` | 通过 |
+
+消息编辑态截图：`artifacts/ui-baseline/chat-compact-420x560-scale100-message-edit.png`。本批未修改消息持久化结构、block 契约、TTS 分段算法、样式 class、preload API 或 IPC 权限；`ChatWindow.tsx` 后续继续拆分会话列表与 composer。

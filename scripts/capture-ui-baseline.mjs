@@ -619,6 +619,23 @@ try {
       await page.locator('.ndp-msg-row').first().waitFor({ state: 'visible' })
       await page.getByRole('button', { name: '发送' }).waitFor({ state: 'visible' })
 
+      const userMessageRow = page.locator('.ndp-msg-row-user').last()
+      await userMessageRow.click({ button: 'right' })
+      const messageMenu = page.locator('.ndp-context-menu')
+      await messageMenu.getByRole('button', { name: /编辑/ }).click()
+      const inlineEditor = page.locator('.ndp-inline-textarea')
+      await inlineEditor.waitFor({ state: 'visible' })
+      const editOriginalValue = await inlineEditor.inputValue()
+      const editScreenshotPath = path.join(outputDir, `${baseline.name}-message-edit.png`)
+      const editScreenshot = path.relative(projectRoot, editScreenshotPath)
+      await page.screenshot({ path: editScreenshotPath })
+      await inlineEditor.fill('编辑后的消息')
+      await page.getByRole('button', { name: '保存', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('.ndp-msg-row-user')?.textContent?.includes('编辑后的消息'))
+      const editSavedText = (await userMessageRow.textContent())?.trim() ?? ''
+      if (editOriginalValue !== '发送测试') failures.push(`chat inline editor opened with ${JSON.stringify(editOriginalValue)}`)
+      if (!editSavedText.includes('编辑后的消息')) failures.push(`chat inline editor saved ${editSavedText || 'nothing'}`)
+
       await page.getByRole('button', { name: '更多' }).click()
       await page.getByRole('menuitem', { name: '清空当前对话' }).click()
       const clearDialog = page.getByRole('dialog', { name: '清空当前对话' })
@@ -647,6 +664,7 @@ try {
         multilineHeight,
         composingValue,
         stopState,
+        editState: { originalValue: editOriginalValue, savedText: editSavedText, screenshot: editScreenshot },
         clearCount,
         clearDialogScreenshot,
       }

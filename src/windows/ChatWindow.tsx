@@ -3,9 +3,9 @@
 import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolRegistry'
 import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, ContextUsageSnapshot, McpStateSnapshot, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
-import { MarkdownMessage } from '../components/MarkdownMessage'
 import { LocalVideo, MmvectorImagePreview } from '../components/MediaPreviews'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
+import { ChatMessageBody } from './chat/ChatMessageBody'
 import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
 import { ChatToolUseCard } from './chat/ChatToolUseCard'
 import { parseModelMetadata } from '../live2d/live2dModels'
@@ -17,7 +17,7 @@ import { createStreamFlushThrottle, extractLastLive2DTags, extractLive2DTags, ex
 import { buildPlannerSystemPrompt, parsePlannerDecision, requestLikelyNeedsToolAction } from '../utils/planner'
 import { buildToolResultSystemAddon, buildWorldBookAddon } from '../utils/promptAddons'
 import { clampIntValue } from '../utils/settingsHelpers'
-import { countStableTtsSegments, trimTrailingCommaForSegment } from '../utils/ttsText'
+import { countStableTtsSegments } from '../utils/ttsText'
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 
 const TASK_TOOL_VISION_NAMES = new Set(['image.generate', 'screen.capture', 'browser.screenshot'])
@@ -5053,169 +5053,54 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
     [api],
   )
 
+  const renderToolUseNode = (taskId: string, runId?: string): React.ReactNode => (
+    <ChatToolUseCard
+      task={tasksById.get(taskId) ?? null}
+      runId={runId}
+      api={api}
+      messageId={m.id}
+      onOpenImageViewer={openImageViewer}
+      onRerollImageGenerate={onRerollImageGenerate}
+    />
+  )
 
-          const renderToolUseNode = (taskId: string, runId?: string): React.ReactNode => (
-            <ChatToolUseCard
-              task={tasksById.get(taskId) ?? null}
-              runId={runId}
-              api={api}
-              messageId={m.id}
-              onOpenImageViewer={openImageViewer}
-              onRerollImageGenerate={onRerollImageGenerate}
-            />
-          )
+  const blocks = !isUser ? normalizeMessageBlocks(m) : []
+  const hasToolBlock = !isUser && blocks.some((block) => block.type === 'tool_use')
+  const attachmentsNode = (
+    <ChatMessageAttachments
+      message={m}
+      api={api}
+      hidden={hasToolBlock}
+      onOpenImageViewer={openImageViewer}
+    />
+  )
+  const imageViewerNode = imageViewer ? (
+    <ImageViewer
+      items={imageViewer.items}
+      index={imageViewer.index}
+      onIndexChange={(index) => setImageViewer((previous) => (previous ? { ...previous, index } : previous))}
+      onClose={() => setImageViewer(null)}
+    />
+  ) : null
 
-          const blocks = !isUser ? normalizeMessageBlocks(m) : []
-          const hasToolBlock = !isUser && blocks.some((b) => b.type === 'tool_use')
-
-          const attachmentsNode = (
-            <ChatMessageAttachments
-              message={m}
-              api={api}
-              hidden={hasToolBlock}
-              onOpenImageViewer={openImageViewer}
-            />
-          )
-
-          const imageViewerNode = imageViewer ? (
-            <ImageViewer
-              items={imageViewer.items}
-              index={imageViewer.index}
-              onIndexChange={(index) => setImageViewer((prev) => (prev ? { ...prev, index } : prev))}
-              onClose={() => setImageViewer(null)}
-            />
-          ) : null
-
-          if (segmentedActive && !hasToolBlock && !isEditing) {
-            const segments = splitTextIntoTtsSegments(m.content, { lang: 'zh', textSplitMethod: 'cut5' })
-            const effectiveReveal = typeof revealCount === 'number' ? revealCount : segments.length
-            const visible = segments.slice(0, Math.max(0, Math.min(segments.length, effectiveReveal)))
-            if (visible.length === 0) return null
-
-            return (
-              <>
-                <div
-                  key={m.id}
-                  className="ndp-msg-row ndp-msg-row-pet"
-                  onContextMenu={(e) => onContextMenu(e, m.id)}
-                  title={new Date(m.createdAt).toLocaleString()}
-                >
-                <div className="ndp-avatar ndp-avatar-clickable" onClick={() => onPickAvatar('assistant')} title="点击更换头像">
-                  {avatar ? <img src={avatar} alt="assistant" /> : <span>宠</span>}
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {visible.map((seg, i) => {
-                    const displaySeg = trimTrailingCommaForSegment(seg)
-                    const isLast = i === visible.length - 1
-                    return (
-                        <div key={`${m.id}-${i}`} className="ndp-msg ndp-msg-pet">
-                          <div className="ndp-msg-content">
-                            {displaySeg}
-                            {isLast ? (
-                              <>
-                                {attachmentsNode}
-                              </>
-                            ) : null}
-                          </div>
-                        </div>
-                      )
-                    })}
-                </div>
-                </div>
-                {imageViewerNode}
-              </>
-            )
-          }
-
-          return (
-            <>
-              <div
-                key={m.id}
-                className={`ndp-msg-row ${isUser ? 'ndp-msg-row-user' : 'ndp-msg-row-pet'}`}
-                onContextMenu={(e) => onContextMenu(e, m.id)}
-                title={new Date(m.createdAt).toLocaleString()}
-              >
-              {!isUser ? (
-                <div className="ndp-avatar ndp-avatar-clickable" onClick={() => onPickAvatar('assistant')} title="点击更换头像">
-                  {avatar ? <img src={avatar} alt="assistant" /> : <span>宠</span>}
-                </div>
-              ) : null}
-
-              <div className={`ndp-msg ndp-msg-${isUser ? 'user' : 'pet'}`}>
-                {isEditing ? (
-                  <div className="ndp-msg-edit">
-                    <textarea
-                      ref={editingTextareaRef}
-                      className="ndp-inline-textarea"
-                      value={editingContent}
-                      rows={1}
-                      onChange={(e) => onEditingContentChange(e.target.value)}
-                      onInput={(e) => {
-                        const el = e.currentTarget
-                        el.style.height = '0px'
-                        el.style.height = `${el.scrollHeight}px`
-                      }}
-                    />
-                    <div className="ndp-msg-edit-actions">
-                      <button className="ndp-btn" onClick={onSaveEdit}>
-                        保存
-                      </button>
-                      <button className="ndp-btn" onClick={onCancelEdit}>
-                        取消
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="ndp-msg-content">
-                    {isUser
-                      ? m.content
-                      : blocks.length === 0
-                        ? (() => {
-                            const text = normalizeInterleavedTextSegment(String(m.content ?? ''))
-                            return text ? <MarkdownMessage text={text} /> : null
-                          })()
-                        : (() => {
-                          let toolSeen = 0
-                          let statusSeen = 0
-                          let textSeen = 0
-                          return blocks.map((b) => {
-                          if (b.type === 'text') {
-                            const text = normalizeInterleavedTextSegment(String(b.text ?? ''))
-                            if (!text) return null
-                            const key = `${m.id}-text-${toolSeen}-${textSeen++}`
-                            return <MarkdownMessage key={key} text={text} />
-                          }
-                          if (b.type === 'status') {
-                            const text = String(b.text ?? '').trim()
-                            if (!text) return null
-                            return (
-                              <div key={`${m.id}-status-${statusSeen++}`} className="ndp-muted">
-                                {text}
-                              </div>
-                            )
-                          }
-                          if (b.type === 'tool_use') {
-                            const rid = (b as { runId?: string }).runId
-                            const key = rid?.trim() ? `${m.id}-tool-${rid}` : `${m.id}-tool-${b.taskId}-${toolSeen}`
-                            toolSeen += 1
-                            return <div key={key}>{renderToolUseNode(b.taskId, rid)}</div>
-                          }
-                          return null
-                        })
-                        })()}
-                    {attachmentsNode}
-                  </div>
-                )}
-              </div>
-
-              {isUser ? (
-                <div className="ndp-avatar ndp-avatar-clickable" onClick={() => onPickAvatar('user')} title="点击更换头像">
-                  {avatar ? <img src={avatar} alt="user" /> : <span>我</span>}
-                </div>
-              ) : null}
-              </div>
-              {imageViewerNode}
-            </>
-          )
+  return (
+    <ChatMessageBody
+      message={m}
+      blocks={blocks}
+      avatar={avatar}
+      segmentedActive={segmentedActive}
+      revealCount={revealCount}
+      isEditing={isEditing}
+      editingContent={editingContent}
+      editingTextareaRef={editingTextareaRef}
+      attachments={attachmentsNode}
+      overlay={imageViewerNode}
+      renderToolUse={renderToolUseNode}
+      onEditingContentChange={onEditingContentChange}
+      onSaveEdit={onSaveEdit}
+      onCancelEdit={onCancelEdit}
+      onContextMenu={onContextMenu}
+      onPickAvatar={onPickAvatar}
+    />
+  )
 })
