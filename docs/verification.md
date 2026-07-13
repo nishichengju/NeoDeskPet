@@ -690,3 +690,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-min-640x500-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、记忆业务字段含义、召回排序、保留策略、向量计算或界面样式。系统 Node 24 与仓库当前 Electron `better-sqlite3` 的 native ABI 不同，因此普通单测通过可注入构造器使用 Node 内置 SQLite 验证 schema 语义，不在 `npm test` 中执行昂贵 native 重建；Windows unpacked 打包和 IPC smoke 则使用生产 `better-sqlite3` 覆盖真实旧库迁移。尚未对极大旧库测量首次 FTS rebuild 时长，也未模拟迁移中途磁盘写满或损坏数据库；向量 worker、embedding 队列和混合召回仍留在 `MemoryService`，由下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第三十四批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory embeddings 配置/HTTP/归一化/LRU 与 vector worker 请求/超时/重启生命周期
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 59 个测试文件、268 个用例通过 |
+| Memory Embedding 客户端测试 | 3 个用例通过：主/自定义配置与 endpoint、批内去重/LRU/鉴权/body、乱序 index、provider 错误和全零向量拒绝 |
+| Memory Vector worker 客户端测试 | 4 个用例通过：懒启动/复用/并发 response id、worker error 后 pending 拒绝与重启、25ms 超时重建、close 与同步 `postMessage` 失败清理 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，主进程构建包含独立 `dist-electron/vectorSearchWorker.js`，`better-sqlite3` native 依赖重建与品牌元数据写入成功 |
+| `npm run ipc:smoke` | 旧库迁移继续通过；新增真实向量路径 attempted=true、hits=1、两次查询均返回预置记忆、相同查询 embeddings API 仅请求 1 次、`memory-vector` secret 鉴权正确；既有 Agent/MCP/媒体/任务路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；无 console error、无横向溢出，Memory 900x720 截图无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、记忆 schema、向量模型设置含义、worker SQL/余弦评分、混合召回权重或界面样式。单元测试通过注入 fetch/worker 覆盖异常和生命周期，打包 smoke 则使用真实 Electron worker、生产 `better-sqlite3`、旧库 embedding BLOB 与加密自定义向量密钥证明端到端召回；重复查询只命中一次 API 直接验证共享 LRU 生效。尚未连接真实云端 embedding provider 测量限流、超时和超大批次，也未对十万级 embedding 扫描做耗时基线；索引维护候选、tag/KG 写入与混合召回编排仍留在 `MemoryService`，由下一批继续拆分。

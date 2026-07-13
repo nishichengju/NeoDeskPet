@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十三批：Memory SQLite 生命周期与兼容迁移已拆分）
+- 状态：P2-1 进行中（第三十四批：Memory Embedding 客户端与向量 Worker 生命周期已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -836,6 +836,16 @@ AI 与能力
 - 新增 5 个数据库生命周期测试，使用 Node 24 内置 SQLite 适配器覆盖全新数据库、旧列迁移/回填/索引顺序、幂等与触发器刷新、旧 KG 实体 FTS 回填，以及初始化失败清理；运行时仍使用 Electron ABI 对应的 `better-sqlite3`，避免把 native ABI 重建塞入普通单测。
 - 打包 IPC smoke 会在应用启动前写入真实旧版 SQLite schema，再通过 renderer IPC 断言 persona 保留、`updated_at` 回填、安全默认列、FTS 命中和召回正文；这条路径使用 Windows unpacked 应用内真实 `better-sqlite3`，补足单测适配器与生产 native 驱动之间的差异。
 - `memoryService.ts` 从 3445 行降至 3150 行；`npm test` 共 57 个测试文件、261 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 向量 worker、embedding 生命周期与检索编排边界。
+
+### P2-1 进展记录（2026-07-14，第三十四批）
+
+- 新增 `electron/memory/memoryEmbeddingClient.ts`，统一主/自定义 AI 配置选择、embeddings endpoint 归一化、文本归一化与 SHA-1 内容哈希、响应索引校验、Float32 单位向量转换、OpenAI-compatible 错误解析和最多 1200 项的 LRU 缓存。
+- 同一批次的重复文本按“模型 + 归一化正文”去重后只请求一次 embeddings API；召回、向量去重、即时补索引和后台维护现在共用同一客户端与缓存，重复查询不再绕过缓存。全零、维度过小、数量或索引异常的 provider 响应会明确失败，不再被当作有效向量写入。
+- 新增 `electron/memory/memoryVectorSearchClient.ts`，集中管理 worker 懒启动、数据库路径、请求序号、15 秒超时、响应路由、worker error/exit、关闭与 pending 清理；修复 `postMessage` 同步失败时 Promise 已拒绝但 pending/timer 仍可能残留的问题，worker 级故障后下一次检索会按需重建实例。
+- `MemoryService` 仅保留 embedding 数据库读写、候选选择、去重和混合召回接线；后台向量维护与查询向量生成删除重复 HTTP/归一化实现，`memoryService.ts` 从第三十三批后的 3150 行降至 2915 行，设置字段、SQLite schema、IPC 契约、worker 评分和最终排序公式未改变。
+- 新增 3 个 Embedding 客户端测试和 4 个 Vector worker 客户端测试，覆盖主/自定义配置、endpoint、批内去重、LRU 复用、乱序 index、provider/零向量错误、worker 复用、并发响应、崩溃重启、超时、关闭和同步发送失败清理。
+- 打包 IPC smoke 在旧库中预置与查询无词面重合的 8 维 embedding，通过加密的 `memory-vector` secret 调用本地 embeddings API，再由打包后的 worker 扫描真实 `better-sqlite3`：向量层 attempted=true、hits=1、两次召回均返回目标记忆、查询 API 请求仅 1 次且鉴权正确。
+- `npm test` 共 59 个测试文件、268 个用例通过；TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 索引维护候选/持久化与混合召回编排边界。
 
 ## 14. P2-2：前端加载与运行性能
 

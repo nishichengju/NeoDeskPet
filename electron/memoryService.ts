@@ -1,8 +1,11 @@
-import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { Worker } from 'node:worker_threads'
 import { openMemoryDatabase, type MemoryDatabaseHandle } from './memory/memoryDatabase'
-import type { VectorSearchHit, VectorSearchResponse } from './vectorSearchWorker'
+import {
+  MemoryEmbeddingClient,
+  hashMemoryEmbeddingInput,
+  resolveMemoryEmbeddingConfig,
+} from './memory/memoryEmbeddingClient'
+import { MemoryVectorSearchClient } from './memory/memoryVectorSearchClient'
 import type {
   AISettings,
   MemoryDeleteArgs,
@@ -127,20 +130,6 @@ function normalizeMemoryText(text: string): string {
     .trim()
     .replace(/\s+/g, ' ')
     .trim()
-}
-
-function buildEmbeddingsEndpoint(baseUrl: string): string {
-  const raw = (baseUrl ?? '').trim()
-  if (!raw) return '/embeddings'
-  let b = raw.replace(/\/+$/, '')
-  // 一些用户会把 baseUrl 直接填成 “…/v1/embeddings”，这里兜底纠正为 “…/v1”
-  b = b.replace(/\/embeddings$/i, '')
-  return `${b}/embeddings`
-}
-
-function hashEmbeddingInput(model: string, text: string): string {
-  const normalized = normalizeMemoryText(text)
-  return createHash('sha1').update(`${model}\n${normalized}`).digest('hex')
 }
 
 function normalizeEntityKey(textRaw: string): string {
@@ -389,87 +378,22 @@ function formatTs(ts: number): string {
 
 export class MemoryService {
   private db: MemoryDatabaseHandle
-  private dbPath: string
   private pendingTagRowids = new Set<number>()
   private pendingEmbeddingRowids = new Set<number>()
   private pendingKgRowids = new Set<number>()
-  private embeddingCache = new Map<string, Float32Array>()
+  private embeddingClient = new MemoryEmbeddingClient()
   private chatIngestRedirect = new Map<string, number>()
-  private vectorWorker: Worker | null = null
-  private vectorWorkerSeq = 0
-  private vectorWorkerPending = new Map<
-    number,
-    { resolve: (hits: VectorSearchHit[]) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
-  >()
+  private vectorSearchClient: MemoryVectorSearchClient
 
   constructor(userDataDir: string) {
     const opened = openMemoryDatabase(userDataDir)
     this.db = opened.db
-    this.dbPath = opened.dbPath
+    this.vectorSearchClient = new MemoryVectorSearchClient(opened.dbPath)
   }
 
   close(): void {
-    this.disposeVectorWorker(new Error('memory service closed'))
+    this.vectorSearchClient.close()
     this.db.close()
-  }
-
-  private disposeVectorWorker(reason: Error): void {
-    const worker = this.vectorWorker
-    this.vectorWorker = null
-    for (const pending of this.vectorWorkerPending.values()) {
-      clearTimeout(pending.timer)
-      pending.reject(reason)
-    }
-    this.vectorWorkerPending.clear()
-    if (worker) void worker.terminate()
-  }
-
-  private getVectorWorker(): Worker {
-    if (this.vectorWorker) return this.vectorWorker
-    const worker = new Worker(path.join(__dirname, 'vectorSearchWorker.js'), {
-      workerData: { dbPath: this.dbPath },
-    })
-    // 空闲 worker 不阻止应用退出
-    worker.unref()
-    worker.on('message', (msg: VectorSearchResponse) => {
-      const pending = this.vectorWorkerPending.get(msg.id)
-      if (!pending) return
-      this.vectorWorkerPending.delete(msg.id)
-      clearTimeout(pending.timer)
-      if ('error' in msg) pending.reject(new Error(msg.error))
-      else pending.resolve(msg.hits)
-    })
-    worker.on('error', (err) => {
-      if (this.vectorWorker === worker) this.disposeVectorWorker(err instanceof Error ? err : new Error(String(err)))
-    })
-    worker.on('exit', (code) => {
-      if (this.vectorWorker === worker) this.disposeVectorWorker(new Error(`vector worker exited (code ${code})`))
-    })
-    this.vectorWorker = worker
-    return worker
-  }
-
-  private vectorSearchInWorker(args: {
-    model: string
-    personaId: string
-    includeShared: boolean
-    scanLimit: number
-    minScore: number
-    topK: number
-    query: Float32Array
-  }): Promise<VectorSearchHit[]> {
-    const worker = this.getVectorWorker()
-    const id = ++this.vectorWorkerSeq
-    return new Promise<VectorSearchHit[]>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.vectorWorkerPending.delete(id)
-        // 超时大概率是 worker 卡死，丢弃实例，下次检索重新拉起
-        this.disposeVectorWorker(new Error('vector search timeout'))
-        reject(new Error('向量检索超时（15s）'))
-      }, 15000)
-      this.vectorWorkerPending.set(id, { resolve, reject, timer })
-      worker.postMessage({ id, ...args })
-    })
   }
 
   private rememberChatIngestRedirect(key: string, rowid: number): void {
@@ -484,101 +408,13 @@ export class MemoryService {
     }
   }
 
-  private rememberEmbedding(hash: string, vec: Float32Array): void {
-    if (!hash.trim() || vec.length < 8) return
-    if (this.embeddingCache.has(hash)) this.embeddingCache.delete(hash)
-    this.embeddingCache.set(hash, vec)
-    const max = 1200
-    while (this.embeddingCache.size > max) {
-      const first = this.embeddingCache.keys().next().value as string | undefined
-      if (!first) break
-      this.embeddingCache.delete(first)
-    }
-  }
-
-  private getEmbeddingConfig(memSettings: MemorySettings | undefined, aiSettings: AISettings): { model: string; apiKey: string; endpoint: string } | null {
-    const model = (memSettings?.vectorEmbeddingModel ?? '').trim() || 'text-embedding-3-small'
-    const useCustom = memSettings?.vectorUseCustomAi ?? false
-    const apiKey = ((useCustom ? memSettings?.vectorAiApiKey : aiSettings.apiKey) ?? '').trim()
-    const baseUrl = ((useCustom ? memSettings?.vectorAiBaseUrl : aiSettings.baseUrl) ?? '').trim()
-    if (!model.trim() || !apiKey || !baseUrl) return null
-    return { model, apiKey, endpoint: buildEmbeddingsEndpoint(baseUrl) }
-  }
-
-  private async embedTexts(
-    config: { model: string; apiKey: string; endpoint: string },
-    texts: string[],
-  ): Promise<Array<{ text: string; hash: string; vec: Float32Array }>> {
-    const inputs = texts.map((t) => normalizeMemoryText(String(t ?? '')).slice(0, 2000))
-    const hashes = inputs.map((t) => hashEmbeddingInput(config.model, t))
-
-    const results: Array<{ text: string; hash: string; vec: Float32Array }> = []
-    const toCall: string[] = []
-    const toCallIdx: number[] = []
-
-    for (let i = 0; i < inputs.length; i++) {
-      const h = hashes[i]
-      const cached = this.embeddingCache.get(h)
-      if (cached) {
-        results[i] = { text: inputs[i], hash: h, vec: cached }
-      } else {
-        toCall.push(inputs[i])
-        toCallIdx.push(i)
-      }
-    }
-
-    if (toCall.length > 0) {
-      const resp = await fetch(config.endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.apiKey}`,
-        },
-        body: JSON.stringify({ model: config.model, input: toCall, encoding_format: 'float' }),
-      })
-
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({} as unknown))
-        const msg =
-          (errData as { error?: { message?: string } }).error?.message ?? `HTTP ${resp.status}: ${resp.statusText}`
-        throw new Error(msg)
-      }
-
-      const data = (await resp.json()) as { data?: Array<{ embedding?: number[] }> }
-      const embeddings = Array.isArray(data.data) ? data.data.map((d) => d.embedding ?? []) : []
-      if (embeddings.length !== toCall.length) {
-        throw new Error(`embeddings 返回数量不匹配：expect=${toCall.length} got=${embeddings.length}`)
-      }
-
-      for (let i = 0; i < toCallIdx.length; i++) {
-        const idx = toCallIdx[i]
-        const vec = embeddings[i]
-        if (!Array.isArray(vec) || vec.length < 8) throw new Error('embeddings 返回为空或维度过小')
-        const out = new Float32Array(vec.length)
-        let norm = 0
-        for (let j = 0; j < vec.length; j++) {
-          const v = Number(vec[j])
-          out[j] = Number.isFinite(v) ? v : 0
-          norm += out[j] * out[j]
-        }
-        norm = Math.sqrt(norm) || 1
-        for (let j = 0; j < out.length; j++) out[j] = out[j] / norm
-
-        const h = hashes[idx]
-        this.rememberEmbedding(h, out)
-        results[idx] = { text: inputs[idx], hash: h, vec: out }
-      }
-    }
-
-    return results
-  }
 
   private async ensureEmbeddingsForRows(
     rows: Array<{ rowid: number; content: string; updatedAt: number }>,
     memSettings: MemorySettings | undefined,
     aiSettings: AISettings,
   ): Promise<Map<number, { model: string; hash: string; vec: Float32Array }>> {
-    const config = this.getEmbeddingConfig(memSettings, aiSettings)
+    const config = resolveMemoryEmbeddingConfig(memSettings, aiSettings)
     if (!config) return new Map()
 
     const picked = rows.filter((r) => r.rowid > 0 && normalizeMemoryText(r.content).length >= 2)
@@ -610,7 +446,7 @@ export class MemoryService {
 
     for (const r of picked) {
       const text = normalizeMemoryText(r.content).slice(0, 2000)
-      const hash = hashEmbeddingInput(config.model, text)
+      const hash = hashMemoryEmbeddingInput(config.model, text)
       const exist = existByRowid.get(r.rowid)
       if (exist && exist.model === config.model && exist.contentHash === hash && (exist.updatedAt ?? 0) >= (r.updatedAt ?? 0)) {
         const buf = exist.embedding
@@ -626,7 +462,7 @@ export class MemoryService {
 
     if (need.length === 0) return out
 
-    const embedded = await this.embedTexts(
+    const embedded = await this.embeddingClient.embedTexts(
       config,
       need.map((n) => n.text),
     )
@@ -672,7 +508,7 @@ export class MemoryService {
     const { vec, threshold } = opts
     if (vec.length < 8) return null
 
-    const config = this.getEmbeddingConfig(opts.memSettings, opts.aiSettings)
+    const config = resolveMemoryEmbeddingConfig(opts.memSettings, opts.aiSettings)
     if (!config) return null
 
     const scanLimit = 400
@@ -1225,10 +1061,8 @@ export class MemoryService {
     const model = (memSettings.vectorEmbeddingModel ?? '').trim()
     if (!model) return { scanned: 0, embedded: 0, skipped: 0, error: 'embeddings 模型为空' }
 
-    const useCustom = memSettings.vectorUseCustomAi ?? false
-    const apiKey = (useCustom ? memSettings.vectorAiApiKey : aiSettings.apiKey) ?? ''
-    const baseUrl = (useCustom ? memSettings.vectorAiBaseUrl : aiSettings.baseUrl) ?? ''
-    if (!apiKey.trim() || !baseUrl.trim()) {
+    const config = resolveMemoryEmbeddingConfig(memSettings, aiSettings, { requireExplicitModel: true })
+    if (!config) {
       const err = 'embeddings API 未配置（缺少 apiKey/baseUrl）'
       return { scanned: 0, embedded: 0, skipped: 0, error: err }
     }
@@ -1301,7 +1135,7 @@ export class MemoryService {
 
     for (const r of rows) {
       const clipped = normalizeMemoryText(r.content).slice(0, 2000)
-      const h = hashEmbeddingInput(model, clipped)
+      const h = hashMemoryEmbeddingInput(model, clipped)
       if (r.existModel === model && r.existHash === h && (r.existUpdatedAt ?? 0) >= (r.updatedAt ?? 0)) {
         toTouch.push(r.rowid)
         continue
@@ -1318,34 +1152,11 @@ export class MemoryService {
 
     if (toEmbed.length === 0) return { scanned: rows.length, embedded: 0, skipped: toTouch.length }
 
-    const endpoint = buildEmbeddingsEndpoint(baseUrl)
-    const input = toEmbed.map((x) => x.text)
-
     try {
-      const resp = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        // vLLM/OpenAI-compatible embeddings 有些实现会要求显式传 encoding_format
-        body: JSON.stringify({ model, input, encoding_format: 'float' }),
-      })
-
-      if (!resp.ok) {
-        const errData = await resp.json().catch(() => ({} as unknown))
-        const msg =
-          (errData as { error?: { message?: string } }).error?.message ?? `HTTP ${resp.status}: ${resp.statusText}`
-        return { scanned: rows.length, embedded: 0, skipped: toTouch.length, error: msg }
-      }
-
-      const data = (await resp.json()) as { data?: Array<{ embedding?: number[] }> }
-      const embeddings = Array.isArray(data.data) ? data.data.map((d) => d.embedding ?? []) : []
-
-      if (embeddings.length !== toEmbed.length) {
-        const msg = `embeddings 返回数量不匹配：expect=${toEmbed.length} got=${embeddings.length}`
-        return { scanned: rows.length, embedded: 0, skipped: toTouch.length, error: msg }
-      }
+      const embedded = await this.embeddingClient.embedTexts(
+        config,
+        toEmbed.map((item) => item.text),
+      )
 
       const ts = now()
       const upsert = this.db.prepare(
@@ -1364,21 +1175,9 @@ export class MemoryService {
       const tx = this.db.transaction(() => {
         for (let i = 0; i < toEmbed.length; i++) {
           const item = toEmbed[i]
-          const vec = embeddings[i]
-          if (!Array.isArray(vec) || vec.length < 8) continue
-
-          const out = new Float32Array(vec.length)
-          let norm = 0
-          for (let j = 0; j < vec.length; j++) {
-            const v = Number(vec[j])
-            out[j] = Number.isFinite(v) ? v : 0
-            norm += out[j] * out[j]
-          }
-          norm = Math.sqrt(norm) || 1
-          for (let j = 0; j < out.length; j++) out[j] = out[j] / norm
-
-          const buf = Buffer.from(out.buffer)
-          upsert.run(item.rowid, model, out.length, item.hash, buf, ts, ts)
+          const vec = embedded[i].vec
+          const buf = Buffer.from(vec.buffer)
+          upsert.run(item.rowid, model, vec.length, item.hash, buf, ts, ts)
         }
       })
 
@@ -2025,12 +1824,12 @@ export class MemoryService {
     }
 
     const threshold = clampFloat(memSettings?.vectorDedupeThreshold, 0.9, 0.1, 0.99)
-    const config = this.getEmbeddingConfig(memSettings, aiSettings)
+    const config = resolveMemoryEmbeddingConfig(memSettings, aiSettings)
     const normalized = normalizeMemoryText(content)
 
     if (config && normalized.length >= 3) {
       try {
-        const vec = (await this.embedTexts(config, [normalized]))[0]?.vec ?? null
+        const vec = (await this.embeddingClient.embedTexts(config, [normalized]))[0]?.vec ?? null
         if (vec && vec.length >= 8) {
           const dup = await this.findBestVectorDuplicate({
             personaId: pid,
@@ -2967,90 +2766,56 @@ export class MemoryService {
     let vectorError: string | undefined
 
     if (needVector) {
-      const model = (memSettings.vectorEmbeddingModel ?? '').trim()
       const minScore = clampFloat(memSettings.vectorMinScore, 0.35, 0, 1)
       const topK = clampInt(memSettings.vectorTopK, 20, 1, 100)
       const scanLimit = clampInt(memSettings.vectorScanLimit, 2000, 200, 10000)
+      const config = resolveMemoryEmbeddingConfig(memSettings, aiSettings, { requireExplicitModel: true })
 
-      const useCustom = memSettings.vectorUseCustomAi ?? false
-      const apiKey = (useCustom ? memSettings.vectorAiApiKey : aiSettings.apiKey) ?? ''
-      const baseUrl = (useCustom ? memSettings.vectorAiBaseUrl : aiSettings.baseUrl) ?? ''
-
-      if (model && apiKey.trim() && baseUrl.trim()) {
-        const endpoint = buildEmbeddingsEndpoint(baseUrl)
+      if (config) {
         try {
           vectorAttempted = true
-          const resp = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${apiKey}`,
-            },
-            // vLLM/OpenAI-compatible embeddings 有些实现会要求显式传 encoding_format
-            body: JSON.stringify({ model, input: normalizeMemoryText(query).slice(0, 800), encoding_format: 'float' }),
+          const queryEmbedding = await this.embeddingClient.embedTexts(config, [normalizeMemoryText(query).slice(0, 800)])
+          const queryVector = queryEmbedding[0].vec
+
+          // 余弦评分在 worker 线程进行（只扫 rowid+embedding），主进程仅按 topK rowid 回表
+          const hits = await this.vectorSearchClient.search({
+            model: config.model,
+            personaId,
+            includeShared,
+            scanLimit,
+            minScore,
+            topK,
+            query: queryVector,
           })
 
-          if (resp.ok) {
-            const data = (await resp.json()) as { data?: Array<{ embedding?: number[] }> }
-            const vec = data.data?.[0]?.embedding ?? []
-            if (Array.isArray(vec) && vec.length >= 8) {
-              const q = new Float32Array(vec.length)
-              let norm = 0
-              for (let i = 0; i < vec.length; i++) {
-                const v = Number(vec[i])
-                q[i] = Number.isFinite(v) ? v : 0
-                norm += q[i] * q[i]
-              }
-              norm = Math.sqrt(norm) || 1
-              for (let i = 0; i < q.length; i++) q[i] = q[i] / norm
+          if (hits.length > 0) {
+            const placeholders = hits.map(() => '?').join(',')
+            const rows = this.db
+              .prepare(
+                `
+                SELECT
+                  rowid as rowid,
+                  role as role,
+                  content as content,
+                  created_at as createdAt,
+                  importance as importance,
+                  strength as strength,
+                  access_count as accessCount,
+                  last_accessed_at as lastAccessedAt,
+                  status as status,
+                  pinned as pinned
+                FROM memory
+                WHERE rowid IN (${placeholders})
+                `,
+              )
+              .all(...hits.map((h) => h.rowid)) as CandidateRow[]
 
-              // 余弦评分在 worker 线程进行（只扫 rowid+embedding），主进程仅按 topK rowid 回表
-              const hits = await this.vectorSearchInWorker({
-                model,
-                personaId,
-                includeShared,
-                scanLimit,
-                minScore,
-                topK,
-                query: q,
-              })
-
-              if (hits.length > 0) {
-                const placeholders = hits.map(() => '?').join(',')
-                const rows = this.db
-                  .prepare(
-                    `
-                    SELECT
-                      rowid as rowid,
-                      role as role,
-                      content as content,
-                      created_at as createdAt,
-                      importance as importance,
-                      strength as strength,
-                      access_count as accessCount,
-                      last_accessed_at as lastAccessedAt,
-                      status as status,
-                      pinned as pinned
-                    FROM memory
-                    WHERE rowid IN (${placeholders})
-                    `,
-                  )
-                  .all(...hits.map((h) => h.rowid)) as CandidateRow[]
-
-                const byRowid = new Map(rows.map((r) => [r.rowid, r]))
-                for (const h of hits) {
-                  const row = byRowid.get(h.rowid)
-                  if (!row) continue
-                  upsert(row, { vecRel: clampFloat(h.sim, 0, 0, 1) })
-                }
-              }
-            } else {
-              vectorError = 'embeddings 返回为空或维度过小'
+            const byRowid = new Map(rows.map((row) => [row.rowid, row]))
+            for (const hit of hits) {
+              const row = byRowid.get(hit.rowid)
+              if (!row) continue
+              upsert(row, { vecRel: clampFloat(hit.sim, 0, 0, 1) })
             }
-          } else {
-            const errData = await resp.json().catch(() => ({} as unknown))
-            vectorError =
-              (errData as { error?: { message?: string } }).error?.message ?? `HTTP ${resp.status}: ${resp.statusText}`
           }
         } catch (err) {
           vectorError = err instanceof Error ? err.message : String(err)

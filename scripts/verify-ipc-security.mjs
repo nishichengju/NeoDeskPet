@@ -38,6 +38,9 @@ writeFileSync(visionSmokeImage, smokePng)
 const legacyMemoryPersonaId = 'ipc-legacy-persona'
 const legacyMemoryContent = 'IPC legacy searchable memory'
 const legacyMemoryCreatedAt = Date.now()
+const legacyVectorMemoryContent = 'A cobalt lighthouse watches the northern sea.'
+const legacyVectorQuery = 'semantic beacon recollection'
+const legacyVectorModel = 'ipc-memory-vector-smoke'
 const legacyMemoryDatabase = new DatabaseSync(memoryDatabaseFile)
 legacyMemoryDatabase.exec(`
   CREATE TABLE persona (
@@ -63,11 +66,41 @@ legacyMemoryDatabase.exec(`
     VALUES ('${legacyMemoryPersonaId}', 'IPC Legacy Persona', 'legacy prompt', 100, 200);
   INSERT INTO memory (id, persona_id, scope, kind, role, session_id, message_id, content, created_at)
     VALUES ('ipc-legacy-memory', '${legacyMemoryPersonaId}', 'persona', 'chat', 'user', 'legacy-session', 'legacy-message', '${legacyMemoryContent}', ${legacyMemoryCreatedAt});
+  INSERT INTO memory (id, persona_id, scope, kind, role, session_id, message_id, content, created_at)
+    VALUES ('ipc-legacy-vector-memory', '${legacyMemoryPersonaId}', 'persona', 'chat', 'assistant', 'legacy-vector-session', 'legacy-vector-message', '${legacyVectorMemoryContent}', ${legacyMemoryCreatedAt});
+  CREATE TABLE memory_embedding (
+    memory_rowid INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    dims INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(memory_rowid) REFERENCES memory(rowid) ON DELETE CASCADE
+  );
 `)
+const legacyVectorRow = legacyMemoryDatabase
+  .prepare('SELECT rowid FROM memory WHERE id = ?')
+  .get('ipc-legacy-vector-memory')
+const legacyVectorEmbedding = new Float32Array([1, 0, 0, 0, 0, 0, 0, 0])
+legacyMemoryDatabase
+  .prepare(
+    'INSERT INTO memory_embedding (memory_rowid, model, dims, content_hash, embedding, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  )
+  .run(
+    legacyVectorRow.rowid,
+    legacyVectorModel,
+    legacyVectorEmbedding.length,
+    'ipc-legacy-vector-hash',
+    Buffer.from(legacyVectorEmbedding.buffer),
+    legacyMemoryCreatedAt,
+    legacyMemoryCreatedAt,
+  )
 legacyMemoryDatabase.close()
 
 const aiSmokeKey = 'ipc-smoke-main-key'
 const aiRequests = []
+const embeddingRequests = []
 const ttsRequests = []
 const aiServer = http.createServer(async (request, response) => {
   const chunks = []
@@ -89,6 +122,25 @@ const aiServer = http.createServer(async (request, response) => {
   }
 
   const body = bodyText ? JSON.parse(bodyText) : {}
+  if (requestUrl.pathname === '/v1/embeddings' || requestUrl.pathname === '/embeddings') {
+    const inputs = Array.isArray(body.input) ? body.input : [body.input]
+    embeddingRequests.push({
+      path: requestUrl.pathname,
+      model: body.model,
+      inputs,
+      authMatches: request.headers.authorization === `Bearer ${aiSmokeKey}`,
+    })
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(
+      JSON.stringify({
+        data: inputs.map((_input, index) => ({
+          index,
+          embedding: [1, 0, 0, 0, 0, 0, 0, 0],
+        })),
+      }),
+    )
+    return
+  }
   const messageText = JSON.stringify(body.messages ?? [])
   const hasAgentToolResult = messageText.includes('<<<[TOOL_RESULT]>>>')
   const hasNativeToolResult = Array.isArray(body.messages) && body.messages.some((message) => message?.role === 'tool')
@@ -1218,6 +1270,48 @@ try {
   assert(memoryMigrationRetrieve.debug?.counts.fts > 0, 'legacy memory was not rebuilt into memory_fts')
   assert(memoryMigrationRetrieve.addon.includes(legacyMemoryContent), 'legacy memory was not returned by FTS retrieval')
 
+  await settings.evaluate(
+    async ({ baseUrl, apiKey, model }) => {
+      await window.neoDeskPet.setSecret('memory-vector', apiKey)
+      return window.neoDeskPet.setMemorySettings({
+        enabled: true,
+        vectorEnabled: true,
+        vectorEmbeddingModel: model,
+        vectorUseCustomAi: true,
+        vectorAiBaseUrl: baseUrl,
+        vectorMinScore: 0.5,
+        vectorTopK: 5,
+        vectorScanLimit: 200,
+      })
+    },
+    { baseUrl: `${aiServerOrigin}/v1`, apiKey: aiSmokeKey, model: legacyVectorModel },
+  )
+  const vectorRetrieveFirst = await chat.evaluate(
+    async ({ personaId, query }) => window.neoDeskPet.retrieveMemory({ personaId, query, limit: 3, reinforce: false }),
+    { personaId: legacyMemoryPersonaId, query: legacyVectorQuery },
+  )
+  const vectorRetrieveSecond = await chat.evaluate(
+    async ({ personaId, query }) => window.neoDeskPet.retrieveMemory({ personaId, query, limit: 3, reinforce: false }),
+    { personaId: legacyMemoryPersonaId, query: legacyVectorQuery },
+  )
+  const vectorQueryRequests = embeddingRequests.filter(
+    (request) => request.model === legacyVectorModel && request.inputs.includes(legacyVectorQuery),
+  )
+  assert(
+    vectorRetrieveFirst.debug?.vector.attempted === true && vectorRetrieveFirst.debug?.counts.vector > 0,
+    'packaged vector retrieval did not execute the vector worker path',
+  )
+  assert(
+    vectorRetrieveFirst.addon.includes(legacyVectorMemoryContent) &&
+      vectorRetrieveSecond.addon.includes(legacyVectorMemoryContent),
+    'packaged vector retrieval did not return the seeded embedding memory',
+  )
+  assert(
+    vectorQueryRequests.length === 1 && vectorQueryRequests[0]?.authMatches === true,
+    'repeated vector retrieval did not reuse the embedding cache or authenticate correctly',
+  )
+  await settings.evaluate(async () => window.neoDeskPet.setMemorySettings({ vectorEnabled: false }))
+
   const memoryCrudSeed = await settings.evaluate(async () => {
     const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
     const updatedPersona = await window.neoDeskPet.updatePersona(persona.id, {
@@ -1570,6 +1664,14 @@ try {
         memoryType: migratedMemory?.memoryType,
         pinned: migratedMemory?.pinned,
         ftsHits: memoryMigrationRetrieve.debug?.counts.fts ?? 0,
+      },
+      vector: {
+        attempted: vectorRetrieveFirst.debug?.vector.attempted === true,
+        hits: vectorRetrieveFirst.debug?.counts.vector ?? 0,
+        returned: vectorRetrieveFirst.addon.includes(legacyVectorMemoryContent),
+        repeatedReturned: vectorRetrieveSecond.addon.includes(legacyVectorMemoryContent),
+        queryRequests: vectorQueryRequests.length,
+        requestAuthenticated: vectorQueryRequests[0]?.authMatches === true,
       },
       personaId: memoryCrudSeed.persona.id,
       memoryRowid: memoryCrudSeed.created.rowid,
