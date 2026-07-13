@@ -5,10 +5,10 @@ import {
   hashMemoryEmbeddingInput,
   resolveMemoryEmbeddingConfig,
 } from './memory/memoryEmbeddingClient'
-import { buildMemoryFtsQuery } from './memory/memoryFtsQuery'
 import { MemoryIndexQueue } from './memory/memoryIndexQueue'
 import { MemoryKgIndexMaintainer } from './memory/memoryKgIndex'
-import { MemoryTagIndexMaintainer, extractMemoryTags } from './memory/memoryTagIndex'
+import { computeMemoryRetentionScore, MemoryRetrievalEngine } from './memory/memoryRetrieval'
+import { MemoryTagIndexMaintainer } from './memory/memoryTagIndex'
 import { MemoryVectorIndexMaintainer } from './memory/memoryVectorIndex'
 import { MemoryVectorSearchClient } from './memory/memoryVectorSearchClient'
 import type {
@@ -68,38 +68,6 @@ function clampFloat(value: unknown, fallback: number, min: number, max: number):
   return Math.max(min, Math.min(max, n))
 }
 
-function extractKeywordFromQueryForLike(query: string): string | null {
-  const raw = query.trim()
-  if (!raw) return null
-
-  let text = raw
-    .replace(/[，。！？,.!?；;：:“”"'（）()【】[\]{}<>《》]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  // 常见“记忆提问”外壳词，去掉后更容易提取实体/关键词
-  text = text
-    .replace(/^(你|我)?(还)?(记得|想得起|能想起)(我|我们)?(说过|提过|讲过|聊过)?/u, '')
-    .replace(/^(还)?(记得|想得起|能想起)(我|我们)?(说过|提过|讲过|聊过)?/u, '')
-    .replace(/^(你|我)?(之前|以前|刚才|刚刚|那天|那次|上次)(说过|提过|讲过|聊过)?/u, '')
-    .replace(/[吗呢吧呀啊哦哇]$/u, '')
-    .trim()
-
-  if (!text) return null
-
-  const candidates = Array.from(text.matchAll(/[\p{L}\p{N}]{2,}/gu)).map((m) => m[0])
-  if (candidates.length === 0) return null
-
-  const stop = new Set(['还记得', '记得', '想得起', '能想起', '之前', '以前', '刚才', '刚刚', '那天', '那次', '上次', '说过', '提过', '讲过', '聊过'])
-  const filtered = candidates.filter((c) => !stop.has(c))
-  const pickFrom = filtered.length ? filtered : candidates
-
-  pickFrom.sort((a, b) => b.length - a.length)
-  const best = pickFrom[0]?.trim() ?? ''
-  if (best.length < 2) return null
-  return best.length > 40 ? best.slice(0, 40) : best
-}
-
 function normalizeMemoryText(text: string): string {
   return text
     .trim()
@@ -135,119 +103,6 @@ function extractKeyValue(textRaw: string): { key: string; value: string } | null
   return null
 }
 
-type TimeRangeParseResult = {
-  startMs: number
-  endMs: number
-  quoteOnly: boolean
-  reason: string
-}
-
-function parseTimeRangeFromQuery(query: string, nowMs: number): TimeRangeParseResult | null {
-  const text = query.trim()
-  if (!text) return null
-
-  const quoteOnly = /(准确|原话|复述|逐字|一字不差|完整复述)/.test(text)
-  const now = new Date(nowMs)
-
-  const clampRange = (startMs: number, endMs: number) => {
-    const s = Math.min(startMs, endMs)
-    const e = Math.max(startMs, endMs)
-    return { startMs: s, endMs: e }
-  }
-
-  const toLocalMs = (y: number, mo: number, d: number, h: number, mi: number, s: number) => {
-    const dt = new Date(y, mo - 1, d, h, mi, s, 0)
-    const ms = dt.getTime()
-    return Number.isFinite(ms) ? ms : NaN
-  }
-
-  const periodToHours = (period: string): { startH: number; endH: number } | null => {
-    if (period.includes('凌晨')) return { startH: 0, endH: 6 }
-    if (period.includes('早上') || period.includes('上午')) return { startH: 6, endH: 12 }
-    if (period.includes('中午')) return { startH: 11, endH: 13 }
-    if (period.includes('下午')) return { startH: 13, endH: 18 }
-    if (period.includes('晚上') || period.includes('夜里') || period.includes('夜间')) return { startH: 18, endH: 24 }
-    return null
-  }
-
-  // yyyy/m/d hh:mm(:ss)
-  const full = text.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s+(\d{1,2})[:：](\d{1,2})(?:[:：](\d{1,2}))?/)
-  if (full) {
-    const y = Number(full[1])
-    const mo = Number(full[2])
-    const d = Number(full[3])
-    const h = Number(full[4])
-    const mi = Number(full[5])
-    const sec = full[6] ? Number(full[6]) : NaN
-    const base = toLocalMs(y, mo, d, h, mi, Number.isFinite(sec) ? sec : 0)
-    if (Number.isFinite(base)) {
-      const win = Number.isFinite(sec) ? 30_000 : 5 * 60_000
-      const { startMs, endMs } = clampRange(base - win, base + win)
-      return { startMs, endMs, quoteOnly, reason: 'full_datetime' }
-    }
-  }
-
-  // yyyy/m/d
-  const dateOnly = text.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/)
-  if (dateOnly) {
-    const y = Number(dateOnly[1])
-    const mo = Number(dateOnly[2])
-    const d = Number(dateOnly[3])
-    const period = periodToHours(text) ?? { startH: 0, endH: 24 }
-    const start = toLocalMs(y, mo, d, period.startH, 0, 0)
-    const end = toLocalMs(y, mo, d, period.endH === 24 ? 23 : period.endH, period.endH === 24 ? 59 : 0, period.endH === 24 ? 59 : 0)
-    if (Number.isFinite(start) && Number.isFinite(end)) {
-      const { startMs, endMs } = clampRange(start, end)
-      return { startMs, endMs, quoteOnly, reason: 'date_only' }
-    }
-  }
-
-  // 昨天/今天/前天 + 时段
-  const rel = text.match(/(前天|昨天|今天)/)
-  if (rel) {
-    const offsetDays = rel[1] === '前天' ? -2 : rel[1] === '昨天' ? -1 : 0
-    const baseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays, 0, 0, 0, 0)
-    const y = baseDate.getFullYear()
-    const mo = baseDate.getMonth() + 1
-    const d = baseDate.getDate()
-    const period = periodToHours(text) ?? { startH: 0, endH: 24 }
-    const start = toLocalMs(y, mo, d, period.startH, 0, 0)
-    const end = toLocalMs(y, mo, d, period.endH === 24 ? 23 : period.endH, period.endH === 24 ? 59 : 0, period.endH === 24 ? 59 : 0)
-    if (Number.isFinite(start) && Number.isFinite(end)) {
-      const { startMs, endMs } = clampRange(start, end)
-      return { startMs, endMs, quoteOnly, reason: 'relative_day' }
-    }
-  }
-
-  // 1月1日 + 时段（年缺省：尽量取“最近的过去”）
-  const md = text.match(/(\d{1,2})月(\d{1,2})日/)
-  if (md) {
-    const mo = Number(md[1])
-    const d = Number(md[2])
-    let y = now.getFullYear()
-    const period = periodToHours(text) ?? { startH: 0, endH: 24 }
-    const candidateStart = toLocalMs(y, mo, d, period.startH, 0, 0)
-    // 如果构造出的日期明显在未来，则回退到去年
-    if (Number.isFinite(candidateStart) && candidateStart > nowMs + 24 * 60 * 60_000) {
-      y -= 1
-    }
-    const start = toLocalMs(y, mo, d, period.startH, 0, 0)
-    const end = toLocalMs(y, mo, d, period.endH === 24 ? 23 : period.endH, period.endH === 24 ? 59 : 0, period.endH === 24 ? 59 : 0)
-    if (Number.isFinite(start) && Number.isFinite(end)) {
-      const { startMs, endMs } = clampRange(start, end)
-      return { startMs, endMs, quoteOnly, reason: 'month_day' }
-    }
-  }
-
-  return null
-}
-
-function formatTs(ts: number): string {
-  const d = new Date(ts)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
 export class MemoryService {
   private db: MemoryDatabaseHandle
   private indexQueue = new MemoryIndexQueue()
@@ -256,6 +111,7 @@ export class MemoryService {
   private kgIndexMaintainer: MemoryKgIndexMaintainer
   private tagIndexMaintainer: MemoryTagIndexMaintainer
   private vectorIndexMaintainer: MemoryVectorIndexMaintainer
+  private retrievalEngine: MemoryRetrievalEngine
   private vectorSearchClient: MemoryVectorSearchClient
 
   constructor(userDataDir: string) {
@@ -265,6 +121,12 @@ export class MemoryService {
     this.tagIndexMaintainer = new MemoryTagIndexMaintainer(opened.db, this.indexQueue)
     this.vectorIndexMaintainer = new MemoryVectorIndexMaintainer(opened.db, this.indexQueue, this.embeddingClient)
     this.vectorSearchClient = new MemoryVectorSearchClient(opened.dbPath)
+    this.retrievalEngine = new MemoryRetrievalEngine(
+      opened.db,
+      this.embeddingClient,
+      this.vectorSearchClient,
+      (personaId) => this.getPersona(personaId),
+    )
   }
 
   close(): void {
@@ -504,7 +366,7 @@ export class MemoryService {
       .get(rowid) as MemoryRecord | undefined
 
     if (!r) return null
-    r.retention = this.computeRetentionScore(now(), r.createdAt, r.lastAccessedAt, r.strength)
+    r.retention = computeMemoryRetentionScore(now(), r.createdAt, r.lastAccessedAt, r.strength)
     return r
   }
 
@@ -1026,7 +888,7 @@ export class MemoryService {
 
     const nowMs = now()
     for (const it of items) {
-      it.retention = this.computeRetentionScore(nowMs, it.createdAt, it.lastAccessedAt, it.strength)
+      it.retention = computeMemoryRetentionScore(nowMs, it.createdAt, it.lastAccessedAt, it.strength)
     }
 
     return { total, items }
@@ -1536,41 +1398,6 @@ export class MemoryService {
     throw new Error('未知 action')
   }
 
-  private computeRetentionScore(nowMs: number, createdAt: number, lastAccessedAt: number | null, strength: number): number {
-    const baseAt =
-      typeof lastAccessedAt === 'number' && Number.isFinite(lastAccessedAt) && lastAccessedAt > 0 ? lastAccessedAt : createdAt
-    const ageMs = Math.max(0, nowMs - baseAt)
-    const s = clampFloat(strength, 0.2, 0, 1)
-    const baseHalfLifeDays = 14
-    const halfLifeDays = baseHalfLifeDays * (0.3 + s * 2)
-    if (halfLifeDays <= 0) return 0
-    const ageDays = ageMs / 86_400_000
-    const retention = Math.pow(0.5, ageDays / halfLifeDays)
-    return clampFloat(retention, 1, 0, 1)
-  }
-
-  private reinforceMemoryHits(rowids: number[], nowMs: number): void {
-    const ids = Array.from(new Set(rowids.map((v) => clampInt(v, 0, 1, 2_000_000_000)).filter((v) => v > 0)))
-    if (ids.length === 0) return
-
-    const placeholders = ids.map(() => '?').join(',')
-    this.db
-      .prepare(
-        `
-        UPDATE memory
-        SET
-          access_count = access_count + 1,
-          last_accessed_at = ?,
-          strength = MIN(1, strength + 0.04),
-          retention = 1,
-          status = 'active'
-        WHERE rowid IN (${placeholders})
-          AND COALESCE(status, 'active') <> 'deleted'
-        `,
-      )
-      .run(nowMs, ...ids)
-  }
-
   runRetentionMaintenance(opts?: {
     batchSize?: number
     minIdleMs?: number
@@ -1616,7 +1443,7 @@ export class MemoryService {
     let archived = 0
 
     for (const r of rows) {
-      const retention = this.computeRetentionScore(nowMs, r.createdAt, r.lastAccessedAt, r.strength)
+      const retention = computeMemoryRetentionScore(nowMs, r.createdAt, r.lastAccessedAt, r.strength)
       const isPinned = (r.pinned ?? 0) !== 0
       const currentStatus = (r.status ?? 'active').trim() || 'active'
       let nextStatus = currentStatus
@@ -1645,512 +1472,12 @@ export class MemoryService {
     return { scanned: rows.length, updated: updates.length, archived }
   }
 
-  async retrieveContext(args: MemoryRetrieveArgs, memSettings: MemorySettings, aiSettings: AISettings): Promise<MemoryRetrieveResult> {
-    const startedAt = now()
-    const personaId = args.personaId.trim() || 'default'
-    const persona = this.getPersona(personaId)
-    if (persona && !persona.retrieveEnabled) return { addon: '' }
-    const query = args.query.trim()
-    if (!query) return { addon: this.buildPersonaAddon(personaId, '') }
-
-    const limit = clampInt(args.limit, 12, 1, 50)
-    const maxChars = clampInt(args.maxChars, 2800, 200, 20000)
-    const includeShared = args.includeShared !== false
-    const shouldReinforce = args.reinforce !== false
-    const nowMs = now()
-
-    // 时间线索优先：针对“某天凌晨/某个时间点/准确复述”类问题，按 created_at 范围直接取原文片段
-    const tr = parseTimeRangeFromQuery(query, nowMs)
-    if (tr) {
-      const rows = this.db
-        .prepare(
-          `
-          SELECT rowid as rowid, role as role, content as content, created_at as createdAt
-          FROM memory
-          WHERE created_at BETWEEN ? AND ?
-            AND COALESCE(role, 'note') IN ('user', 'assistant')
-            AND COALESCE(status, 'active') <> 'deleted'
-            AND (
-              persona_id = ?
-              ${includeShared ? 'OR persona_id IS NULL' : ''}
-            )
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ?
-          `,
-        )
-        .all(tr.startMs, tr.endMs, personaId, Math.max(limit, 20)) as Array<{
-        rowid: number
-        role: string | null
-        content: string
-        createdAt: number
-      }>
-
-      const lines: string[] = []
-      const hitRowids: number[] = []
-      let used = 0
-      for (const r of rows) {
-        const content = r.content.trim()
-        if (!content) continue
-        const role = r.role === 'assistant' ? 'assistant' : r.role === 'user' ? 'user' : 'note'
-        const prefix = `- (${formatTs(r.createdAt)}) ${role}: `
-        const available = Math.max(0, maxChars - used - prefix.length)
-        if (available <= 0) break
-        const clipped = content.length > available ? content.slice(0, available) + '…' : content
-        const line = prefix + clipped
-        lines.push(line)
-        hitRowids.push(r.rowid)
-        used += line.length + 1
-        if (used >= maxChars) break
-      }
-
-      if (shouldReinforce && hitRowids.length > 0) this.reinforceMemoryHits(hitRowids, nowMs)
-
-      const hint =
-        tr.quoteOnly
-          ? '【引用规则】\n用户要求“准确复述/原话”时，只能依据下方【时间片段原文】逐字引用；若未找到对应内容，直接说“我忘了/没检索到”。'
-          : ''
-      const timeBlock = lines.length > 0 ? `【时间片段原文】\n${lines.join('\n')}` : '【时间片段原文】\n（未检索到该时间段的原文）'
-      const memoryBlock = [hint, timeBlock].filter(Boolean).join('\n\n')
-      return {
-        addon: this.buildPersonaAddon(personaId, memoryBlock),
-        debug: {
-          tookMs: Math.max(0, now() - startedAt),
-          layers: ['timeRange'],
-          counts: { timeRange: hitRowids.length, fts: 0, like: 0, tag: 0, vector: 0, kg: 0 },
-          vector: { enabled: memSettings.vectorEnabled ?? false, attempted: false, reason: 'timeRange' },
-          tag: { queryTags: 0, matchedTags: 0, expandedTags: 0 },
-        },
-      }
-    }
-
-    const match = buildMemoryFtsQuery(query)
-    if (!match) {
-      return {
-        addon: this.buildPersonaAddon(personaId, ''),
-        debug: {
-          tookMs: Math.max(0, now() - startedAt),
-          layers: ['none'],
-          counts: { timeRange: 0, fts: 0, like: 0, tag: 0, vector: 0, kg: 0 },
-          vector: { enabled: memSettings.vectorEnabled ?? false, attempted: false, reason: 'no_match' },
-          tag: { queryTags: 0, matchedTags: 0, expandedTags: 0 },
-        },
-      }
-    }
-
-    type CandidateRow = {
-      rowid: number
-      role: string | null
-      content: string
-      createdAt: number
-      importance: number
-      strength: number
-      accessCount: number
-      lastAccessedAt: number | null
-      status: string | null
-      pinned: number | null
-    }
-
-    type Candidate = CandidateRow & {
-      ftsRel: number
-      likeRel: number
-      tagRel: number
-      vecRel: number
-      kgRel: number
-    }
-
-    const candidates = new Map<number, Candidate>()
-    const upsert = (
-      row: CandidateRow,
-      patch: Partial<Pick<Candidate, 'ftsRel' | 'likeRel' | 'tagRel' | 'vecRel' | 'kgRel'>>,
-    ) => {
-      const prev = candidates.get(row.rowid)
-      if (!prev) {
-        candidates.set(row.rowid, {
-          ...row,
-          ftsRel: patch.ftsRel ?? 0,
-          likeRel: patch.likeRel ?? 0,
-          tagRel: patch.tagRel ?? 0,
-          vecRel: patch.vecRel ?? 0,
-          kgRel: patch.kgRel ?? 0,
-        })
-        return
-      }
-      prev.ftsRel = Math.max(prev.ftsRel, patch.ftsRel ?? 0)
-      prev.likeRel = Math.max(prev.likeRel, patch.likeRel ?? 0)
-      prev.tagRel = Math.max(prev.tagRel, patch.tagRel ?? 0)
-      prev.vecRel = Math.max(prev.vecRel, patch.vecRel ?? 0)
-      prev.kgRel = Math.max(prev.kgRel, patch.kgRel ?? 0)
-    }
-
-    const ftsLimit = clampInt(limit * 5, 60, limit, 200)
-
-    const ftsRows = this.db
-      .prepare(
-        `
-        SELECT
-          m.rowid as rowid,
-          m.role as role,
-          m.content as content,
-          m.created_at as createdAt,
-          m.importance as importance,
-          m.strength as strength,
-          m.access_count as accessCount,
-          m.last_accessed_at as lastAccessedAt,
-          m.status as status,
-          m.pinned as pinned,
-          bm25(memory_fts) as score
-        FROM memory_fts
-        JOIN memory m ON m.rowid = memory_fts.rowid
-        WHERE memory_fts MATCH ?
-          AND (
-            m.persona_id = ?
-            ${includeShared ? 'OR m.persona_id IS NULL' : ''}
-          )
-          AND COALESCE(m.status, 'active') <> 'deleted'
-        ORDER BY score ASC, m.created_at DESC
-        LIMIT ?
-        `,
-      )
-      .all(match, personaId, ftsLimit) as Array<CandidateRow & { score: number | null }>
-
-    for (const r of ftsRows) {
-      const rel = typeof r.score === 'number' && Number.isFinite(r.score) ? 1 / (1 + Math.max(0, r.score)) : 0
-      upsert(r, { ftsRel: rel })
-    }
-
-    // FTS 没命中时，退化为 LIKE（对中文无分词/符号影响更鲁棒）
-    if (ftsRows.length === 0) {
-      const kw = extractKeywordFromQueryForLike(query)
-      const needle = (kw && kw !== query ? kw : query).slice(0, 120)
-      const like = `%${needle}%`
-      const likeRows = this.db
-        .prepare(
-          `
-          SELECT
-            rowid as rowid,
-            role as role,
-            content as content,
-            created_at as createdAt,
-            importance as importance,
-            strength as strength,
-            access_count as accessCount,
-            last_accessed_at as lastAccessedAt,
-            status as status,
-            pinned as pinned
-          FROM memory
-          WHERE content LIKE ?
-            AND (
-              persona_id = ?
-              ${includeShared ? 'OR persona_id IS NULL' : ''}
-            )
-            AND COALESCE(status, 'active') <> 'deleted'
-          ORDER BY created_at DESC
-          LIMIT ?
-          `,
-        )
-        .all(like, personaId, ftsLimit) as CandidateRow[]
-
-      for (const r of likeRows) upsert(r, { likeRel: 0.38 })
-    }
-
-    // M5：Tag 网络召回（本地，解决“截句/外壳词/换说法”）
-    const tagEnabled = memSettings.tagEnabled ?? true
-    const tagMaxExpand = clampInt(memSettings.tagMaxExpand, 6, 0, 40)
-    const queryTags = tagEnabled ? extractMemoryTags(query, { maxTags: 12 }) : []
-    const baseTagNames = queryTags.filter((t) => t && !t.startsWith('__')).slice(0, 12)
-
-    let allTagIds: number[] = []
-    let baseTagIds: number[] = []
-    let matchedTagCount = 0
-
-    if (tagEnabled && baseTagNames.length > 0) {
-      const placeholders = baseTagNames.map(() => '?').join(',')
-      const found = this.db
-        .prepare(`SELECT id as id, name as name FROM tag WHERE name IN (${placeholders})`)
-        .all(...baseTagNames) as Array<{ id: number; name: string }>
-      baseTagIds = found.map((r) => clampInt(r.id, 0, 1, 2_000_000_000)).filter((v) => v > 0)
-      matchedTagCount = baseTagIds.length
-      allTagIds = [...baseTagIds]
-
-      if (baseTagIds.length > 0 && tagMaxExpand > 0) {
-        const inA = baseTagIds.map(() => '?').join(',')
-        const inB = baseTagIds.map(() => '?').join(',')
-        const related = this.db
-          .prepare(
-            `
-            SELECT mt2.tag_id as tagId, COUNT(*) as c
-            FROM memory_tag mt1
-            JOIN memory_tag mt2 ON mt1.memory_rowid = mt2.memory_rowid
-            JOIN memory m ON m.rowid = mt1.memory_rowid
-            WHERE mt1.tag_id IN (${inA})
-              AND mt2.tag_id NOT IN (${inB})
-              AND (
-                m.persona_id = ?
-                ${includeShared ? 'OR m.persona_id IS NULL' : ''}
-              )
-              AND COALESCE(m.status, 'active') <> 'deleted'
-            GROUP BY mt2.tag_id
-            ORDER BY c DESC
-            LIMIT ?
-            `,
-          )
-          .all(...baseTagIds, ...baseTagIds, personaId, tagMaxExpand) as Array<{ tagId: number }>
-        const extra = related.map((r) => clampInt(r.tagId, 0, 1, 2_000_000_000)).filter((v) => v > 0)
-        allTagIds = Array.from(new Set([...allTagIds, ...extra]))
-      }
-
-      if (allTagIds.length > 0) {
-        const inTags = allTagIds.map(() => '?').join(',')
-        const tagLimit = clampInt(limit * 8, 120, limit, 600)
-        const tagRows = this.db
-          .prepare(
-            `
-            SELECT
-              m.rowid as rowid,
-              m.role as role,
-              m.content as content,
-              m.created_at as createdAt,
-              m.importance as importance,
-              m.strength as strength,
-              m.access_count as accessCount,
-              m.last_accessed_at as lastAccessedAt,
-              m.status as status,
-              m.pinned as pinned,
-              COUNT(DISTINCT mt.tag_id) as tagHits
-            FROM memory_tag mt
-            JOIN memory m ON m.rowid = mt.memory_rowid
-            WHERE mt.tag_id IN (${inTags})
-              AND (
-                m.persona_id = ?
-                ${includeShared ? 'OR m.persona_id IS NULL' : ''}
-              )
-              AND COALESCE(m.status, 'active') <> 'deleted'
-            GROUP BY m.rowid
-            ORDER BY tagHits DESC, m.created_at DESC
-            LIMIT ?
-            `,
-          )
-          .all(...allTagIds, personaId, tagLimit) as Array<CandidateRow & { tagHits: number }>
-
-        const denom = Math.max(1, baseTagIds.length)
-        for (const r of tagRows) {
-          const rel = clampFloat(r.tagHits / denom, 0, 0, 1)
-          upsert(r, { tagRel: rel })
-        }
-      }
-    }
-
-    // M6：KG 图谱召回（实体/关系 -> 反查证据 memory_rowid）
-    const kgEnabled = memSettings.kgEnabled ?? false
-    if (kgEnabled) {
-      const kgMatch = buildMemoryFtsQuery(query)
-      if (kgMatch) {
-        const entRows = this.db
-          .prepare(
-            `
-            SELECT e.id as id
-            FROM kg_entity_fts
-            JOIN kg_entity e ON e.id = kg_entity_fts.rowid
-            WHERE kg_entity_fts MATCH ?
-              AND e.persona_id = ?
-            LIMIT 12
-            `,
-          )
-          .all(kgMatch, personaId) as Array<{ id: number }>
-
-        const entIds = entRows.map((r) => clampInt(r.id, 0, 1, 2_000_000_000)).filter((v) => v > 0)
-        if (entIds.length > 0) {
-          const placeholders = entIds.map(() => '?').join(',')
-          const kgLimit = clampInt(limit * 6, 120, limit, 500)
-
-          const memRows = this.db
-            .prepare(
-              `
-              SELECT
-                m.rowid as rowid,
-                m.role as role,
-                m.content as content,
-                m.created_at as createdAt,
-                m.importance as importance,
-                m.strength as strength,
-                m.access_count as accessCount,
-                m.last_accessed_at as lastAccessedAt,
-                m.status as status,
-                m.pinned as pinned,
-                COUNT(DISTINCT em.entity_id) as entHits
-              FROM kg_entity_mention em
-              JOIN memory m ON m.rowid = em.memory_rowid
-              WHERE em.entity_id IN (${placeholders})
-                AND m.persona_id = ?
-                AND COALESCE(m.status, 'active') <> 'deleted'
-              GROUP BY m.rowid
-              ORDER BY entHits DESC, m.created_at DESC
-              LIMIT ?
-              `,
-            )
-            .all(...entIds, personaId, kgLimit) as Array<CandidateRow & { entHits: number }>
-
-          const denom = Math.max(1, entIds.length)
-          for (const r of memRows) {
-            const rel = clampFloat(r.entHits / denom, 0, 0, 1)
-            upsert(r, { kgRel: rel })
-          }
-        }
-      }
-    }
-
-    // M5：向量召回（仅在候选不足时启用，降低额外延迟）
-    const vectorEnabled = memSettings.vectorEnabled ?? false
-    const needVector = vectorEnabled && candidates.size < limit
-    let vectorAttempted = false
-    let vectorReason: string | undefined
-    let vectorError: string | undefined
-
-    if (needVector) {
-      const minScore = clampFloat(memSettings.vectorMinScore, 0.35, 0, 1)
-      const topK = clampInt(memSettings.vectorTopK, 20, 1, 100)
-      const scanLimit = clampInt(memSettings.vectorScanLimit, 2000, 200, 10000)
-      const config = resolveMemoryEmbeddingConfig(memSettings, aiSettings, { requireExplicitModel: true })
-
-      if (config) {
-        try {
-          vectorAttempted = true
-          const queryEmbedding = await this.embeddingClient.embedTexts(config, [normalizeMemoryText(query).slice(0, 800)])
-          const queryVector = queryEmbedding[0].vec
-
-          // 余弦评分在 worker 线程进行（只扫 rowid+embedding），主进程仅按 topK rowid 回表
-          const hits = await this.vectorSearchClient.search({
-            model: config.model,
-            personaId,
-            includeShared,
-            scanLimit,
-            minScore,
-            topK,
-            query: queryVector,
-          })
-
-          if (hits.length > 0) {
-            const placeholders = hits.map(() => '?').join(',')
-            const rows = this.db
-              .prepare(
-                `
-                SELECT
-                  rowid as rowid,
-                  role as role,
-                  content as content,
-                  created_at as createdAt,
-                  importance as importance,
-                  strength as strength,
-                  access_count as accessCount,
-                  last_accessed_at as lastAccessedAt,
-                  status as status,
-                  pinned as pinned
-                FROM memory
-                WHERE rowid IN (${placeholders})
-                `,
-              )
-              .all(...hits.map((h) => h.rowid)) as CandidateRow[]
-
-            const byRowid = new Map(rows.map((row) => [row.rowid, row]))
-            for (const hit of hits) {
-              const row = byRowid.get(hit.rowid)
-              if (!row) continue
-              upsert(row, { vecRel: clampFloat(hit.sim, 0, 0, 1) })
-            }
-          }
-        } catch (err) {
-          vectorError = err instanceof Error ? err.message : String(err)
-        }
-      } else {
-        vectorReason = 'missing_config'
-      }
-    } else {
-      vectorReason = vectorEnabled ? 'candidates_sufficient' : 'disabled'
-    }
-
-    const ranked = Array.from(candidates.values())
-      .map((r) => {
-        const importance = clampFloat(r.importance, 0.5, 0, 1)
-        const strength = clampFloat(r.strength, 0.2, 0, 1)
-        const retention = this.computeRetentionScore(nowMs, r.createdAt, r.lastAccessedAt, strength)
-
-        const fts = clampFloat(r.ftsRel, 0, 0, 1)
-        const like = clampFloat(r.likeRel, 0, 0, 1)
-        const tag = clampFloat(r.tagRel, 0, 0, 1)
-        const kg = clampFloat(r.kgRel, 0, 0, 1)
-        const vec = clampFloat(r.vecRel, 0, 0, 1)
-        const relevance = 1 - (1 - fts) * (1 - like) * (1 - tag) * (1 - kg) * (1 - vec)
-
-        const statusFactor = r.status === 'archived' ? 0.3 : 1
-        const pinnedFactor = (r.pinned ?? 0) ? 1.4 : 1
-        const weight = relevance * retention * (0.5 + importance) * statusFactor * pinnedFactor
-        return { ...r, importance, strength, retention, relevance, weight }
-      })
-      .sort((a, b) => b.weight - a.weight || b.createdAt - a.createdAt || b.rowid - a.rowid)
-      .slice(0, limit)
-    const finalRanked = ranked
-
-    const lines: string[] = []
-    const hitRowids: number[] = []
-    let used = 0
-    for (const r of finalRanked) {
-      const content = r.content.trim().replace(/\s+/g, ' ')
-      if (!content) continue
-      const role = r.role === 'assistant' ? 'assistant' : r.role === 'user' ? 'user' : 'note'
-      const prefix = `- (${formatTs(r.createdAt)}) ${role}: `
-      const available = Math.max(0, maxChars - used - prefix.length)
-      if (available <= 0) break
-      const clipped = content.length > available ? content.slice(0, available) + '…' : content
-      const line = prefix + clipped
-      lines.push(line)
-      hitRowids.push(r.rowid)
-      used += line.length + 1
-      if (used >= maxChars) break
-    }
-
-    if (shouldReinforce && hitRowids.length > 0) this.reinforceMemoryHits(hitRowids, nowMs)
-
-    const memoryBlock = lines.length > 0 ? `【相关记忆】\n${lines.join('\n')}` : ''
-
-    const counts = {
-      timeRange: 0,
-      fts: finalRanked.filter((r) => r.ftsRel > 0).length,
-      like: finalRanked.filter((r) => r.likeRel > 0).length,
-      tag: finalRanked.filter((r) => r.tagRel > 0).length,
-      vector: finalRanked.filter((r) => r.vecRel > 0).length,
-      kg: finalRanked.filter((r) => r.kgRel > 0).length,
-    }
-
-    const layers: Array<'none' | 'timeRange' | 'fts' | 'like' | 'tag' | 'vector' | 'kg'> = []
-    if (counts.fts > 0) layers.push('fts')
-    if (counts.like > 0) layers.push('like')
-    if (counts.tag > 0) layers.push('tag')
-    if (counts.kg > 0) layers.push('kg')
-    if (counts.vector > 0) layers.push('vector')
-    if (layers.length === 0) layers.push('none')
-
-    return {
-      addon: this.buildPersonaAddon(personaId, memoryBlock),
-      debug: {
-        tookMs: Math.max(0, now() - startedAt),
-        layers,
-        counts,
-        tag: { queryTags: baseTagNames.length, matchedTags: matchedTagCount, expandedTags: allTagIds.length },
-        vector: { enabled: vectorEnabled, attempted: vectorAttempted, ...(vectorReason ? { reason: vectorReason } : {}), ...(vectorError ? { error: vectorError } : {}) },
-      },
-    }
+  async retrieveContext(
+    args: MemoryRetrieveArgs,
+    memSettings: MemorySettings,
+    aiSettings: AISettings,
+  ): Promise<MemoryRetrieveResult> {
+    return this.retrievalEngine.retrieve(args, memSettings, aiSettings)
   }
 
-  private buildPersonaAddon(personaId: string, memoryBlock: string): string {
-    const persona = this.getPersona(personaId)
-    const parts: string[] = []
-
-    if (persona && persona.prompt.trim().length > 0) {
-      parts.push(`【当前人设】\n${persona.prompt.trim()}`)
-    }
-    if (memoryBlock.trim().length > 0) {
-      parts.push(memoryBlock.trim())
-    }
-    return parts.join('\n\n').trim()
-  }
 }

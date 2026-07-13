@@ -777,3 +777,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、数据库 schema、KG 设置字段、抽取提示词、图谱表含义、混合召回权重或界面样式。Node SQLite 聚焦测试覆盖候选唯一性、JSON 兼容解析、实体/关系规范化、逐行 provider 错误和事务回滚；打包 smoke 则通过专用加密密钥、真实主进程调度、生产 `better-sqlite3`、FTS trigger 和 renderer 召回接口证明 KG 从抽取到召回闭环。端到端 smoke 发现并修复了英文无空格实体被逐字符拆分、导致 KG FTS 无法命中的旧问题。尚未连接真实云端 KG provider 验证供应商特有输出、限流和超时，也未做十万级实体/mention 的 FTS 与图谱召回基线；混合召回候选、评分排序和最终文本组装仍留在 `MemoryService`，由下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第三十八批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory 时间范围、FTS/LIKE/Tag/KG/Vector 混合召回、评分排序、文本预算与命中强化
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 65 个测试文件、290 个用例通过 |
+| Memory 混合召回测试 | 6 个用例通过：persona 禁用/空查询人设、相对时间准确引用与命中强化、FTS+Tag+KG 候选合并、向量不足 fallback、向量故障降级、保留度衰减 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker 和品牌元数据写入成功 |
+| `npm run ipc:smoke` | 旧库 FTS hits=1；向量 worker hits=1、重复查询 embeddings API requests=1；Tag hits=2；KG hits=1 且返回目标记忆；后台 Vector/KG 索引、Agent/MCP/媒体/任务与重启路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；无 console error、无横向或纵向溢出，Memory、Settings 与 Chat 截图无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、数据库 schema、召回设置字段、各层权重、排序公式、debug 字段、向量 worker 协议或界面样式。Node SQLite 聚焦测试直接覆盖 FTS、Tag、KG 表和强化 UPDATE，注入 embedding/vector 客户端覆盖按需调用与故障降级；打包 smoke 则复用生产 `better-sqlite3`、真实 worker、加密 embeddings/KG 密钥和 renderer IPC 证明旧库、四类候选与最终回执继续闭环。时间范围解析尚未在打包 smoke 中按系统时区逐项覆盖，真实十万级 FTS/Tag/KG/Vector 混合候选的延迟和 worker 扫描成本也未做基线；聊天/手工写入、向量去重、版本和冲突流程仍留在 `MemoryService`，由下一批继续拆分。

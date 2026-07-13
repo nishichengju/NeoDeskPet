@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十七批：Memory KG 抽取、图谱持久化与英文实体召回已收口）
+- 状态：P2-1 进行中（第三十八批：Memory 混合召回、时间范围与评分编排已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -873,6 +873,14 @@ AI 与能力
 - 新增 4 个 KG 维护测试和 3 个 FTS 查询测试，覆盖配置失败保留队列、pending/兜底排重、fresh hash 跳过、抽取 payload、实体/mention/实体关系与 literal fallback、provider 逐行错误、事务回滚，以及英文/多词/中文查询构造。
 - 打包 IPC smoke 使用专用加密 KG 密钥和 `ipc-memory-kg-smoke` 模型，经真实后台 debounce 写入 status=ok、40 字符 hash、Alice/Tea 两个实体与 `Alice likes Tea` 关系；目标请求 1 次且鉴权/提示词正确，随后 KG 召回 hits=1 并返回原记忆。
 - `memoryService.ts` 从第三十六批后的 2600 行降至 2156 行；`npm test` 共 64 个测试文件、284 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 混合召回的 FTS/LIKE/Tag/KG/Vector 候选、评分排序与回执组装边界。
+
+第三十八批进展（2026-07-14）：
+
+- 新增 `electron/memory/memoryRetrieval.ts`，集中管理 persona 召回门禁、时间范围解析与准确引用、FTS/LIKE/Tag/KG/Vector 候选收集、候选去重合并、向量按需 fallback、保留度/重要性/置顶/归档评分、字符预算、强化写回和 `MemoryRetrieveResult.debug` 组装；`MemoryService.retrieveContext` 现在只做委托。
+- `computeMemoryRetentionScore` 提升为共享纯函数，列表、单条读取、保留度维护和召回排序继续使用同一半衰期公式；共享 `MemoryEmbeddingClient` 与 `MemoryVectorSearchClient` 生命周期不变，召回引擎不会自行创建 worker 或 HTTP 缓存。
+- 新增 6 个召回测试，使用真实 Node SQLite FTS/Tag/KG 表覆盖 persona 禁用与空查询人设、昨天凌晨准确引用与命中强化、FTS+Tag+KG 同候选合并、向量候选不足 fallback、向量 worker 故障降级，以及保留度随时间衰减。
+- 打包 IPC smoke 继续证明旧库 FTS migration hits=1、重复向量查询 API requests=1 且 worker hits=1、Tag hits=2、KG hits=1 并返回目标记忆；后台 Vector/KG 索引、Agent/MCP/媒体/任务与重启路径全部通过，说明抽取后评分层、debug 契约和共享客户端接线未漂移。
+- `memoryService.ts` 从第三十七批后的 2156 行降至 1483 行；`npm test` 共 65 个测试文件、290 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 聊天/手工写入、向量去重合并、版本记录与冲突处理边界。
 
 ## 14. P2-2：前端加载与运行性能
 
