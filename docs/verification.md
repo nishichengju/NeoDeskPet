@@ -193,3 +193,22 @@
 | `git diff --check` | 通过 |
 
 本批未修改 renderer、preload API、IPC 权限矩阵、WindowManager 行为或设置结构。`electron/main.ts` 计划内的 settings/chat/task/memory/tts/window 分域注册已完成；P2-1 后续按路线图进入 `ChatWindow.tsx`、`taskService.ts`、`memoryService.ts` 与 `OrbApp.tsx` 拆分。
+
+## P2-1：大型模块拆分与领域边界（第九批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat ImageViewer 子组件
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 30 个测试文件、113 个用例通过 |
+| ImageViewer 渲染测试 | 选中图片、`1 / 2`、`100%`、首项导航禁用、提示与空 item 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 通过，五类窗口无运行时错误 |
+| `npm run media:smoke` | 图片/视频托管、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 14 个场景通过；图片查看器打开态、元数据、无溢出与 Esc 关闭通过 |
+| `git diff --check` | 通过 |
+
+本批未修改消息渲染契约、附件 URL 解析、样式 class 或 preload API。`ChatWindow.tsx` 后续继续拆分 `ChatMessageItem`、会话列表、composer 和 AI/TTS/ASR hooks。

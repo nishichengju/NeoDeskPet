@@ -41,8 +41,8 @@ async function waitForPreview() {
   throw new Error(`Timed out waiting for Vite preview.\n${previewOutput}`)
 }
 
-function installChatMock(page) {
-  return page.addInitScript(() => {
+function installChatMock(page, options = {}) {
+  return page.addInitScript(({ seedImage }) => {
     const now = Date.now()
     const settings = {
       activePersonaId: 'default',
@@ -83,15 +83,24 @@ function installChatMock(page) {
       createdAt: now,
       updatedAt: now,
     }
+    const initialMessages = seedImage
+      ? [{
+          id: 'baseline-image-message',
+          role: 'assistant',
+          content: '图片查看器基线',
+          image: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22640%22 height=%22360%22%3E%3Crect width=%22640%22 height=%22360%22 fill=%22%232e7d6b%22/%3E%3Ctext x=%22320%22 y=%22190%22 text-anchor=%22middle%22 font-size=%2240%22 fill=%22white%22%3ENeoDeskPet%3C/text%3E%3C/svg%3E',
+          createdAt: now,
+        }]
+      : []
     const summary = {
       id: 'baseline-session',
       name: '界面基线会话',
       personaId: 'default',
       createdAt: now,
       updatedAt: now,
-      messageCount: 0,
+      messageCount: initialMessages.length,
     }
-    const session = { ...summary, nameMode: 'manual', messages: [], autoExtractCursor: 0 }
+    const session = { ...summary, nameMode: 'manual', messages: initialMessages, autoExtractCursor: 0 }
     const calls = { settingsTargets: [], clearCount: 0, createCount: 0, cancelTaskIds: [], stopTtsCount: 0 }
     Object.defineProperty(window, '__chatBaseline', { configurable: true, value: calls })
     const off = () => undefined
@@ -196,7 +205,7 @@ function installChatMock(page) {
       },
     )
     Object.defineProperty(window, 'neoDeskPet', { configurable: true, value: api })
-  })
+  }, { seedImage: options.seedImage === true })
 }
 
 function installOrbPanelMock(page) {
@@ -390,6 +399,7 @@ const baselines = [
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true },
   { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbPanel: true },
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
+  { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
   { name: 'settings-min-640x500-scale100', route: 'settings', width: 640, height: 500, scale: 1, mockSettings: true, verifySettingsNavigation: true },
   { name: 'memory-min-640x500-scale100', route: 'memory', width: 640, height: 500, scale: 1, mockMemory: true },
   { name: 'chat-default-720x620-scale125', route: 'chat', width: 720, height: 620, scale: 1.25, mockChat: true, compactChat: true },
@@ -423,7 +433,7 @@ try {
       if (message.type() === 'error') consoleErrors.push(message.text())
     })
     page.on('pageerror', (error) => consoleErrors.push(error.message))
-    if (baseline.mockChat) await installChatMock(page)
+    if (baseline.mockChat) await installChatMock(page, { seedImage: baseline.verifyImageViewer })
     if (baseline.mockOrbPanel) await installOrbPanelMock(page)
     if (baseline.mockMemory) await installMemoryMock(page)
     if (baseline.mockSettings) await installSettingsMock(page)
@@ -603,6 +613,30 @@ try {
       }
     }
 
+    let imageViewer = null
+    if (baseline.verifyImageViewer) {
+      const messageImage = page.locator('.ndp-msg-image').first()
+      await messageImage.waitFor({ state: 'visible' })
+      await messageImage.click()
+      const viewer = page.locator('.ndp-image-viewer')
+      await viewer.waitFor({ state: 'visible' })
+      imageViewer = await viewer.evaluate((element) => ({
+        meta: element.querySelector('.ndp-image-viewer-meta')?.textContent?.trim() ?? '',
+        title: element.querySelector('.ndp-image-viewer-title')?.textContent?.trim() ?? '',
+        horizontalOverflow: element.scrollWidth > element.clientWidth,
+      }))
+      const viewerScreenshotPath = path.join(outputDir, `${baseline.name}-open.png`)
+      imageViewer.screenshot = path.relative(projectRoot, viewerScreenshotPath)
+      await page.screenshot({ path: viewerScreenshotPath })
+      if (!imageViewer.meta.includes('1 / 1') || !imageViewer.meta.includes('100%')) {
+        failures.push(`image viewer meta is ${imageViewer.meta || 'missing'}`)
+      }
+      if (!imageViewer.title) failures.push('image viewer title is missing')
+      if (imageViewer.horizontalOverflow) failures.push('image viewer has horizontal overflow')
+      await page.keyboard.press('Escape')
+      if (!(await viewer.isHidden().catch(() => false))) failures.push('image viewer did not close with Escape')
+    }
+
     let settingsNavigation = null
     if (baseline.verifySettingsNavigation) {
       const navItems = page.locator('.ndp-settings-nav-item')
@@ -741,6 +775,7 @@ try {
       metrics,
       expandedChat,
       chatUi,
+      imageViewer,
       settingsNavigation,
       settingsSearch,
       settingsConfirmDialog,

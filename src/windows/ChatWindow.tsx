@@ -5,6 +5,7 @@ import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, 
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
 import { MarkdownMessage } from '../components/MarkdownMessage'
 import { LocalVideo, MmvectorImagePreview } from '../components/MediaPreviews'
+import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
@@ -5001,97 +5002,6 @@ type ChatMessageItemProps = {
     inputPreview: string,
     ctx?: { taskId?: string; runId?: string; messageId?: string; oldImagePaths?: string[] },
   ) => Promise<string[]>
-}
-
-type ImageViewerItem = {
-  src: string
-  title: string
-}
-
-function ImageViewer(props: { items: ImageViewerItem[]; index: number; onIndexChange: (index: number) => void; onClose: () => void }) {
-  const { items, index, onIndexChange, onClose } = props
-  const [scale, setScale] = useState(1)
-  const [offset, setOffset] = useState({ x: 0, y: 0 })
-  const dragRef = useRef<{ pointerId: number; x: number; y: number; ox: number; oy: number } | null>(null)
-  const item = items[index]
-
-  useEffect(() => {
-    setScale(1)
-    setOffset({ x: 0, y: 0 })
-  }, [index])
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-      if (event.key === 'ArrowLeft') onIndexChange(Math.max(0, index - 1))
-      if (event.key === 'ArrowRight') onIndexChange(Math.min(items.length - 1, index + 1))
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [index, items.length, onClose, onIndexChange])
-
-  if (!item) return null
-
-  const reset = () => {
-    setScale(1)
-    setOffset({ x: 0, y: 0 })
-  }
-
-  return (
-    <div className="ndp-image-viewer" onMouseDown={(e) => e.stopPropagation()}>
-      <div className="ndp-image-viewer-shell">
-        <div className="ndp-image-viewer-toolbar">
-          <div className="ndp-image-viewer-title" title={item.title}>{item.title}</div>
-          <div className="ndp-image-viewer-meta">{index + 1} / {items.length} · {Math.round(scale * 100)}%</div>
-          <div className="ndp-image-viewer-tools">
-            <button className="ndp-image-viewer-btn" onClick={() => setScale((v) => Math.max(0.2, Number((v - 0.2).toFixed(2))))}>-</button>
-            <button className="ndp-image-viewer-btn" onClick={reset}>重置</button>
-            <button className="ndp-image-viewer-btn" onClick={() => setScale((v) => Math.min(8, Number((v + 0.2).toFixed(2))))}>+</button>
-            <button className="ndp-image-viewer-btn" onClick={onClose}>关闭</button>
-          </div>
-        </div>
-        <div
-          className="ndp-image-viewer-stage"
-          onWheel={(e) => {
-            e.preventDefault()
-            const delta = e.deltaY < 0 ? 0.15 : -0.15
-            setScale((v) => Math.max(0.2, Math.min(8, Number((v + delta).toFixed(2)))))
-          }}
-        >
-          <button className="ndp-image-viewer-nav" disabled={index <= 0} onClick={() => onIndexChange(Math.max(0, index - 1))}>‹</button>
-          <div
-            className="ndp-image-viewer-canvas"
-            onDoubleClick={reset}
-            onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId)
-              dragRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y }
-            }}
-            onPointerMove={(e) => {
-              const drag = dragRef.current
-              if (!drag || drag.pointerId !== e.pointerId) return
-              setOffset({ x: drag.ox + e.clientX - drag.x, y: drag.oy + e.clientY - drag.y })
-            }}
-            onPointerUp={(e) => {
-              if (dragRef.current?.pointerId === e.pointerId) dragRef.current = null
-            }}
-            onPointerCancel={(e) => {
-              if (dragRef.current?.pointerId === e.pointerId) dragRef.current = null
-            }}
-          >
-            <img
-              className="ndp-image-viewer-img"
-              src={item.src}
-              alt={item.title}
-              draggable={false}
-              style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
-            />
-          </div>
-          <button className="ndp-image-viewer-nav" disabled={index >= items.length - 1} onClick={() => onIndexChange(Math.min(items.length - 1, index + 1))}>›</button>
-        </div>
-        <div className="ndp-image-viewer-tip">滚轮缩放，按住左键拖动，双击重置，Esc 关闭</div>
-      </div>
-    </div>
-  )
 }
 
 // 单条聊天消息。memo 化后，流式 setMessages 只会重渲染内容变化的那一条，

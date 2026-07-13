@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第八批：`electron/main.ts` 计划内领域 IPC 拆分完成）
+- 状态：P2-1 进行中（第九批：Chat ImageViewer 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -606,6 +606,15 @@ AI 与能力
 - `electron/main.ts` 从第七批后的 1661 行降至 1299 行；相较 P2-1 开始时累计减少 1444 行，路线图中的 settings/chat/task/memory/tts/window IPC 分域注册目标已完成。
 - 新增 5 个 Window IPC 测试，覆盖 20 通道、窗口/深链、Orb 往返、overlay、拖拽阈值与尺寸锁定、吸附、菜单副作用、hover 身份和 ignore-mouse 参数。
 - 打包 IPC smoke 新增真实 Orb `ball → panel → ball`、overlay 设置/清理与启动 displayMode 接线；`npm test` 共 111 个用例通过，其余构建、媒体和 UI 门禁全部通过。P2-1 下一步进入 `ChatWindow.tsx` 组件与 hooks 拆分。
+
+### P2-1 进展记录（2026-07-13，第九批）
+
+- 将 Chat 消息图片查看器从 `ChatWindow.tsx` 迁移到 `src/windows/chat/ImageViewer.tsx`，独立封装图片选择、缩放、拖拽、重置、前后切换和 Esc 关闭。
+- 保留原有 DOM class、按钮文案、0.2 至 8 倍缩放范围、滚轮步长、索引边界和 transform 语义；`ChatMessageItem` 继续只持有查看器开关与当前索引。
+- `ChatWindow.tsx` 从 5636 行降至 5546 行；本批只移动 ImageViewer 职责，不修改会话、消息、附件、AI 请求或 TTS 状态。
+- 新增 2 个服务端渲染测试，覆盖选中图片、位置/缩放元数据、导航边界、操作提示和无有效 item 时的空渲染。
+- UI baseline 新增独立图片消息场景，实际打开查看器、验证 `1 / 1`、`100%`、无横向溢出与 Esc 关闭，并保存打开态截图；基线场景由 13 个增加到 14 个。
+- `npm test` 共 113 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 14 个 UI baseline 场景均通过。下一批继续拆分 `ChatMessageItem`。
 
 ## 14. P2-2：前端加载与运行性能
 
