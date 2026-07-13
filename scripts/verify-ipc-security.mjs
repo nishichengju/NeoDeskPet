@@ -496,6 +496,72 @@ try {
     'created task was not listed before restart',
   )
 
+  const taskLifecycle = await chat.evaluate(async () => {
+    const waitForStatus = async (taskId, expectedStatuses, timeoutMs = 10_000) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const current = await window.neoDeskPet.getTask(taskId)
+        if (current && expectedStatuses.includes(current.status)) return current
+        await new Promise((resolve) => window.setTimeout(resolve, 25))
+      }
+      const current = await window.neoDeskPet.getTask(taskId)
+      throw new Error(`task ${taskId} did not reach ${expectedStatuses.join('/')} (current=${current?.status ?? 'missing'})`)
+    }
+    const steps = Array.from({ length: 12 }, (_, index) => ({ title: `No-op lifecycle step ${index + 1}` }))
+
+    const pausable = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Pause Resume Task',
+      steps,
+    })
+    const runningBeforePause = await waitForStatus(pausable.id, ['running'])
+    const paused = await window.neoDeskPet.pauseTask(pausable.id)
+    const pausedStepIndex = paused?.currentStepIndex ?? -1
+    await new Promise((resolve) => window.setTimeout(resolve, 180))
+    const whilePaused = await window.neoDeskPet.getTask(pausable.id)
+    const resumed = await window.neoDeskPet.resumeTask(pausable.id)
+    const completed = await waitForStatus(pausable.id, ['done', 'failed', 'canceled'])
+
+    const cancelable = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Cancel Task',
+      steps,
+    })
+    const runningBeforeCancel = await waitForStatus(cancelable.id, ['running'])
+    const canceled = await window.neoDeskPet.cancelTask(cancelable.id)
+    await new Promise((resolve) => window.setTimeout(resolve, 180))
+    const afterCancel = await window.neoDeskPet.getTask(cancelable.id)
+    const pauseDismissed = await window.neoDeskPet.dismissTask(pausable.id)
+    const cancelDismissed = await window.neoDeskPet.dismissTask(cancelable.id)
+
+    return {
+      runningBeforePause,
+      paused,
+      pausedStepIndex,
+      whilePaused,
+      resumed,
+      completed,
+      runningBeforeCancel,
+      canceled,
+      afterCancel,
+      pauseDismissed,
+      cancelDismissed,
+    }
+  })
+  assert(taskLifecycle.runningBeforePause.status === 'running', 'pause/resume task never entered running state')
+  assert(taskLifecycle.paused?.status === 'paused', 'task pause did not persist paused state')
+  assert(taskLifecycle.whilePaused?.status === 'paused', 'task left paused state without resume')
+  assert(
+    taskLifecycle.whilePaused?.currentStepIndex === taskLifecycle.pausedStepIndex,
+    'task step cursor advanced while paused',
+  )
+  assert(taskLifecycle.resumed?.status === 'running', 'task resume did not persist running state')
+  assert(taskLifecycle.completed.status === 'done', `resumed task did not complete: ${taskLifecycle.completed.status}`)
+  assert(taskLifecycle.runningBeforeCancel.status === 'running', 'cancel task never entered running state')
+  assert(taskLifecycle.canceled?.status === 'canceled', 'task cancel did not persist canceled state')
+  assert(taskLifecycle.afterCancel?.status === 'canceled', 'canceled task changed state after cancellation')
+  assert(taskLifecycle.pauseDismissed?.ok && taskLifecycle.cancelDismissed?.ok, 'task lifecycle cleanup failed')
+
   const memoryCrudSeed = await settings.evaluate(async () => {
     const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
     const updatedPersona = await window.neoDeskPet.updatePersona(persona.id, {
@@ -756,6 +822,14 @@ try {
       beforeRestart: taskPersistenceBeforeRestart.loaded,
       afterRestart: taskPersistenceAfterRestart.loaded,
       dismiss: taskPersistenceAfterRestart.dismissed?.ok === true,
+    },
+    taskLifecycle: {
+      pausedStepIndex: taskLifecycle.pausedStepIndex,
+      whilePausedStepIndex: taskLifecycle.whilePaused?.currentStepIndex,
+      completedStatus: taskLifecycle.completed.status,
+      completedSteps: taskLifecycle.completed.currentStepIndex,
+      canceledStatus: taskLifecycle.afterCancel?.status,
+      cleanup: Boolean(taskLifecycle.pauseDismissed?.ok && taskLifecycle.cancelDismissed?.ok),
     },
     memoryCrud: {
       personaId: memoryCrudSeed.persona.id,

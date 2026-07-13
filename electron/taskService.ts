@@ -18,16 +18,10 @@ import { localMediaTypeFromPath } from './localMediaRegistry'
 import { isPathWithinRoot } from './localMediaPolicy'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
+import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, VisualArtifactRef } from './types'
 import { classifyVisionError, decideVisionRoute, resolveVisionFallbackProfile } from './visionRouter'
-
-type TaskRuntime = {
-  paused: boolean
-  canceled: boolean
-  waiters: Array<() => void>
-  cancelCurrent?: () => void
-}
 
 const MAX_STEP_OUTPUT_CHARS = 5000
 const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
@@ -545,19 +539,23 @@ async function imageUrlPartsFromLocalPaths(paths: string[], limit = 4): Promise<
 
 export class TaskService {
   private readonly taskStore: TaskStore
-  private readonly runtime = new Map<string, TaskRuntime>()
+  private readonly runtime = new TaskRuntimeRegistry()
+  private readonly scheduler: TaskScheduler
   private readonly visualContextByTask = new Map<string, TaskVisualContext>()
   private readonly visionCapabilityCache = new Map<string, 'supported' | 'unsupported'>()
   private readonly userDataDir: string
   private readonly mcpManager: McpManager | null
   private readonly skillManager: SkillManager
-  private schedulerTimer: NodeJS.Timeout | null = null
 
   constructor(opts: { onChanged: () => void; userDataDir: string; mcpManager?: McpManager | null }) {
     this.taskStore = new TaskStore({ onChanged: opts.onChanged })
     this.userDataDir = opts.userDataDir
     this.mcpManager = opts.mcpManager ?? null
     this.skillManager = new SkillManager({ workspaceDir: process.cwd() })
+    this.scheduler = new TaskScheduler({
+      readTasks: () => this.taskStore.readState().tasks,
+      startTask: (id) => this.startTask(id),
+    })
 
     this.taskStore.recoverInterruptedTasks()
   }
@@ -641,7 +639,7 @@ export class TaskService {
       draft.tasks = draft.tasks.slice(0, MAX_TASK_RECORDS)
     })
 
-    this.kickScheduler()
+    this.scheduler.kick()
     return record
   }
 
@@ -649,8 +647,7 @@ export class TaskService {
     const t = this.getTask(id)
     if (!t) return null
     if (t.status !== 'running') return t
-    const rt = this.ensureRuntime(t.id)
-    rt.paused = true
+    this.runtime.pause(t.id)
     this.writeState((draft) => {
       const it = draft.tasks.find((x) => x.id === t.id)
       if (!it) return
@@ -664,16 +661,14 @@ export class TaskService {
     const t = this.getTask(id)
     if (!t) return null
     if (t.status !== 'paused') return t
-    const rt = this.ensureRuntime(t.id)
-    rt.paused = false
-    for (const w of rt.waiters.splice(0)) w()
+    this.runtime.resume(t.id)
     this.writeState((draft) => {
       const it = draft.tasks.find((x) => x.id === t.id)
       if (!it) return
       it.status = 'running'
       it.updatedAt = now()
     })
-    this.kickScheduler()
+    this.scheduler.kick()
     return this.getTask(t.id)
   }
 
@@ -682,16 +677,8 @@ export class TaskService {
     if (!t) return null
     if (t.status === 'done' || t.status === 'failed' || t.status === 'canceled') return t
 
-    const rt = this.ensureRuntime(t.id)
-    rt.canceled = true
-    rt.paused = false
-    try {
-      rt.cancelCurrent?.()
-    } catch {
-      // ignore
-    }
+    this.runtime.cancel(t.id)
     void cancelCliExecStreamSessionsForTask(t.id).catch(() => undefined)
-    for (const w of rt.waiters.splice(0)) w()
 
     this.writeState((draft) => {
       const it = draft.tasks.find((x) => x.id === t.id)
@@ -721,35 +708,6 @@ export class TaskService {
   // Internal runner logic
   // =====================
 
-  private ensureRuntime(id: string): TaskRuntime {
-    const existing = this.runtime.get(id)
-    if (existing) return existing
-    const rt: TaskRuntime = { paused: false, canceled: false, waiters: [] }
-    this.runtime.set(id, rt)
-    return rt
-  }
-
-  private kickScheduler(): void {
-    if (this.schedulerTimer) return
-    this.schedulerTimer = setTimeout(() => {
-      this.schedulerTimer = null
-      this.runScheduler()
-    }, 30)
-  }
-
-  private runScheduler(): void {
-    const state = this.taskStore.readState()
-    const running = state.tasks.filter((t) => t.status === 'running').length
-    const capacity = Math.max(0, 3 - running)
-    if (capacity <= 0) return
-
-    const pending = state.tasks.filter((t) => t.status === 'pending').sort((a, b) => a.createdAt - b.createdAt)
-    const toStart = pending.slice(0, capacity)
-    for (const task of toStart) {
-      this.startTask(task.id)
-    }
-  }
-
   private startTask(id: string): void {
     const t = this.getTask(id)
     if (!t) return
@@ -767,11 +725,7 @@ export class TaskService {
   }
 
   private async waitIfPaused(id: string): Promise<void> {
-    const rt = this.ensureRuntime(id)
-    if (!rt.paused) return
-    await new Promise<void>((resolve) => {
-      rt.waiters.push(resolve)
-    })
+    await this.runtime.waitIfPaused(id)
   }
 
   private async executeToolByName(toolName: string, input: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
@@ -3327,7 +3281,7 @@ export class TaskService {
   }
 
   private async runTask(id: string): Promise<void> {
-    const rt = this.ensureRuntime(id)
+    const rt = this.runtime.ensure(id)
     try {
       while (!rt.canceled) {
         const t = this.getTask(id)
@@ -3351,7 +3305,7 @@ export class TaskService {
             it.endedAt = now()
           })
           this.runtime.delete(id)
-          this.kickScheduler()
+          this.scheduler.kick()
           return
         }
 
@@ -3459,7 +3413,7 @@ export class TaskService {
       rt.cancelCurrent = undefined
       this.runtime.delete(id)
       this.visualContextByTask.delete(id)
-      this.kickScheduler()
+      this.scheduler.kick()
     }
   }
 

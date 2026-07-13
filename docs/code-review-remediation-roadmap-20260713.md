@@ -713,6 +713,14 @@ AI 与能力
 - 打包 IPC smoke 新增真实任务往返：创建无工具任务、等待 step 完成、确认列表与输出，关闭应用后重启读取同一记录，再 dismiss 并确认移除。
 - `npm test` 共 40 个测试文件、163 个用例通过；TypeScript、lint、Windows unpacked 打包、任务/Chat/Memory/AI/TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task 调度与运行时状态机。
 
+### P2-1 进展记录（2026-07-13，第二十批）
+
+- 新增 `electron/task/taskRuntime.ts`，集中管理任务运行时的 paused/canceled 状态、暂停 waiter、当前执行取消回调，以及 3 并发、30ms kick 合并和最早 pending 优先的调度选择。
+- `TaskService` 的暂停、恢复、取消和暂停等待统一委托给 `TaskRuntimeRegistry`，任务创建、恢复与结束后的调度统一委托给 `TaskScheduler`；公开 IPC 返回值、持久化状态、调度参数和 step 执行顺序保持不变。
+- `taskService.ts` 从第十九批后的 3469 行降至 3423 行；新增 5 个运行时/调度器测试，覆盖 runtime 复用与删除、多个暂停 waiter 唤醒、取消回调异常隔离、并发槽位与 pending 顺序，以及重复 kick 合并。
+- 打包 IPC smoke 新增真实任务生命周期往返：暂停后等待 180ms 验证 step 游标不前进，恢复后 12 个无工具 step 全部完成；另一任务取消后等待 180ms 仍保持 canceled，最后确认两条任务均可 dismiss。
+- `npm test` 共 41 个测试文件、168 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 Task/Chat/Memory/AI/TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task 模型循环与工具执行边界。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

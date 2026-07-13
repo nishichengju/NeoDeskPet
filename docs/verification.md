@@ -403,3 +403,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改任务 store 文件名/schema、Task IPC 通道与返回值、任务创建字段、调度并发数、step 执行、Tool Agent、视觉回执、暂停/恢复/取消语义或样式。真实打包 smoke 覆盖正常完成任务的落盘、重启读取和删除；未通过强制杀进程制造正在执行的真实任务，pending/running/paused 崩溃恢复目前由注入 backend 的单元测试证明，暂停/恢复/取消、工具重试和长任务并发仍由后续 Task 状态机批次扩大验证。
+
+## P2-1：大型模块拆分与领域边界（第二十批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task 运行时状态、暂停 waiter、取消回调与并发调度器
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 41 个测试文件、168 个用例通过 |
+| Task 运行时测试 | runtime 复用/删除、多个暂停 waiter、恢复唤醒、取消异常隔离、并发槽位、最早 pending 优先和 kick 合并通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | 打包应用暂停后 180ms step 游标保持不变，恢复后 12 步完成，取消后 180ms 仍为 canceled，两条任务 dismiss 成功；其余 IPC、持久化、AI/TTS 代理和五类窗口继续通过且无运行时错误 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改任务 store 文件名/schema、Task IPC 通道与返回值、任务字段、3 并发与 30ms 调度参数、step/tool 执行、Tool Agent、视觉回执或样式。打包 smoke 已覆盖无工具任务的真实暂停、恢复、取消和清理，但未让外部 CLI/MCP/浏览器工具在执行中接受取消，也未启动三条真实长任务验证并发交错；这些路径继续由现有执行器行为与本批调度选择单元测试保护，并在后续工具执行拆分批次扩大真实回归。
