@@ -423,3 +423,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改任务 store 文件名/schema、Task IPC 通道与返回值、任务字段、3 并发与 30ms 调度参数、step/tool 执行、Tool Agent、视觉回执或样式。打包 smoke 已覆盖无工具任务的真实暂停、恢复、取消和清理，但未让外部 CLI/MCP/浏览器工具在执行中接受取消，也未启动三条真实长任务验证并发交错；这些路径继续由现有执行器行为与本批调度选择单元测试保护，并在后续工具执行拆分批次扩大真实回归。
+
+## P2-1：大型模块拆分与领域边界（第二十一批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task Agent 工具目录、native/text 名称解析与文本工具协议
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 42 个测试文件、174 个用例通过 |
+| Agent 工具协议测试 | 内部名/native callName/供应商前缀、VCP 噪声、旧 fetch 别名、建议、完整/未闭合请求、JSON/文本输入、展示隐藏、稳定键、结果块和工具指南通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | 打包应用完成两轮 `agent.run` 文本协议：解析 TOOL_REQUEST、执行并记录 `delay.sleep`、回送 TOOL_RESULT、持久化最终答复并 dismiss；两轮密钥注入、原有任务生命周期和其余 IPC smoke 全部通过 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改工具定义/schema、启用策略、Task IPC、任务存储、模型参数、最大回合、视觉回执或界面样式。打包 smoke 已覆盖 OpenAI-compatible 文本工具协议和真实内置工具执行，但未连接真实 provider 验证 native `tool_calls`/legacy `function_call`、Claude Messages 流事件或供应商特有分块；native 名称与前缀解析目前由新增单元测试覆盖，这些传输差异将在下一批 LLM provider/SSE 拆分时扩大回归。

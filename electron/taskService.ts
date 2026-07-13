@@ -9,7 +9,6 @@ import {
   isToolEnabled,
   toOpenAITools,
   type OpenAIFunctionToolSpec,
-  type ToolDefinition,
 } from './toolRegistry'
 import { getLive2dCapabilities } from './live2dToolState'
 import { readLive2dModelMetadata } from './live2dModelMetadata'
@@ -18,6 +17,15 @@ import { localMediaTypeFromPath } from './localMediaRegistry'
 import { isPathWithinRoot } from './localMediaPolicy'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
+import {
+  buildToolResultBlock,
+  findLastCompleteToolRequestEnd,
+  hasToolRequestMarker,
+  makeToolCallKey,
+  stableStringify,
+  stripToolRequestBlocksForDisplay,
+  TaskAgentToolCatalog,
+} from './task/taskAgentTools'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, VisualArtifactRef } from './types'
@@ -1130,29 +1138,7 @@ export class TaskService {
       if (visionLook) toolDefs.push(visionLook)
     }
     const tools: OpenAIFunctionToolSpec[] = toOpenAITools(toolDefs)
-
-    const toolByName = new Map<string, ToolDefinition>()
-    const toolByCallName = new Map<string, ToolDefinition>()
-    for (const d of toolDefs) {
-      toolByName.set(d.name, d)
-      toolByCallName.set(d.callName, d)
-    }
-
-    const resolveToolDefByCallName = (callNameRaw: string): ToolDefinition | null => {
-      const needle = (callNameRaw ?? '').trim()
-      if (!needle) return null
-
-      const exact = toolByCallName.get(needle) ?? null
-      if (exact) return exact
-
-      // Gemini(OpenAI-compat) 可能会返回类似 "default_api:ndp_xxx" 的前缀
-      if (needle.includes(':')) {
-        const tail = needle.split(':').pop()?.trim() ?? ''
-        if (tail && tail !== needle) return toolByCallName.get(tail) ?? null
-      }
-
-      return toolByName.get(needle) ?? null
-    }
+    const toolCatalog = new TaskAgentToolCatalog(toolDefs)
 
     const skillSystemMessages: Array<Record<string, unknown>> = []
     let effectiveAgentRequest = request
@@ -2179,152 +2165,6 @@ export class TaskService {
       throw new Error('llm request retry exhausted')
     }
 
-    const TOOL_REQUEST_START = '<<<[TOOL_REQUEST]>>>'
-    const TOOL_REQUEST_END = '<<<[END_TOOL_REQUEST]>>>'
-    const TOOL_RESULT_START = '<<<[TOOL_RESULT]>>>'
-    const TOOL_RESULT_END = '<<<[END_TOOL_RESULT]>>>'
-    const VCP_VALUE_START = '「始」'
-    const VCP_VALUE_END = '「末」'
-    const TOOL_REQUEST_START_RE = /<{2,}\[TOOL_REQUEST\]>{2,}/gi
-    const TOOL_REQUEST_END_RE = /<{2,}\[END_TOOL_REQUEST\]>{2,}/gi
-
-    const findToolRequestMarker = (
-      text: string,
-      from: number,
-      kind: 'start' | 'end',
-    ): { index: number; length: number } | null => {
-      const re = kind === 'start' ? TOOL_REQUEST_START_RE : TOOL_REQUEST_END_RE
-      re.lastIndex = Math.max(0, from)
-      const m = re.exec(text)
-      if (!m) return null
-      return { index: m.index, length: m[0]?.length ?? 0 }
-    }
-
-    const hasToolRequestMarker = (text: string): boolean => {
-      const raw = String(text ?? '')
-      return /<{2,}\[TOOL_REQUEST\]>{2,}/i.test(raw)
-    }
-
-    const TEXT_TOOL_NAME_ALIASES: Record<string, string> = {
-      'mcp.fetch.fetch': 'browser.fetch',
-      'fetch.fetch': 'browser.fetch',
-      'web.fetch': 'browser.fetch',
-      'http.fetch': 'browser.fetch',
-      'url.fetch': 'browser.fetch',
-    }
-
-    const unwrapVcpValue = (value: unknown): string => {
-      let out = String(value ?? '').trim()
-      if (out.startsWith(VCP_VALUE_START) && out.endsWith(VCP_VALUE_END) && out.length >= VCP_VALUE_START.length + VCP_VALUE_END.length) {
-        out = out.slice(VCP_VALUE_START.length, out.length - VCP_VALUE_END.length).trim()
-      }
-      const pairs: Array<[string, string]> = [
-        ['"', '"'],
-        ["'", "'"],
-        ['“', '”'],
-        ['‘', '’'],
-      ]
-      for (const [l, r] of pairs) {
-        if (out.startsWith(l) && out.endsWith(r) && out.length >= l.length + r.length) {
-          out = out.slice(l.length, out.length - r.length).trim()
-          break
-        }
-      }
-      return out
-    }
-
-    const stripToolNameProtocolNoise = (value: unknown): string => {
-      let out = unwrapVcpValue(value)
-        .replace(/```[a-zA-Z0-9_-]*|```/g, '')
-        .replace(/^tool_name\s*[:：]\s*/i, '')
-        .trim()
-
-      // 兼容弱模型把 VCP 包裹符号写成 `「skill.read」始` / `skill.read「末」` 的情况。
-      out = out.replace(/[「」]/g, '').replace(/^(?:始|末)+/g, '').replace(/(?:始|末)+$/g, '').trim()
-      out = out.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '').trim()
-
-      const token = out.match(/[A-Za-z][A-Za-z0-9_.:-]*/)?.[0]
-      return (token ?? out).trim()
-    }
-
-    const resolveTextToolName = (
-      toolNameRaw: string,
-    ): { requestedName: string; cleanedName: string; effectiveName: string; def: ToolDefinition | null; aliasApplied: boolean } => {
-      const requestedName = String(toolNameRaw ?? '').trim()
-      const cleanedName = stripToolNameProtocolNoise(requestedName)
-
-      const direct = toolByName.get(cleanedName) ?? resolveToolDefByCallName(cleanedName)
-      if (direct) {
-        return { requestedName, cleanedName, effectiveName: direct.name, def: direct, aliasApplied: false }
-      }
-
-      const aliasTarget = TEXT_TOOL_NAME_ALIASES[cleanedName] ?? TEXT_TOOL_NAME_ALIASES[cleanedName.toLowerCase()]
-      if (aliasTarget) {
-        const aliased = toolByName.get(aliasTarget) ?? resolveToolDefByCallName(aliasTarget)
-        return { requestedName, cleanedName, effectiveName: aliasTarget, def: aliased, aliasApplied: Boolean(aliased) }
-      }
-
-      return { requestedName, cleanedName, effectiveName: cleanedName, def: null, aliasApplied: false }
-    }
-
-    const suggestToolNames = (toolNameRaw: string): string[] => {
-      const needle = stripToolNameProtocolNoise(toolNameRaw).toLowerCase()
-      if (!needle) return []
-
-      const parts = needle.split(/[.:_-]+/).filter(Boolean)
-      const tail = parts.at(-1) ?? needle
-      const scored = toolDefs
-        .map((d) => {
-          const name = d.name.toLowerCase()
-          const call = d.callName.toLowerCase()
-          let score = 0
-          if (name === needle || call === needle) score += 100
-          if (name.includes(needle) || call.includes(needle)) score += 30
-          if (tail && (name.includes(tail) || call.includes(tail))) score += 10
-          return { name: d.name, score }
-        })
-        .filter((x) => x.score > 0)
-        .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-        .slice(0, 5)
-        .map((x) => x.name)
-
-      return Array.from(new Set(scored))
-    }
-
-    const findLastCompleteToolRequestEnd = (text: string): number => {
-      const raw = String(text ?? '')
-      let cursor = 0
-      let lastEnd = -1
-      while (cursor < raw.length) {
-        const s = findToolRequestMarker(raw, cursor, 'start')
-        if (!s) break
-        const e = findToolRequestMarker(raw, s.index + s.length, 'end')
-        if (!e) break
-        lastEnd = e.index + e.length
-        cursor = lastEnd
-      }
-      return lastEnd
-    }
-
-    const stripToolRequestBlocksForDisplay = (text: string): string => {
-      const raw = String(text ?? '')
-      if (!hasToolRequestMarker(raw)) return raw
-      let out = ''
-      let cursor = 0
-      while (cursor < raw.length) {
-        const s = findToolRequestMarker(raw, cursor, 'start')
-        if (!s) {
-          out += raw.slice(cursor)
-          break
-        }
-        out += raw.slice(cursor, s.index)
-        const e = findToolRequestMarker(raw, s.index + s.length, 'end')
-        if (!e) break // 未闭合：隐藏剩余部分，避免 UI 暴露协议块
-        cursor = e.index + e.length
-      }
-      return out
-    }
-
     const callLlmText = async (
       visionRetryAttempt = 0,
       opts?: { onDelta?: (delta: string) => void; stopOnToolRequest?: boolean },
@@ -2502,133 +2342,6 @@ export class TaskService {
       throw new Error('llm request retry exhausted')
     }
 
-    type TextToolRequest = { toolName: string; input: ToolInput; rawToolName?: string; cleanedToolName?: string; aliasApplied?: boolean }
-
-    const parseToolRequests = (text: string): { cleaned: string; calls: TextToolRequest[] } => {
-      const raw = String(text ?? '')
-      if (!hasToolRequestMarker(raw)) return { cleaned: raw.trim(), calls: [] }
-
-      const calls: TextToolRequest[] = []
-      let cleaned = ''
-      let cursor = 0
-      while (cursor < raw.length) {
-        const s = findToolRequestMarker(raw, cursor, 'start')
-        if (!s) {
-          cleaned += raw.slice(cursor)
-          break
-        }
-        cleaned += raw.slice(cursor, s.index)
-        const e = findToolRequestMarker(raw, s.index + s.length, 'end')
-        if (!e) {
-          cleaned += raw.slice(s.index)
-          break
-        }
-        const block = raw.slice(s.index + s.length, e.index).trim()
-        cursor = e.index + e.length
-
-        const paramRegex = /([\w_]+)\s*[:：]\s*「始」([\s\S]*?)「末」\s*(?:,)?/g
-        let m: RegExpExecArray | null
-        let toolName = ''
-        let inputJson = ''
-        const kv: Record<string, unknown> = {}
-        while ((m = paramRegex.exec(block)) !== null) {
-          const key = m[1]
-          const val = m[2]?.trim() ?? ''
-          if (key === 'tool_name') toolName = val
-          else if (key === 'input_json') inputJson = val
-          else kv[key] = val
-        }
-
-        if (!toolName) {
-          const mm = block.match(/tool_name\s*[:：]\s*([^\r\n]+)/i)
-          if (mm?.[1]) toolName = mm[1]
-        }
-        if (!inputJson) {
-          const mm = block.match(/input_json\s*[:：]\s*([\s\S]*)$/i)
-          if (mm?.[1]) inputJson = mm[1]
-        }
-
-        const rawToolName = unwrapVcpValue(toolName).trim()
-        const resolvedTool = resolveTextToolName(rawToolName)
-        toolName = resolvedTool.effectiveName
-        inputJson = unwrapVcpValue(inputJson)
-        if (!toolName) continue
-
-        let input: ToolInput = {}
-        if (inputJson.trim()) {
-          try {
-            input = JSON.parse(inputJson) as ToolInput
-          } catch {
-            input = inputJson
-          }
-        } else {
-          input = kv as ToolInput
-        }
-
-        calls.push({
-          toolName,
-          rawToolName: resolvedTool.requestedName && resolvedTool.requestedName !== toolName ? resolvedTool.requestedName : undefined,
-          cleanedToolName: resolvedTool.cleanedName && resolvedTool.cleanedName !== toolName ? resolvedTool.cleanedName : undefined,
-          aliasApplied: resolvedTool.aliasApplied,
-          input,
-        })
-      }
-
-      return { cleaned: cleaned.trim(), calls }
-    }
-
-    const buildToolGuideForTextMode = (): string => {
-      const lines: string[] = []
-      lines.push('重要：工具输出是事实来源。严禁编造/猜测工具执行结果。')
-      lines.push('如果工具结果块（TOOL_RESULT）为空、乱码、或与你需要的答案不一致：必须明确说明“工具输出不可用/无法解析”，并优先选择重试（可换更简单/更稳的命令或加 -NoProfile）。')
-      lines.push('只有当不需要工具时，才直接给最终回答。')
-      lines.push('重要：用户要求截图、识图、搜索/查询最新信息、打开并操作网页、读写/修改文件、运行命令、下载/安装/执行程序时，必须先调用工具；没有工具结果时禁止声称已经做过。')
-      lines.push('当你需要调用工具时：不要输出任何自然语言前置话术，直接输出一个或多个工具调用块（TOOL_REQUEST）。')
-      lines.push('')
-      lines.push('你可以通过下面的兼容工具调用格式来调用工具。')
-      lines.push('重要：用户仅说“打开/进入某网站”且不需要后续搜索、点击、截图、提取时，才用 browser.open。browser.open 打开的是系统浏览器，不能继续自动化；只要任务包含搜索、点击、打开结果、截图或读取页面状态，必须使用 browser.playwright/browser.scan/browser.exec_js/browser.screenshot。')
-      lines.push('重要：连续操作同一动态网页时，先用 browser.tabs/browser.scan 获取 tabId，后续 browser.scan/browser.exec_js/browser.screenshot 都绑定同一个 tabId；不要为了“当前页提取/截图”重复调用带 url 的 browser.playwright。')
-      lines.push('重要：无头浏览器默认不要传 channel，使用与 Playwright 版本匹配的内置 Chromium；只有明确需要用户手动登录/观察时才传 headless=false，并可在 Windows 使用 channel=msedge。')
-      lines.push('重要：screen.capture 才是系统桌面/显示器截图；browser.screenshot 只截桌宠内置 Playwright 标签页，不等于用户当前前台屏幕。')
-      lines.push('重要：点击或搜索后如果工具结果显示 activePageChanged/newTabs，说明页面已跳转或新标签已打开，不要误判“没反应”；继续使用返回的 tabId/活动页操作。')
-      lines.push('重要：单页目标任务完成并确认目标页已打开后，可用 browser.close_tabs 关闭非活动旧标签，避免 persistent profile 下历史标签反复恢复。')
-      lines.push('重要：一次性无头网页任务完成且不再需要后续操作时，调用 browser.close 关闭对应 profile 的浏览器进程；浏览器服务也会自动回收长期空闲上下文。')
-      lines.push('重要：screen.capture/browser.screenshot/image.generate 产出的图片只会登记为视觉产物，不会自动查看。工具结果会给出安全 artifact ID；确实需要依据画面回答时才调用 vision.look。')
-      lines.push('重要：用户只是称赞、闲聊、要求继续或明确说不要看图时，不要调用 vision.look；需要看第几张或比较多张时，仅选择对应 artifactIds 并保持用户指定顺序。')
-      lines.push('重要：只有用户明确要求生图/画图/NovelAI 生成图片时，才调用 image.generate；不要后台循环或批量自动生图。')
-      if (settings.novelai?.promptRules?.trim()) {
-        lines.push('NovelAI 文生图规则：')
-        lines.push(settings.novelai.promptRules.trim().slice(0, 2400))
-      }
-      lines.push('重要：这里的“当前页”仅指桌宠内置 Playwright profile 的活动标签页，不等于系统浏览器前台页；若返回 about:blank，先用 browser.tabs 确认实际 tabId。')
-      lines.push('重要：Windows 下执行带空格/引号/管道的命令时，优先用 cmd+args 形式调用 powershell -NoProfile -Command；运行 .py 必须写 python "脚本.py"，不要用 & "脚本.py" 直接执行；不要用 cmd.exe line 字符串拼接复杂路径。修改 UTF-8 文件时优先用 file.write 或 PowerShell 明确 -Encoding UTF8，不要用 sed 盲替换。')
-      lines.push('重要：如果用户点名“用 grok 搜索/查”，先用 skill.read 读取 grok-x-search-skill 并按技能运行脚本；不要先用 browser.fetch/mcp.fetch.fetch 抓搜索引擎页面。')
-      lines.push('重要：抓取网页文本用 browser.fetch；不要使用 mcp.fetch.fetch、fetch.fetch 这类其他框架里的工具名。读取技能步骤用 skill.read。')
-      lines.push('')
-      lines.push('格式（必须严格匹配，不要放在代码块里）：')
-      lines.push(TOOL_REQUEST_START)
-      lines.push(`tool_name:${VCP_VALUE_START}browser.fetch${VCP_VALUE_END}`)
-      lines.push(`input_json:${VCP_VALUE_START}{"url":"https://example.com","stripHtml":true}${VCP_VALUE_END}`)
-      lines.push(TOOL_REQUEST_END)
-      lines.push('')
-      lines.push('工具返回后，你会收到工具结果块（TOOL_RESULT）；然后继续下一步或给出最终答复。')
-      lines.push('')
-      lines.push('可用工具（tool_name 必须使用下面的内部名，不要编造）：')
-      for (const d of toolDefs) {
-        const schema = (() => {
-          try {
-            const s = JSON.stringify(d.inputSchema)
-            return s.length > 800 ? s.slice(0, 800) + '…' : s
-          } catch {
-            return '{}'
-          }
-        })()
-        lines.push(`- ${d.name}：${d.description}`)
-        lines.push(`  input_schema: ${schema}`)
-      }
-      return lines.join('\n')
-    }
-
     type AgentToolExecution = {
       output: string
       modelOutput?: string
@@ -2641,10 +2354,10 @@ export class TaskService {
       toolNameRaw: string,
       input: ToolInput,
     ): Promise<AgentToolExecution> => {
-      const resolvedTool = resolveTextToolName(toolNameRaw)
+      const resolvedTool = toolCatalog.resolveTextName(toolNameRaw)
       const def = resolvedTool.def
       if (!def) {
-        const suggestions = suggestToolNames(resolvedTool.cleanedName || toolNameRaw)
+        const suggestions = toolCatalog.suggestNames(resolvedTool.cleanedName || toolNameRaw)
         const suffix = suggestions.length ? `；相近可用工具：${suggestions.join('、')}` : ''
         const cleaned = resolvedTool.cleanedName && resolvedTool.cleanedName !== toolNameRaw ? `（清洗后：${resolvedTool.cleanedName}）` : ''
         throw new Error(`未知工具：${toolNameRaw}${cleaned}${suffix}`)
@@ -2655,7 +2368,7 @@ export class TaskService {
         pushLog(`[Tool] normalize${via}: ${resolvedTool.requestedName || toolNameRaw} -> ${def.name}`, true)
       }
 
-      const key = makeCallKey(def.name, input)
+      const key = makeToolCallKey(def.name, input)
       const cached = executedCalls.get(key)
       if (cached && typeof cached === 'object') {
         pushLog(`[Tool] ${def.name} skip duplicate`, true)
@@ -2689,29 +2402,6 @@ export class TaskService {
 
     const executedCalls = new Map<string, AgentToolExecution>()
     const executedCallOrder: Array<{ toolName: string; input: ToolInput; output: string }> = []
-
-    const stableStringify = (v: unknown): string => {
-      if (v == null) return 'null'
-      const t = typeof v
-      if (t === 'string') return JSON.stringify(v)
-      if (t === 'number' || t === 'boolean') return String(v)
-      if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`
-      if (t !== 'object') return JSON.stringify(String(v))
-
-      const obj = v as Record<string, unknown>
-      const keys = Object.keys(obj).sort()
-      return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`
-    }
-
-    const makeCallKey = (toolName: string, input: ToolInput): string => `${toolName}::${stableStringify(input)}`
-
-    const toolResultBlockFor = (toolName: string, toolMsg: string): string =>
-      [
-        TOOL_RESULT_START,
-        `tool_name:${VCP_VALUE_START}${toolName}${VCP_VALUE_END}`,
-        `result:${VCP_VALUE_START}${toolMsg}${VCP_VALUE_END}`,
-        TOOL_RESULT_END,
-      ].join('\n')
 
     const buildEvidenceText = (): string => {
       const parts: string[] = []
@@ -2945,7 +2635,7 @@ export class TaskService {
           await this.waitIfPaused(task.id)
           if (rt.canceled) throw new Error('canceled')
 
-          const def = resolveToolDefByCallName(call.function.name)
+          const def = toolCatalog.resolveCallName(call.function.name)
           if (!def) {
             const errText = `未知工具：${call.function.name}`
             pushLog(`[Tool] ${errText}`)
@@ -2981,7 +2671,7 @@ export class TaskService {
           let toolImagePaths: string[] = []
           let toolExec: AgentToolExecution | null = null
           try {
-            const key = makeCallKey(def.name, toolInput)
+            const key = makeToolCallKey(def.name, toolInput)
             const cached = executedCalls.get(key)
             if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${def.name} skip duplicate`, true)
@@ -3010,7 +2700,7 @@ export class TaskService {
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             toolOut = `[error] ${msg}`
-            const key = makeCallKey(def.name, toolInput)
+            const key = makeToolCallKey(def.name, toolInput)
             if (!executedCalls.has(key)) {
               toolExec = { output: toolOut, images: [], imagePaths: [] }
               executedCalls.set(key, toolExec)
@@ -3059,7 +2749,7 @@ export class TaskService {
     }
 
     const runText = async (): Promise<string> => {
-      const guide = buildToolGuideForTextMode()
+      const guide = toolCatalog.buildTextModeGuide(settings.novelai?.promptRules)
       const userIdx = messages.findIndex((m) => m.role === 'user')
       if (userIdx > 0) messages.splice(userIdx, 0, { role: 'system', content: guide })
       else messages.push({ role: 'system', content: guide })
@@ -3102,7 +2792,7 @@ export class TaskService {
           cumulativeUsage.totalTokens += usage.totalTokens
         }
 
-        const { cleaned, calls } = parseToolRequests(contentText)
+        const { cleaned, calls } = toolCatalog.parseTextRequests(contentText)
         applyTurnDraft(cleaned, true)
         if (!calls.length) {
           pushLog('[Agent] done', true)
@@ -3131,7 +2821,7 @@ export class TaskService {
           let toolImagePaths: string[] = []
           let toolExec: AgentToolExecution | null = null
           try {
-            const key = makeCallKey(c.toolName, c.input ?? {})
+            const key = makeToolCallKey(c.toolName, c.input ?? {})
             const cached = executedCalls.get(key)
             if (cached && typeof cached === 'object') {
               pushLog(`[Tool] ${c.toolName} skip duplicate`, true)
@@ -3147,7 +2837,7 @@ export class TaskService {
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             toolOut = `[error] ${msg}`
-            const key = makeCallKey(c.toolName, c.input ?? {})
+            const key = makeToolCallKey(c.toolName, c.input ?? {})
             if (!executedCalls.has(key)) {
               toolExec = { output: toolOut, images: [], imagePaths: [] }
               executedCalls.set(key, toolExec)
@@ -3180,12 +2870,7 @@ export class TaskService {
             endedAt: now(),
           })
 
-          const toolResultBlock = [
-            TOOL_RESULT_START,
-            `tool_name:${VCP_VALUE_START}${c.toolName}${VCP_VALUE_END}`,
-            `result:${VCP_VALUE_START}${toolMsg}${VCP_VALUE_END}`,
-            TOOL_RESULT_END,
-          ].join('\n')
+          const toolResultBlock = buildToolResultBlock(c.toolName, toolMsg)
 
           const visionParts = toolExec?.visionParts ?? []
           if (visionParts.length > 0) {
@@ -3272,7 +2957,7 @@ export class TaskService {
         })
         for (const r of executedCallOrder) {
           const toolMsg = clampText(r.output, 4000) || '(空)'
-          messages.push({ role: 'user', content: toolResultBlockFor(r.toolName, toolMsg) })
+          messages.push({ role: 'user', content: buildToolResultBlock(r.toolName, toolMsg) })
         }
       }
 

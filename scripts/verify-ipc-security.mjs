@@ -43,16 +43,30 @@ const aiServer = http.createServer(async (request, response) => {
   }
 
   const body = bodyText ? JSON.parse(bodyText) : {}
+  const messageText = JSON.stringify(body.messages ?? [])
+  const hasAgentToolResult = messageText.includes('<<<[TOOL_RESULT]>>>')
   aiRequests.push({
     path: request.url,
     authMatches: request.headers.authorization === `Bearer ${aiSmokeKey}`,
     streaming: body.stream === true,
     model: body.model,
+    hasAgentToolResult,
   })
 
   if (body.stream === true) {
     response.writeHead(200, { 'Content-Type': 'text/event-stream' })
-    response.write('data: {"choices":[{"delta":{"content":"代理"}}]}\n\n')
+    const content =
+      body.model === 'ipc-agent-smoke'
+        ? hasAgentToolResult
+          ? 'Agent protocol smoke complete.'
+          : [
+              '<<<[TOOL_REQUEST]>>>',
+              'tool_name:「始」delay.sleep「末」',
+              'input_json:「始」{"ms":1}「末」',
+              '<<<[END_TOOL_REQUEST]>>>',
+            ].join('\n')
+        : '代理'
+    response.write(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`)
     response.end('data: [DONE]\n\n')
     return
   }
@@ -562,6 +576,52 @@ try {
   assert(taskLifecycle.afterCancel?.status === 'canceled', 'canceled task changed state after cancellation')
   assert(taskLifecycle.pauseDismissed?.ok && taskLifecycle.cancelDismissed?.ok, 'task lifecycle cleanup failed')
 
+  await settings.evaluate(async () => {
+    await window.neoDeskPet.setAISettings({ model: 'ipc-agent-smoke' })
+    await window.neoDeskPet.setOrchestratorSettings({ toolCallingMode: 'text', skillEnabled: false })
+  })
+  const taskAgentProtocol = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Agent Text Protocol Task',
+      steps: [
+        {
+          title: 'Run text tool protocol',
+          tool: 'agent.run',
+          input: JSON.stringify({ request: 'Run the smoke delay tool, then finish.', mode: 'text', maxTurns: 3 }),
+        },
+      ],
+    })
+    const deadline = Date.now() + 15_000
+    let completed = null
+    while (Date.now() < deadline) {
+      completed = await window.neoDeskPet.getTask(created.id)
+      if (completed && ['done', 'failed', 'canceled'].includes(completed.status)) break
+      await new Promise((resolve) => window.setTimeout(resolve, 25))
+    }
+    const dismissed = await window.neoDeskPet.dismissTask(created.id)
+    return { taskId: created.id, completed, dismissed }
+  })
+  await settings.evaluate(() => window.neoDeskPet.setAISettings({ model: 'ipc-smoke' }))
+  const taskAgentRequests = aiRequests.filter((request) => request.model === 'ipc-agent-smoke')
+  assert(taskAgentProtocol.completed?.status === 'done', `agent text protocol task failed: ${taskAgentProtocol.completed?.lastError ?? 'missing'}`)
+  assert(
+    taskAgentProtocol.completed?.steps[0]?.output === 'Agent protocol smoke complete.',
+    'agent text protocol final output was not persisted',
+  )
+  assert(
+    taskAgentProtocol.completed?.toolRuns?.some((run) => run.toolName === 'delay.sleep' && run.status === 'done'),
+    'agent text protocol did not execute and record delay.sleep',
+  )
+  assert(
+    taskAgentRequests.length === 2 &&
+      taskAgentRequests.every((request) => request.authMatches) &&
+      taskAgentRequests[0]?.hasAgentToolResult === false &&
+      taskAgentRequests[1]?.hasAgentToolResult === true,
+    'agent text protocol did not round-trip TOOL_REQUEST and TOOL_RESULT through the packaged task runner',
+  )
+  assert(taskAgentProtocol.dismissed?.ok, 'agent text protocol task cleanup failed')
+
   const memoryCrudSeed = await settings.evaluate(async () => {
     const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
     const updatedPersona = await window.neoDeskPet.updatePersona(persona.id, {
@@ -830,6 +890,14 @@ try {
       completedSteps: taskLifecycle.completed.currentStepIndex,
       canceledStatus: taskLifecycle.afterCancel?.status,
       cleanup: Boolean(taskLifecycle.pauseDismissed?.ok && taskLifecycle.cancelDismissed?.ok),
+    },
+    taskAgentProtocol: {
+      status: taskAgentProtocol.completed?.status,
+      output: taskAgentProtocol.completed?.steps[0]?.output,
+      toolRuns: taskAgentProtocol.completed?.toolRuns,
+      requestCount: taskAgentRequests.length,
+      resultRoundTrip: taskAgentRequests[1]?.hasAgentToolResult === true,
+      cleanup: taskAgentProtocol.dismissed?.ok === true,
     },
     memoryCrud: {
       personaId: memoryCrudSeed.persona.id,

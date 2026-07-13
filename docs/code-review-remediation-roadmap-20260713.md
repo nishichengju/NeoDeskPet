@@ -721,6 +721,14 @@ AI 与能力
 - 打包 IPC smoke 新增真实任务生命周期往返：暂停后等待 180ms 验证 step 游标不前进，恢复后 12 个无工具 step 全部完成；另一任务取消后等待 180ms 仍保持 canceled，最后确认两条任务均可 dismiss。
 - `npm test` 共 41 个测试文件、168 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 Task/Chat/Memory/AI/TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task 模型循环与工具执行边界。
 
+### P2-1 进展记录（2026-07-13，第二十一批）
+
+- 新增 `electron/task/taskAgentTools.ts`，集中管理 Agent 工具目录、native function callName/供应商前缀解析、文本工具名清洗与旧 fetch 别名、相近工具建议、TOOL_REQUEST 解析/流式隐藏、文本模式工具指南、TOOL_RESULT 构造和稳定重复调用键。
+- `TaskService` 的 native 与 text 两条模型循环改为共用 `TaskAgentToolCatalog`；工具定义过滤、调用顺序、文本协议格式、弱模型兼容、重复工具结果缓存和最终消息结构保持不变。
+- `taskService.ts` 从第二十批后的 3423 行降至 3108 行；新增 6 个 Agent 工具目录/协议测试，覆盖内部名、native callName、Gemini 风格前缀、VCP 噪声、旧 fetch 别名、工具建议、完整/未闭合协议块、JSON/纯文本输入、展示隐藏、稳定键和工具指南。
+- 打包 IPC smoke 新增真实 `agent.run` 文本协议往返：假 OpenAI-compatible 服务先返回 `TOOL_REQUEST`，打包应用解析并执行 `delay.sleep`、记录成功 toolRun，再把 `TOOL_RESULT` 送入第二轮并持久化最终答复，最后 dismiss 清理；两轮请求均验证主进程密钥注入。
+- `npm test` 共 42 个测试文件、174 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 Agent/Task/Chat/Memory/AI/TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task Agent 的 LLM provider payload、SSE 与重试传输边界。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤
