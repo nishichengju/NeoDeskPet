@@ -1,17 +1,18 @@
 // 聊天窗口：会话管理、流式对话、TTS/规划器与消息渲染（自 App.tsx 拆出）
 
 import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolRegistry'
-import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, ContextUsageSnapshot, McpStateSnapshot, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, TaskStepRecord, VisualArtifactRef } from '../../electron/types'
+import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, ContextUsageSnapshot, McpStateSnapshot, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
 import { MarkdownMessage } from '../components/MarkdownMessage'
 import { LocalVideo, MmvectorImagePreview } from '../components/MediaPreviews'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
 import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
+import { ChatToolUseCard } from './chat/ChatToolUseCard'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
 import { splitTextIntoTtsSegments } from '../services/textSegmentation'
-import { BUBBLE_PREVIEW_FALLBACK_PREFIX, buildContextCompressionSummaryPrompt, buildInterruptedStreamContent, canonicalizeLocalImagePath, collapseAssistantRuns, computeAppendDelta, filterVisibleToolRuns, isAgentShellToolName, joinTextBlocks, mergeLeadingPunctuationAcrossToolBoundary, normalizeAssistantDisplayText, normalizeInterleavedTextSegment, normalizeMessageBlocks, pickRicherToolBlocks, sliceTail, toLocalMediaSrc } from '../utils/chatMessages'
+import { BUBBLE_PREVIEW_FALLBACK_PREFIX, buildContextCompressionSummaryPrompt, buildInterruptedStreamContent, canonicalizeLocalImagePath, collapseAssistantRuns, computeAppendDelta, filterVisibleToolRuns, joinTextBlocks, mergeLeadingPunctuationAcrossToolBoundary, normalizeAssistantDisplayText, normalizeInterleavedTextSegment, normalizeMessageBlocks, pickRicherToolBlocks, sliceTail, toLocalMediaSrc } from '../utils/chatMessages'
 import { createStreamFlushThrottle, extractLastLive2DTags, extractLive2DTags, extractTailLive2DTags } from '../utils/live2dStream'
 import { buildPlannerSystemPrompt, parsePlannerDecision, requestLikelyNeedsToolAction } from '../utils/planner'
 import { buildToolResultSystemAddon, buildWorldBookAddon } from '../utils/promptAddons'
@@ -5027,8 +5028,6 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
   } = props
   const isUser = m.role === 'user'
   const [imageViewer, setImageViewer] = useState<{ items: ImageViewerItem[]; index: number } | null>(null)
-  const [rerollingRuns, setRerollingRuns] = useState<Record<string, true>>({})
-  const [rerolledImagePaths, setRerolledImagePaths] = useState<Record<string, string[]>>({})
 
   const openImageViewer = useCallback(
     async (paths: string[], index: number) => {
@@ -5055,299 +5054,16 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
   )
 
 
-          const renderToolUseNode = (taskId: string, runId?: string): React.ReactNode => {
-            const t = tasksById.get(taskId) ?? null
-            if (!t) return null
-            // agent.run 壳 run/step 不渲染为工具卡（旧存档里可能已写入）
-            const runs = filterVisibleToolRuns(Array.isArray(t.toolRuns) ? t.toolRuns : [])
-            const steps = (Array.isArray(t.steps) ? t.steps : []).filter((s) => !isAgentShellToolName(s?.tool))
-
-            const toMediaSrc = (mediaUrl: string, mediaPath: string): string => {
-              const url = String(mediaUrl ?? '').trim()
-              if (url) return url
-              const p = String(mediaPath ?? '').trim()
-              if (!p) return ''
-              if (/^(https?:|data:|blob:)/i.test(p)) return p
-              return p
-            }
-
-            const parseMmvectorResults = (
-              raw: string,
-            ): null | {
-              count?: number
-              results: Array<{
-                id?: number
-                type?: string
-                score?: number
-                filename?: string
-                imagePath?: string
-                videoUrl?: string
-                videoPath?: string
-              }>
-            } => {
-              const text = String(raw ?? '').trim()
-              if (!text) return null
-              const first = text.indexOf('{')
-              const last = text.lastIndexOf('}')
-              if (first < 0 || last <= first) return null
-              try {
-                const parsed = (() => {
-                  try {
-                    return JSON.parse(text) as unknown
-                  } catch {
-                    return JSON.parse(text.slice(first, last + 1)) as unknown
-                  }
-                })()
-                const obj = parsed
-                if (!obj || typeof obj !== 'object') return null
-                const ok = (obj as { ok?: unknown }).ok
-                if (ok !== true) return null
-                const results = (obj as { results?: unknown }).results
-                if (!Array.isArray(results)) return null
-                return {
-                  count: typeof (obj as { count?: unknown }).count === 'number' ? (obj as { count: number }).count : undefined,
-                  results: results as Array<{
-                    id?: number
-                    type?: string
-                    score?: number
-                    filename?: string
-                    videoUrl?: string
-                    videoPath?: string
-                  }>,
-                }
-              } catch {
-                return null
-              }
-            }
-
-            const renderRun = (r: (typeof runs)[number], idx: number): React.ReactNode => {
-              const progress = runs.length > 1 ? `${idx + 1}/${runs.length}` : ''
-              const pillStatus = r.status === 'error' ? 'failed' : r.status
-              const runKey = String(r.id ?? `${idx}`)
-              const rerolling = rerollingRuns[runKey] === true
-              const rerollForRun = async () => {
-                if (!r.inputPreview || rerolling) return
-                setRerollingRuns((prev) => ({ ...prev, [runKey]: true }))
-                try {
-                  const nextPaths = await onRerollImageGenerate(r.inputPreview, {
-                    taskId,
-                    runId: String(r.id ?? ''),
-                    messageId: m.id,
-                    oldImagePaths: Array.isArray(r.imagePaths) ? r.imagePaths.filter(Boolean) : [],
-                  })
-                  if (nextPaths.length > 0) setRerolledImagePaths((prev) => ({ ...prev, [runKey]: nextPaths }))
-                } finally {
-                  setRerollingRuns((prev) => {
-                    const next = { ...prev }
-                    delete next[runKey]
-                    return next
-                  })
-                }
-              }
-              const isPreviewableToolImagePath = (raw: string): boolean => {
-                const s = String(raw ?? '').trim()
-                if (!s) return false
-                if (/^data:image\//i.test(s)) return true
-                if (/^blob:/i.test(s)) return true
-                if (/^file:\/\//i.test(s)) return true
-                if (/^https?:\/\//i.test(s)) return /^https?:\/\/(127\.0\.0\.1|localhost)(?::\d+)?\//i.test(s)
-                if (/^\/\//.test(s)) return false
-                if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\//.test(s)) return false
-                return true
-              }
-              const rawToolImagePaths = rerolledImagePaths[runKey] ?? r.imagePaths
-              const toolImagePaths = Array.isArray(rawToolImagePaths)
-                ? Array.from(
-                    new Set(
-                      rawToolImagePaths
-                        .map((x) => String(x ?? '').trim())
-                        .filter((x) => x && isPreviewableToolImagePath(x)),
-                    ),
-                  ).slice(0, r.toolName === 'image.generate' ? 1 : 8)
-                : []
-              const mm = r.outputPreview ? parseMmvectorResults(r.outputPreview) : null
-              const mmMedia =
-                mm?.results?.filter((x) => {
-                  const t = String(x?.type ?? '')
-                  if (t === 'video') return String(x?.videoUrl ?? '').trim() || String(x?.videoPath ?? '').trim()
-                  if (t === 'image') return String(x?.imagePath ?? '').trim()
-                  return false
-                }) ?? []
-              return (
-                <>
-                  {toolImagePaths.length > 0 ? (
-                    <div className="ndp-mmvector-results">
-                      <div className="ndp-mmvector-title">工具输出图片（可预览）</div>
-                      <div className="ndp-mmvector-grid">
-                        {toolImagePaths.map((imgPath, imgIdx) => (
-                          <div key={`tool-img-${String(r.id ?? `${idx}`)}-${imgIdx}`} className="ndp-mmvector-item">
-                            <div
-                              className="ndp-mmvector-image-hit"
-                              onClick={() => void openImageViewer(toolImagePaths, imgIdx)}
-                              title={imgPath}
-                            >
-                              <MmvectorImagePreview api={api} imagePath={imgPath} alt={`tool-image-${imgIdx + 1}`} />
-                            </div>
-                            <div className="ndp-mmvector-meta" title={imgPath}>
-                              image {imgIdx + 1}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                      {r.toolName === 'image.generate' && r.inputPreview ? (
-                        <div className="ndp-mmvector-actions ndp-mmvector-actions-left">
-                          <button className="ndp-btn ndp-btn-mini" type="button" disabled={rerolling} onClick={() => void rerollForRun()}>
-                            {rerolling ? '正在生成' : '重新生成'}
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  <details key={r.id} className="ndp-tooluse">
-                    <summary className="ndp-tooluse-summary">
-                      <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
-                        DeskPet · ToolUse: {r.toolName}
-                        {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
-                      </span>
-                    </summary>
-                    <div className="ndp-tooluse-body">
-                      <div className="ndp-tooluse-run">
-                        <div className="ndp-tooluse-run-title">
-                          <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${r.status}`}>{r.status}</span>
-                          <span className="ndp-tooluse-run-name">{r.toolName}</span>
-                        </div>
-                        {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
-                        {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
-                        {r.toolName === 'image.generate' && r.inputPreview && toolImagePaths.length === 0 ? (
-                          <div className="ndp-tooluse-run-actions">
-                            <button className="ndp-btn ndp-btn-mini" type="button" disabled={rerolling} onClick={() => void rerollForRun()}>
-                              {rerolling ? '正在生成' : '重新生成'}
-                            </button>
-                          </div>
-                        ) : null}
-                        {mmMedia.length > 0 ? (
-                          <div className="ndp-mmvector-results">
-                            <div className="ndp-mmvector-title">多模态结果（可预览/播放）</div>
-                            <div className="ndp-mmvector-grid">
-                              {mmMedia.map((it) => {
-                                const isVideo = String(it.type ?? '') === 'video'
-                                const src = isVideo
-                                  ? toMediaSrc(String(it.videoUrl ?? ''), String(it.videoPath ?? ''))
-                                  : toMediaSrc('', String(it.imagePath ?? ''))
-                                if (!src) return null
-                                const labelParts: string[] = []
-                                if (it.filename) labelParts.push(String(it.filename))
-                                if (typeof it.score === 'number' && Number.isFinite(it.score)) labelParts.push(it.score.toFixed(4))
-                                const label = labelParts.join(' · ')
-                                return (
-                                  <div key={`mmv-${String(it.id ?? '')}-${src}`} className="ndp-mmvector-item">
-                                    {isVideo ? (
-                                      <LocalVideo api={api} videoPath={src} className="ndp-mmvector-video" controls preload="metadata" playsInline />
-                                    ) : (
-                                      <MmvectorImagePreview api={api} imagePath={String(it.imagePath ?? '')} alt={String(it.filename ?? 'image')} />
-                                    )}
-                                    <div className="ndp-mmvector-meta" title={src}>
-                                      {label || src}
-                                    </div>
-                                    <div className="ndp-mmvector-actions">
-                                      <button
-                                        className="ndp-btn ndp-btn-mini"
-                                        onClick={() => {
-                                          const target = isVideo
-                                            ? (String(it.videoUrl ?? '').trim() || String(it.videoPath ?? '').trim() || src)
-                                            : (String(it.imagePath ?? '').trim() || src)
-                                          void (async () => {
-                                            const raw = String(target ?? '').trim()
-                                            if (!raw) return
-                                            if (/^(https?:|data:|blob:)/i.test(raw)) {
-                                              window.open(raw, '_blank')
-                                              return
-                                            }
-                                            if (api) {
-                                              try {
-                                                const res = await api.getChatAttachmentUrl(raw)
-                                                if (res?.ok && typeof res.url === 'string') {
-                                                  window.open(res.url, '_blank')
-                                                  return
-                                                }
-                                              } catch {
-                                                /* ignore */
-                                              }
-                                            }
-                                          })()
-                                        }}
-                                      >
-                                        打开
-                                      </button>
-                                    </div>
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          </div>
-                        ) : null}
-                        {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
-                      </div>
-                    </div>
-                  </details>
-                </>
-              )
-            }
-
-            const renderStep = (s: TaskStepRecord, idx: number): React.ReactNode => {
-              const toolName = String(s.tool ?? '').trim()
-              const name = toolName || s.title
-              const input = String(s.input ?? '').trim()
-              const output = String(s.output ?? '').trim()
-              const error = String(s.error ?? '').trim()
-              const statusText = String(s.status ?? '').trim() || 'pending'
-              const statusKey = statusText === 'failed' ? 'error' : statusText === 'skipped' ? 'disconnected' : statusText
-              const progress = steps.length > 1 ? `${idx + 1}/${steps.length}` : ''
-              const pillStatus =
-                statusText === 'failed'
-                  ? 'failed'
-                  : statusText === 'done'
-                    ? 'done'
-                    : statusText === 'running'
-                      ? 'running'
-                      : statusText === 'paused'
-                        ? 'paused'
-                        : 'pending'
-
-              return (
-                <details key={s.id || `${t.id}-step-${idx}`} className="ndp-tooluse">
-                  <summary className="ndp-tooluse-summary">
-                    <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
-                      DeskPet · ToolUse: {name}
-                      {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
-                    </span>
-                  </summary>
-                  <div className="ndp-tooluse-body">
-                    <div className="ndp-tooluse-run">
-                      <div className="ndp-tooluse-run-title">
-                        <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${statusKey}`}>{statusText}</span>
-                        <span className="ndp-tooluse-run-name">{name}</span>
-                      </div>
-                      {input ? <div className="ndp-tooluse-run-io">in: {input}</div> : null}
-                      {output ? <div className="ndp-tooluse-run-io">out: {output}</div> : null}
-                      {error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {error}</div> : null}
-                    </div>
-                  </div>
-                </details>
-              )
-            }
-
-            if (runId) {
-              // runId 精确指向某一次真实工具调用；匹配不到时（例如旧存档里 agent.run 壳 run 的 block）
-              // 直接不渲染，避免 fallback 把全部 runs 重复渲染一遍。
-              const idx = runs.findIndex((r) => String(r.id ?? '') === runId)
-              return idx >= 0 ? renderRun(runs[idx], idx) : null
-            }
-
-            if (runs.length > 0) return <>{runs.map((r, idx) => renderRun(r, idx))}</>
-            if (steps.length > 0) return <>{steps.map((s, idx) => renderStep(s, idx))}</>
-            return null
-          }
+          const renderToolUseNode = (taskId: string, runId?: string): React.ReactNode => (
+            <ChatToolUseCard
+              task={tasksById.get(taskId) ?? null}
+              runId={runId}
+              api={api}
+              messageId={m.id}
+              onOpenImageViewer={openImageViewer}
+              onRerollImageGenerate={onRerollImageGenerate}
+            />
+          )
 
           const blocks = !isUser ? normalizeMessageBlocks(m) : []
           const hasToolBlock = !isUser && blocks.some((b) => b.type === 'tool_use')

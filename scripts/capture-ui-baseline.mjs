@@ -42,7 +42,7 @@ async function waitForPreview() {
 }
 
 function installChatMock(page, options = {}) {
-  return page.addInitScript(({ seedImage }) => {
+  return page.addInitScript(({ seedImage, seedTool }) => {
     const now = Date.now()
     const settings = {
       activePersonaId: 'default',
@@ -83,6 +83,29 @@ function installChatMock(page, options = {}) {
       createdAt: now,
       updatedAt: now,
     }
+    const initialTasks = seedTool
+      ? [{
+          id: 'baseline-tool-task',
+          queue: 'chat',
+          title: '工具卡基线任务',
+          why: '验证工具卡渲染',
+          status: 'done',
+          createdAt: now,
+          updatedAt: now,
+          steps: [],
+          currentStepIndex: 0,
+          toolsUsed: ['web.search'],
+          toolRuns: [{
+            id: 'baseline-tool-run',
+            toolName: 'web.search',
+            status: 'done',
+            inputPreview: '{"query":"NeoDeskPet"}',
+            outputPreview: 'Found 3 results',
+            startedAt: now,
+            endedAt: now,
+          }],
+        }]
+      : []
     const initialMessages = seedImage
       ? [{
           id: 'baseline-image-message',
@@ -91,7 +114,19 @@ function installChatMock(page, options = {}) {
           image: 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22640%22 height=%22360%22%3E%3Crect width=%22640%22 height=%22360%22 fill=%22%232e7d6b%22/%3E%3Ctext x=%22320%22 y=%22190%22 text-anchor=%22middle%22 font-size=%2240%22 fill=%22white%22%3ENeoDeskPet%3C/text%3E%3C/svg%3E',
           createdAt: now,
         }]
-      : []
+      : seedTool
+        ? [{
+            id: 'baseline-tool-message',
+            role: 'assistant',
+            content: '正在查询。\n\n查询完成。',
+            blocks: [
+              { type: 'text', text: '正在查询。' },
+              { type: 'tool_use', taskId: 'baseline-tool-task', runId: 'baseline-tool-run' },
+              { type: 'text', text: '查询完成。' },
+            ],
+            createdAt: now,
+          }]
+        : []
     const summary = {
       id: 'baseline-session',
       name: '界面基线会话',
@@ -157,7 +192,7 @@ function installChatMock(page, options = {}) {
           summary.messageCount = messages.length
           return session
         },
-        listTasks: async () => ({ items: [] }),
+        listTasks: async () => ({ items: initialTasks }),
         onTasksChanged: (listener) => {
           tasksListener = listener
           return () => {
@@ -205,7 +240,7 @@ function installChatMock(page, options = {}) {
       },
     )
     Object.defineProperty(window, 'neoDeskPet', { configurable: true, value: api })
-  }, { seedImage: options.seedImage === true })
+  }, { seedImage: options.seedImage === true, seedTool: options.seedTool === true })
 }
 
 function installOrbPanelMock(page) {
@@ -400,6 +435,7 @@ const baselines = [
   { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbPanel: true },
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
+  { name: 'chat-tool-card-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyToolCard: true },
   { name: 'settings-min-640x500-scale100', route: 'settings', width: 640, height: 500, scale: 1, mockSettings: true, verifySettingsNavigation: true },
   { name: 'memory-min-640x500-scale100', route: 'memory', width: 640, height: 500, scale: 1, mockMemory: true },
   { name: 'chat-default-720x620-scale125', route: 'chat', width: 720, height: 620, scale: 1.25, mockChat: true, compactChat: true },
@@ -433,7 +469,10 @@ try {
       if (message.type() === 'error') consoleErrors.push(message.text())
     })
     page.on('pageerror', (error) => consoleErrors.push(error.message))
-    if (baseline.mockChat) await installChatMock(page, { seedImage: baseline.verifyImageViewer })
+    if (baseline.mockChat) await installChatMock(page, {
+      seedImage: baseline.verifyImageViewer,
+      seedTool: baseline.verifyToolCard,
+    })
     if (baseline.mockOrbPanel) await installOrbPanelMock(page)
     if (baseline.mockMemory) await installMemoryMock(page)
     if (baseline.mockSettings) await installSettingsMock(page)
@@ -637,6 +676,27 @@ try {
       if (!(await viewer.isHidden().catch(() => false))) failures.push('image viewer did not close with Escape')
     }
 
+    let toolCard = null
+    if (baseline.verifyToolCard) {
+      const summary = page.locator('.ndp-tooluse-summary').first()
+      await summary.waitFor({ state: 'visible' })
+      const summaryText = (await summary.textContent())?.trim() ?? ''
+      if (!summaryText.includes('DeskPet · ToolUse: web.search')) failures.push(`tool card summary is ${summaryText || 'missing'}`)
+      await summary.click()
+      const body = page.locator('.ndp-tooluse-body').first()
+      await body.waitFor({ state: 'visible' })
+      toolCard = await body.evaluate((element) => ({
+        text: element.textContent?.trim() ?? '',
+        horizontalOverflow: element.scrollWidth > element.clientWidth,
+      }))
+      const toolCardScreenshotPath = path.join(outputDir, `${baseline.name}-open.png`)
+      toolCard.screenshot = path.relative(projectRoot, toolCardScreenshotPath)
+      await page.screenshot({ path: toolCardScreenshotPath })
+      if (!toolCard.text.includes('in: {"query":"NeoDeskPet"}')) failures.push('tool card input preview is missing')
+      if (!toolCard.text.includes('out: Found 3 results')) failures.push('tool card output preview is missing')
+      if (toolCard.horizontalOverflow) failures.push('tool card has horizontal overflow')
+    }
+
     let settingsNavigation = null
     if (baseline.verifySettingsNavigation) {
       const navItems = page.locator('.ndp-settings-nav-item')
@@ -707,7 +767,10 @@ try {
 
       await search.fill('向量')
       await search.press('Enter')
-      await page.waitForTimeout(140)
+      await page.waitForFunction(() => {
+        const activeSubTab = document.querySelector('.ndp-settings-subtabs .ndp-tab-btn.active')?.textContent?.trim() ?? ''
+        return activeSubTab === '文本向量' && Boolean(document.querySelector('.ndp-setting-search-hit'))
+      }, { timeout: 2_000 }).catch(() => undefined)
       settingsSearch.deepSearch = await page.evaluate(() => ({
         activeLabel: document.querySelector('.ndp-settings-nav-item.active')?.textContent?.trim() ?? '',
         activeSubTab: document.querySelector('.ndp-settings-subtabs .ndp-tab-btn.active')?.textContent?.trim() ?? '',
@@ -776,6 +839,7 @@ try {
       expandedChat,
       chatUi,
       imageViewer,
+      toolCard,
       settingsNavigation,
       settingsSearch,
       settingsConfirmDialog,

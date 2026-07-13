@@ -231,3 +231,22 @@
 | `git diff --check` | 通过 |
 
 本批未修改附件持久化结构、LocalMediaRegistry、安全权限、样式 class 或 preload API。`ChatWindow.tsx` 后续继续拆分工具运行卡、消息主体、会话列表与 composer。
+
+## P2-1：大型模块拆分与领域边界（第十一批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 工具运行卡、多模态结果解析与 UI 基线
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 32 个测试文件、120 个用例通过 |
+| 工具运行卡测试 | mmvector 解析、runId 精确选择、Agent 外壳过滤、图片筛选、多模态媒体和旧步骤兜底通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 通过，Chat 与五类窗口无运行时错误，IPC/持久化/转发契约正常 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；工具卡摘要、展开详情、输入输出、无横向溢出和截图通过 |
+| `git diff --check` | 通过 |
+
+工具卡展开态截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改任务持久化结构、消息 block 契约、样式 class、preload API 或 IPC 权限；`ChatWindow.tsx` 后续继续拆分消息主体、会话列表与 composer。

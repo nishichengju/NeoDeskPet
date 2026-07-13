@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十批：Chat 消息附件已拆分）
+- 状态：P2-1 进行中（第十一批：Chat 工具运行卡已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -624,6 +624,16 @@ AI 与能力
 - `ChatWindow.tsx` 从第九批后的 5546 行降至 5446 行；相较 Chat 拆分开始时累计减少 190 行。
 - 新增 3 个附件测试，覆盖持久化附件清洗、无效项忽略、legacy 字段回退、data URL 渲染和隐藏态空输出。
 - `npm test` 共 116 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 14 个 UI baseline 场景均通过。下一批继续拆分工具运行卡与 `ChatMessageItem` 主体。
+
+### P2-1 进展记录（2026-07-13，第十一批）
+
+- 将真实工具运行、旧任务步骤兜底和多模态结果渲染迁移到 `src/windows/chat/ChatToolUseCard.tsx`，将 mmvector 输出解析、媒体地址归一化和工具图片路径筛选迁移到纯工具 `toolUseMedia.ts`。
+- 组件继续按 `runId` 精确渲染单次调用，过滤 `agent.run` 外壳 run/step，并保留运行状态、进度、输入/输出/错误详情、图片重新生成与回写、工具图片查看器、多模态图片/视频预览和媒体打开语义。
+- 工具卡内部持有单次图片重生成状态，映射多个 run 时为顶层 Fragment 补充稳定 key；`ChatMessageItem` 只负责从 `tasksById` 取任务并传入消息级回调。
+- `ChatWindow.tsx` 从第十批后的 5446 行降至 5221 行；相较 Chat 拆分开始时累计减少 415 行。
+- 新增 4 个工具卡测试，覆盖 mmvector 纯 JSON/日志包裹解析、`runId` 精确选择、Agent 外壳过滤、生成图片安全筛选、多模态图片/视频结果和旧步骤失败兜底。
+- UI baseline 新增工具卡浏览器场景，实际加载带 `runId` 的消息、展开卡片、验证输入/输出详情和无横向溢出，并保存展开态截图；同时将既有深层设置搜索从固定延迟改为状态条件等待，基线场景由 14 个增加到 15 个。
+- `npm test` 共 120 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 `ChatMessageItem` 消息主体。
 
 ## 14. P2-2：前端加载与运行性能
 
