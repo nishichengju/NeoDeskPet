@@ -1,18 +1,7 @@
 import type { AppSettings } from '../../electron/types'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getAvailableModels, parseModelMetadata, scanAvailableModels, type Live2DModelInfo } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
-import { AISettingsTab } from './settings/AiTab'
-import { AsrSettingsTab } from './settings/AsrTab'
-import { BubbleSettingsTab } from './settings/BubbleTab'
-import { ChatUiSettingsTab } from './settings/ChatUiTab'
-import { Live2DSettingsTab } from './settings/Live2DTab'
-import { NovelAISettingsTab } from './settings/NovelAITab'
-import { PersonaSettingsTab } from './settings/PersonaTab'
-import { TaskPanelSettingsTab } from './settings/TaskPanelTab'
-import { ToolsSettingsTab } from './settings/ToolsTab'
-import { TtsSettingsTab } from './settings/TtsTab'
-import { WorldBookSettingsTab } from './settings/WorldBookTab'
 import type { SettingsConfirmAction, SettingsConfirmOptions } from './settings/settingsConfirm'
 import {
   SETTINGS_NAV_GROUPS,
@@ -20,6 +9,22 @@ import {
   type SettingsSearchEntry,
   type SettingsViewId,
 } from './settings/settingsNavigation'
+
+const AISettingsTab = lazy(() => import('./settings/AiTab').then((module) => ({ default: module.AISettingsTab })))
+const AsrSettingsTab = lazy(() => import('./settings/AsrTab').then((module) => ({ default: module.AsrSettingsTab })))
+const BubbleSettingsTab = lazy(() => import('./settings/BubbleTab').then((module) => ({ default: module.BubbleSettingsTab })))
+const ChatUiSettingsTab = lazy(() => import('./settings/ChatUiTab').then((module) => ({ default: module.ChatUiSettingsTab })))
+const Live2DSettingsTab = lazy(() => import('./settings/Live2DTab').then((module) => ({ default: module.Live2DSettingsTab })))
+const NovelAISettingsTab = lazy(() => import('./settings/NovelAITab').then((module) => ({ default: module.NovelAISettingsTab })))
+const PersonaSettingsTab = lazy(() => import('./settings/PersonaTab').then((module) => ({ default: module.PersonaSettingsTab })))
+const TaskPanelSettingsTab = lazy(() =>
+  import('./settings/TaskPanelTab').then((module) => ({ default: module.TaskPanelSettingsTab })),
+)
+const ToolsSettingsTab = lazy(() => import('./settings/ToolsTab').then((module) => ({ default: module.ToolsSettingsTab })))
+const TtsSettingsTab = lazy(() => import('./settings/TtsTab').then((module) => ({ default: module.TtsSettingsTab })))
+const WorldBookSettingsTab = lazy(() =>
+  import('./settings/WorldBookTab').then((module) => ({ default: module.WorldBookSettingsTab })),
+)
 
 type SettingsSaveState =
   | { state: 'idle'; message: '' }
@@ -420,7 +425,7 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
 
         <main className="ndp-settings-content" ref={contentRef} tabIndex={-1}>
           <div className="ndp-settings-page-heading">{activeItem?.label ?? '设置'}</div>
-          {renderActiveView()}
+          <Suspense fallback={null}>{renderActiveView()}</Suspense>
         </main>
       </div>
 

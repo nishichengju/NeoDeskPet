@@ -1060,3 +1060,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/pet-shell-300x500-scale100.png`，以及本轮重新生成的 Chat、Settings、Memory 与 Orb 默认尺寸截图。窗口 DOM、现有 CSS、preload/API 契约、路由 hash、Live2D 模型选择与 Pixi CSP 安装逻辑未改变；Pet 仍加载两套本地 Live2D 运行时，但只在 Pet 路由并行加载，随后才导入 Pet/Pixi chunk。资源基线直接读取浏览器 `performance` 条目，验证运行时实际请求而非只依赖构建文件名；打包 IPC smoke 进一步验证 `document.baseURI` 在 `app.asar/dist/index.html` 的 `file://` 路径下可正确定位 `dist/lib`。当前未建立精确的窗口首帧耗时统计，首次 Pet 打开仍需加载约 710 kB Pet/Pixi chunk 和约 336 kB Live2D 运行时；Settings 首包仍包含全部大页组件，下一批继续拆分。
+
+## P2-2：前端加载与运行性能（第五十一批）
+
+- 验证日期：2026-07-14
+- 优化范围：Settings 11 个大页按当前视图加载，以及搜索/导航/确认交互的异步挂载资源门禁
+
+| 检查 | 结果 |
+| --- | --- |
+| Settings renderer bundle | `SettingsWindow` 外壳 `126.23 kB → 15.29 kB`；默认 `Live2DTab` 3.77 kB；其余 Tab 独立为 1.23 至 24.23 kB，AI 24.23 kB、Persona 22.56 kB、Tools 19.30 kB 不再进入首屏 |
+| `npm test` | 78 个测试文件、340 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，Settings 外壳和 11 个 Tab 动态 chunk、Live2D 运行时、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Settings preload、直接导航与所有受检窗口运行正常；Pet/Chat/Settings/Memory/Orb runtimeErrors 全为空，聊天/任务/Memory/Agent/MCP/TTS/ASR、权限和重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 22 个场景通过；四个 Settings 首屏均只加载 `SettingsWindow + Live2DTab`，AI/Persona/Tools/WorldBook 未预载；默认交互场景随后按需出现 `AiTab`、`PersonaTab`、`WorldBookTab`，搜索、深层锚点、确认框和 AI 四视图通过；0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/settings-default-860x680-scale100.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-generation.png`。本批未修改 Settings 导航分组、默认 Live2D 页、Tab props、搜索索引、锚点匹配、保存代理、确认语义、样式 class 或 preload/API 契约；局部 `Suspense` 只替换内容页，标题、侧栏、搜索框和保存状态保持常驻。浏览器基线在资源快照后继续执行直接 IPC 导航、endpoint 搜索与保存、Persona 文本向量深层搜索、WorldBook 删除确认和 AI 四视图切换，证明 lazy 挂载没有丢失锚点、状态或确认回调。当前 Suspense fallback 为空，极慢磁盘下首次切换到未加载 Tab 时内容区可能短暂留白；尚未采集每个 Tab 的首帧耗时。下一批继续隔离 Markdown/remark-gfm 共享 chunk。

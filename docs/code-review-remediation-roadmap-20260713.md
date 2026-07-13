@@ -1003,6 +1003,14 @@ AI 与能力
 - UI baseline 新增 `pet-shell-300x500-scale100`，默认 Live2D 模型实际渲染；22 个场景记录 `performance` 资源条目并强制主 chunk 不超过 250 kB、目标路由 chunk 必须加载、Pet/Live2D 资源只能出现在 Pet 路由。全部场景 0 failure、0 console error、无横向或纵向溢出；unpacked IPC smoke 中 Pet/Chat/Settings/Memory/Orb 的 runtimeErrors 均为空。
 - `npm test` 共 78 个测试文件、340 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过。下一批继续让 Settings 大页按需加载，降低进入设置窗口时的首屏解析与执行成本。
 
+第五十一批进展（2026-07-14）：
+
+- `SettingsWindow.tsx` 保留导航、搜索、保存状态代理、Live2D 模型扫描和确认框外壳，将 Live2D、Bubble、Task Panel、AI、NovelAI、Tools、Persona、WorldBook、TTS、ASR 与 Chat UI 共 11 个 Tab 改为独立 `React.lazy` chunk；当前视图之外的页面不再随设置窗口首屏解析执行。
+- Settings 外壳 chunk 从 126.23 kB 降至 15.29 kB，默认 Live2D 页只额外加载 3.77 kB；其余按需 chunk 为 Task Panel 1.23 kB、Bubble 5.14 kB、Chat UI 5.86 kB、WorldBook 6.58 kB、TTS 6.74 kB、ASR 7.08 kB、NovelAI 11.15 kB、Tools 19.30 kB、Persona 22.56 kB 和 AI 24.23 kB。
+- Settings 内容区使用局部 `Suspense`，标题、导航、搜索和全局保存状态在 Tab 加载期间保持挂载；UI baseline 的直接导航、搜索锚点、最后一项导航和 AI 子视图检查改为等待目标内容可见，适配异步挂载而不放宽原有行为断言。
+- 资源门禁确认四个 Settings 基线首屏都只加载 `SettingsWindow` 与 `Live2DTab`，没有预载 AI/Persona/Tools/WorldBook；默认交互场景经过 API 搜索、向量深层搜索、设定库确认和 AI 四视图导航后，报告中才出现 `AiTab`、`PersonaTab` 与 `WorldBookTab`。22 个场景继续保持 0 failure、0 console error、无横向或纵向溢出，默认页和模型生成页截图经人工检查无视觉回归。
+- `npm test` 共 78 个测试文件、340 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过。下一批继续隔离约 160.49 kB 的 Markdown renderer，优先避免空 Chat/Orb 窗口预加载 `react-markdown` 与 GFM。
+
 ## 15. P2-3：无障碍与交互一致性
 
 ### 实施步骤

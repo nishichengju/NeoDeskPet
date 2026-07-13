@@ -656,6 +656,13 @@ try {
     if (expectedRouteChunk && !loadedAssetNames.some((name) => name.startsWith(expectedRouteChunk))) {
       failures.push(`${baseline.route} route chunk is missing from ${loadedAssetNames.join(',') || 'loaded assets'}`)
     }
+    if (baseline.route === 'settings') {
+      if (!loadedAssetNames.some((name) => name.startsWith('Live2DTab-'))) {
+        failures.push('settings initial Live2D tab chunk is missing')
+      }
+      const eagerSettingsTabs = loadedAssetNames.filter((name) => /^(?:Ai|Persona|Tools|WorldBook)Tab-/.test(name))
+      if (eagerSettingsTabs.length > 0) failures.push(`settings eagerly loaded ${eagerSettingsTabs.join(',')}`)
+    }
     const live2dRuntimeNames = ['live2d.min.js', 'live2dcubismcore.min.js']
     if (baseline.route === 'pet') {
       const missingRuntimes = live2dRuntimeNames.filter((name) => !loadedAssetNames.includes(name))
@@ -1151,7 +1158,7 @@ try {
       const lastItem = navItems.last()
       await lastItem.scrollIntoViewIfNeeded()
       await lastItem.click()
-      await page.waitForTimeout(100)
+      await page.locator('.ndp-settings-content .ndp-setting-item').first().waitFor({ state: 'visible' })
       const navigationEndScreenshotPath = path.join(outputDir, `${baseline.name}-navigation-end.png`)
       const navigationEndScreenshot = path.relative(projectRoot, navigationEndScreenshotPath)
       await page.screenshot({ path: navigationEndScreenshotPath })
@@ -1176,7 +1183,7 @@ try {
     let settingsSearch = null
     if (baseline.verifySettingsSearch) {
       await page.evaluate(() => window.__navigateSettings?.('aiConnection'))
-      await page.waitForTimeout(80)
+      await page.getByRole('heading', { name: 'API 连接', exact: true }).waitFor({ state: 'visible' })
       const directNavigationLabel = await page.locator('.ndp-settings-nav-item.active').textContent()
       if (directNavigationLabel?.trim() !== 'API 连接') {
         failures.push(`settings direct navigation opened ${directNavigationLabel?.trim() || 'nothing'}`)
@@ -1263,6 +1270,7 @@ try {
       const observed = []
       for (const [navLabel, heading] of expectedHeadings) {
         await page.getByRole('button', { name: navLabel, exact: true }).click()
+        await page.getByRole('heading', { name: heading, exact: true }).waitFor({ state: 'visible' })
         const headings = await page.locator('.ndp-settings-content h3').allTextContents()
         observed.push({ navLabel, headings })
         if (!headings.some((value) => value.trim() === heading)) {
@@ -1277,6 +1285,21 @@ try {
       await page.screenshot({ path: aiSplitScreenshotPath })
       aiSplit = { observed, advancedClosed, screenshot: aiSplitScreenshot }
       if (!advancedClosed) failures.push('AI advanced context settings are not collapsed by default')
+    }
+
+    let settingsLazyAssets = null
+    if (baseline.verifyAiSplit) {
+      settingsLazyAssets = await page.evaluate(() =>
+        performance
+          .getEntriesByType('resource')
+          .map((entry) => new URL(entry.name).pathname.split('/').at(-1) ?? '')
+          .filter((name) => /^(?:Ai|Persona|WorldBook)Tab-/.test(name)),
+      )
+      for (const expected of ['AiTab-', 'PersonaTab-', 'WorldBookTab-']) {
+        if (!settingsLazyAssets.some((name) => name.startsWith(expected))) {
+          failures.push(`settings did not lazy load ${expected}`)
+        }
+      }
     }
 
     if (consoleErrors.length > 0) failures.push(`console errors: ${consoleErrors.join(' | ')}`)
@@ -1296,6 +1319,7 @@ try {
       settingsSearch,
       settingsConfirmDialog,
       aiSplit,
+      settingsLazyAssets,
       consoleErrors,
       failures,
     })
