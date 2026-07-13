@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第五批：Settings、Chat、Task 与 Memory IPC 已拆分）
+- 状态：P2-1 进行中（第六批：Settings、Chat、Task、Memory 与 TTS IPC 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -579,6 +579,15 @@ AI 与能力
 - `electron/main.ts` 从第四批后的 2083 行降至 1972 行；相较 P2-1 开始时累计减少 771 行。
 - 新增 Memory IPC 与 persona 存储行测试，覆盖 19 个通道、未就绪/禁用路径、CRUD、版本、冲突、批量操作和 SQLite 布尔归一化；打包 IPC smoke 增加真实 persona 与手工记忆往返。
 - `npm test` 共 96 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
+
+### P2-1 进展记录（2026-07-13，第六批）
+
+- 将 11 个 `tts:*` IPC 通道迁移到 `electron/ipc/registerTtsIpc.ts`，覆盖本地选项扫描、JSON/ArrayBuffer/流式 HTTP 代理、流取消以及 Chat 与 Pet 间的分段语音状态转发。
+- `TtsIpcService` 集中持有活动流的 AbortController，继续执行原有 baseUrl 同源校验、`/tts`、`/set_gpt_weights`、`/set_sovits_weights` 路径白名单和 1 至 180 秒超时约束；应用退出时统一中止未完成流。
+- `electron/main.ts` 从第五批后的 1972 行降至 1766 行；相较 P2-1 开始时累计减少 977 行。
+- 新增 5 个 TTS IPC 测试，覆盖 11 个通道、选项目录回退、URL 边界、JSON/二进制响应契约、流分块/取消以及双向窗口转发。
+- 打包 IPC smoke 新增真实本地 TTS 假服务，验证 JSON 权重端点、音频 ArrayBuffer、分块流、非法路径拒绝、Chat → Pet enqueue 与 Pet → Chat segmentStarted 转发。
+- `npm test` 共 101 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -136,3 +136,22 @@
 | `git diff --check` | 通过 |
 
 本批未修改 renderer、preload API、IPC 权限矩阵或 Memory SQLite schema。P2-1 后续继续拆分 TTS 与 Window IPC；记忆检索质量、维护任务和冲突算法属于后续 `memoryService.ts` 领域拆分范围。
+
+## P2-1：大型模块拆分与领域边界（第六批）
+
+- 验证日期：2026-07-13
+- 拆分范围：TTS 选项、HTTP 代理、流生命周期与 Chat/Pet 状态转发 IPC
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 27 个测试文件、101 个用例通过 |
+| TTS IPC 行为测试 | 11 通道、目录回退、同源/路径白名单、JSON/二进制响应、流分块/取消和窗口转发通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 权重 JSON、6 字节音频 ArrayBuffer、6 字节分块流、非法路径拒绝及 Chat/Pet 双向转发通过 |
+| `npm run media:smoke` | 路径拒绝、opaque URL、Range 206 与删除后 404 通过 |
+| `npm run ui:baseline` | 13 个场景通过，Chat 停止操作继续同步停止 TTS |
+| `git diff --check` | 通过 |
+
+本批未修改 renderer、preload API、IPC 权限矩阵、TTS 请求协议或设置结构。P2-1 的 `electron/main.ts` IPC 拆分下一批仅剩 Window/Live2D/ASR/Orb 等窗口协调通道的边界整理。

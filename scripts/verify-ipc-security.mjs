@@ -22,10 +22,26 @@ mkdirSync(userDataDir, { recursive: true })
 
 const aiSmokeKey = 'ipc-smoke-main-key'
 const aiRequests = []
+const ttsRequests = []
 const aiServer = http.createServer(async (request, response) => {
   const chunks = []
   for await (const chunk of request) chunks.push(Buffer.from(chunk))
   const bodyText = Buffer.concat(chunks).toString('utf8')
+  const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1')
+
+  if (['/tts', '/set_gpt_weights', '/set_sovits_weights'].includes(requestUrl.pathname)) {
+    ttsRequests.push({ path: requestUrl.pathname, method: request.method, bodyText })
+    if (requestUrl.pathname !== '/tts') {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, endpoint: requestUrl.pathname }))
+      return
+    }
+    response.writeHead(200, { 'Content-Type': 'audio/wav' })
+    response.write(Buffer.from([1, 2, 3]))
+    response.end(Buffer.from([4, 5, 6]))
+    return
+  }
+
   const body = bodyText ? JSON.parse(bodyText) : {}
   aiRequests.push({
     path: request.url,
@@ -224,6 +240,108 @@ try {
   assert(aiProxyStream.ok && aiProxyStream.text.includes('代理'), 'AI proxy stream failed')
   assert(aiRequests.length === 2 && aiRequests.every((request) => request.authMatches), 'AI proxy did not inject the configured key')
   assert(aiRequests.every((request) => request.path === '/v1/chat/completions'), 'AI proxy used an unexpected endpoint')
+
+  const ttsOptionsAvailable = await settings.evaluate(async (origin) => {
+    await window.neoDeskPet.setTtsSettings({ baseUrl: origin })
+    const options = await window.neoDeskPet.listTtsOptions()
+    return Boolean(options?.ttsRoot)
+  }, aiServerOrigin)
+  const ttsProxy = await pet.evaluate(async (origin) => {
+    const json = await window.neoDeskPet.ttsHttpGetJson(`${origin}/set_gpt_weights?weights_path=smoke.ckpt`)
+    const audio = await window.neoDeskPet.ttsHttpRequestArrayBuffer({
+      url: `${origin}/tts`,
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'smoke' }),
+    })
+    const stream = await new Promise((resolve, reject) => {
+      const bytes = []
+      const timeout = window.setTimeout(() => {
+        cleanup()
+        reject(new Error('TTS proxy stream timed out'))
+      }, 10_000)
+      const cleanup = () => {
+        window.clearTimeout(timeout)
+        offChunk()
+        offDone()
+        offError()
+      }
+      const offChunk = window.neoDeskPet.onTtsHttpStreamChunk((payload) => bytes.push(...payload.chunk))
+      const offDone = window.neoDeskPet.onTtsHttpStreamDone((payload) => {
+        cleanup()
+        resolve({ streamId: payload.streamId, bytes })
+      })
+      const offError = window.neoDeskPet.onTtsHttpStreamError((payload) => {
+        cleanup()
+        reject(new Error(payload.error || 'TTS proxy stream failed'))
+      })
+      void window.neoDeskPet.ttsHttpStreamStart({
+        url: `${origin}/tts`,
+        method: 'POST',
+        body: JSON.stringify({ text: 'stream' }),
+      }).catch((error) => {
+        cleanup()
+        reject(error)
+      })
+    })
+    let deniedPath = false
+    try {
+      await window.neoDeskPet.ttsHttpGetJson(`${origin}/admin`)
+    } catch {
+      deniedPath = true
+    }
+    return {
+      json,
+      audio: { ...audio, arrayBuffer: Array.from(new Uint8Array(audio.arrayBuffer)) },
+      stream,
+      deniedPath,
+    }
+  }, aiServerOrigin)
+
+  const petEnqueuePromise = pet.evaluate(() => new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      off()
+      reject(new Error('TTS enqueue relay timed out'))
+    }, 10_000)
+    const off = window.neoDeskPet.onTtsEnqueue((payload) => {
+      window.clearTimeout(timeout)
+      off()
+      resolve(payload)
+    })
+  }))
+  await chat.evaluate(() => window.neoDeskPet.enqueueTtsUtterance({
+    utteranceId: 'ipc-tts-relay',
+    mode: 'replace',
+    segments: ['第一句'],
+  }))
+  const ttsEnqueueRelay = await petEnqueuePromise
+
+  const chatSegmentPromise = chat.evaluate(() => new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      off()
+      reject(new Error('TTS segment relay timed out'))
+    }, 10_000)
+    const off = window.neoDeskPet.onTtsSegmentStarted((payload) => {
+      window.clearTimeout(timeout)
+      off()
+      resolve(payload)
+    })
+  }))
+  await pet.evaluate(() => window.neoDeskPet.reportTtsSegmentStarted({
+    utteranceId: 'ipc-tts-relay',
+    segmentIndex: 0,
+    text: '第一句',
+  }))
+  const ttsSegmentRelay = await chatSegmentPromise
+
+  assert(ttsOptionsAvailable, 'TTS options API was unavailable')
+  assert(ttsProxy.json.ok && ttsProxy.json.json?.endpoint === '/set_gpt_weights', 'TTS JSON proxy failed')
+  assert(ttsProxy.audio.ok && ttsProxy.audio.arrayBuffer.length === 6, 'TTS array-buffer proxy failed')
+  assert(ttsProxy.stream.bytes.length === 6, 'TTS stream proxy failed')
+  assert(ttsProxy.deniedPath, 'TTS proxy allowed an unexpected endpoint')
+  assert(ttsRequests.length === 3 && ttsRequests.every((request) => request.method === 'GET' || request.method === 'POST'), 'TTS proxy request set was incomplete')
+  assert(ttsEnqueueRelay.utteranceId === 'ipc-tts-relay', 'Chat to Pet TTS relay failed')
+  assert(ttsSegmentRelay.utteranceId === 'ipc-tts-relay', 'Pet to Chat TTS relay failed')
 
   const chatPersistenceBeforeRestart = await chat.evaluate(async () => {
     const created = await window.neoDeskPet.createChatSession('IPC Smoke Session', 'default')
@@ -513,6 +631,15 @@ try {
       metadata: memoryCrud.meta,
       deleteMemory: true,
       deletePersona: true,
+    },
+    ttsProxy: {
+      json: ttsProxy.json.ok,
+      arrayBufferBytes: ttsProxy.audio.arrayBuffer.length,
+      streamBytes: ttsProxy.stream.bytes.length,
+      deniedPath: ttsProxy.deniedPath,
+      requests: ttsRequests,
+      chatToPetRelay: ttsEnqueueRelay,
+      petToChatRelay: ttsSegmentRelay,
     },
     runtimeErrors,
     aiProxy: {

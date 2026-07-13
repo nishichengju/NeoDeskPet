@@ -20,7 +20,6 @@ import { createTray } from './tray'
 import { WindowManager } from './windowManager'
 import { setWindowManagerInstance } from './runtimeRefs'
 import { scanLive2dModels } from './modelScanner'
-import { listTtsOptions } from './ttsOptions'
 import { TaskService } from './taskService'
 import { setLive2dCapabilitiesFromRenderer } from './live2dToolState'
 import { closeAllBrowserControlServices } from './browserControlService'
@@ -73,6 +72,7 @@ import { registerChatPersistenceIpc } from './ipc/registerChatPersistenceIpc'
 import { ChatAttachmentIpcService } from './ipc/registerChatAttachmentIpc'
 import { registerTaskIpc } from './ipc/registerTaskIpc'
 import { registerMemoryIpc } from './ipc/registerMemoryIpc'
+import { TtsIpcService } from './ipc/registerTtsIpc'
 
 const APP_ID = 'io.github.nishichengju.neodeskpet'
 app.setName('NeoDeskPet')
@@ -189,6 +189,12 @@ const SETTINGS_NAVIGATION_TARGETS = new Set<SettingsNavigationTarget>([
 let pendingSettingsNavigationTarget: SettingsNavigationTarget | null = null
 const aiHttpProxy = new AIHttpProxy(getSettings)
 const chatAttachmentIpc = new ChatAttachmentIpcService(app.getPath('userData'))
+const ttsIpc = new TtsIpcService({
+  getSettings,
+  getPetWindow: () => windowManager.getPetWindow(),
+  getChatWindow: () => windowManager.getChatWindow(),
+  appRoot: process.env.APP_ROOT,
+})
 setWindowManagerInstance(windowManager)
 
 type SettingsSecretInitializationResult = {
@@ -1025,176 +1031,7 @@ function registerIpc() {
   registerTaskIpc({ handle: handleIpc, getTaskService: () => taskService })
 
   registerMemoryIpc({ handle: handleIpc, getMemoryService: () => memoryService, getSettings })
-
-  // TTS options (scan local GPT-SoVITS directory)
-  handleIpc('tts:listOptions', () => {
-    const settings = getSettings()
-    const configured = (settings.tts?.ttsRoot ?? '').trim()
-    const ttsRoot = configured || path.join(process.env.APP_ROOT ?? process.cwd(), 'GPT-SoVITS-v2_ProPlus')
-    return listTtsOptions(ttsRoot)
-  })
-
-  // TTS HTTP proxy (avoid renderer CORS/preflight issues)
-  const validateTtsUrl = (rawUrl: string): URL => {
-    const url = new URL(rawUrl)
-    const ttsBase = (getSettings().tts?.baseUrl ?? '').trim().replace(/\/+$/, '')
-    if (!ttsBase) throw new Error('TTS baseUrl not configured')
-    const base = new URL(ttsBase)
-    if (url.origin !== base.origin) {
-      throw new Error(`TTS request must be same-origin with tts.baseUrl: ${base.origin}`)
-    }
-    const allowPaths = new Set(['/tts', '/set_gpt_weights', '/set_sovits_weights'])
-    if (!allowPaths.has(url.pathname)) {
-      throw new Error(`TTS 请求路径不允许: ${url.pathname}`)
-    }
-    return url
-  }
-
-  handleIpc('tts:httpGetJson', async (_event, rawUrl: string) => {
-    const url = validateTtsUrl(rawUrl)
-    const ac = new AbortController()
-    const timer = setTimeout(() => ac.abort(new Error('TTS HTTP timeout')), 60000)
-    try {
-      const res = await fetch(url.toString(), { cache: 'no-store', signal: ac.signal })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        const msg = (data as { message?: string })?.message
-        return { ok: false, status: res.status, statusText: res.statusText, json: data, error: msg || `HTTP ${res.status}` }
-      }
-      return { ok: true, status: res.status, statusText: res.statusText, json: data }
-    } finally {
-      clearTimeout(timer)
-    }
-  })
-
-  handleIpc(
-    'tts:httpRequestArrayBuffer',
-    async (_event, payload: { url: string; method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; timeoutMs?: number }) => {
-      const url = validateTtsUrl(payload.url)
-      const method = (payload.method ?? 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET'
-      const timeoutMs = Math.max(1000, Math.min(180000, payload.timeoutMs ?? 120000))
-      const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(new Error('TTS HTTP timeout')), timeoutMs)
-      try {
-        const res = await fetch(url.toString(), {
-          method,
-          headers: payload.headers ?? undefined,
-          body: method === 'POST' ? payload.body ?? '' : undefined,
-          signal: ac.signal,
-        })
-        const buf = await res.arrayBuffer()
-        const contentType = res.headers.get('content-type') ?? ''
-        if (!res.ok) {
-          return {
-            ok: false,
-            status: res.status,
-            statusText: res.statusText,
-            contentType,
-            arrayBuffer: buf,
-            error: `HTTP ${res.status}: ${res.statusText}`,
-          }
-        }
-        return { ok: true, status: res.status, statusText: res.statusText, contentType, arrayBuffer: buf }
-      } finally {
-        clearTimeout(timer)
-      }
-    },
-  )
-
-  // TTS HTTP 流式代理：将响应分块通过 IPC 转发给 renderer。
-  const ttsHttpStreams = new Map<string, AbortController>()
-  const makeStreamId = (): string => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-
-  handleIpc(
-    'tts:httpStreamStart',
-    async (
-      event,
-      payload: { url: string; method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; timeoutMs?: number },
-    ) => {
-      const url = validateTtsUrl(payload.url)
-      const method = (payload.method ?? 'GET').toUpperCase() === 'POST' ? 'POST' : 'GET'
-      const timeoutMs = Math.max(1000, Math.min(180000, payload.timeoutMs ?? 120000))
-
-      const streamId = makeStreamId()
-      const ac = new AbortController()
-      ttsHttpStreams.set(streamId, ac)
-
-      const sender = event.sender
-      const safeSend = (channel: string, data: unknown) => {
-        try {
-          if (!sender || sender.isDestroyed()) return
-          sender.send(channel, data)
-        } catch (_) {
-          /* ignore */
-        }
-      }
-
-      void (async () => {
-        const timer = setTimeout(() => ac.abort(new Error('TTS HTTP timeout')), timeoutMs)
-        try {
-          const res = await fetch(url.toString(), {
-            method,
-            headers: payload.headers ?? undefined,
-            body: method === 'POST' ? payload.body ?? '' : undefined,
-            signal: ac.signal,
-          })
-
-          if (!res.ok) {
-            const buf = await res.arrayBuffer().catch(() => new ArrayBuffer(0))
-            safeSend('tts:httpStreamError', {
-              streamId,
-              status: res.status,
-              statusText: res.statusText,
-              contentType: res.headers.get('content-type') ?? '',
-              arrayBuffer: buf,
-              error: `HTTP ${res.status}: ${res.statusText}`,
-            })
-            safeSend('tts:httpStreamDone', { streamId })
-            return
-          }
-
-          if (!res.body) {
-            safeSend('tts:httpStreamError', { streamId, error: 'TTS response body is empty' })
-            safeSend('tts:httpStreamDone', { streamId })
-            return
-          }
-
-          const reader = res.body.getReader()
-          for (;;) {
-            const { done, value } = await reader.read()
-            if (done) break
-            if (!value) continue
-            // Electron IPC 可直接传 Uint8Array/Buffer，renderer 侧按二进制拼接。
-            safeSend('tts:httpStreamChunk', { streamId, chunk: value })
-          }
-
-          safeSend('tts:httpStreamDone', { streamId })
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          safeSend('tts:httpStreamError', { streamId, error: msg })
-          safeSend('tts:httpStreamDone', { streamId })
-        } finally {
-          clearTimeout(timer)
-          ttsHttpStreams.delete(streamId)
-        }
-      })()
-
-      return { streamId }
-    },
-  )
-
-  handleIpc('tts:httpStreamCancel', (_event, streamId: string) => {
-    const ac = ttsHttpStreams.get(streamId)
-    if (ac) {
-      try {
-        ac.abort(new Error('TTS stream canceled'))
-      } catch (_) {
-        /* ignore */
-      }
-      ttsHttpStreams.delete(streamId)
-    }
-    return { ok: true }
-  })
+  ttsIpc.register(handleIpc, onIpc)
 
   // Live2D expression/motion triggers - broadcast to pet window
   onIpc('live2d:triggerExpression', (_event, expressionName: string) => {
@@ -1305,50 +1142,6 @@ function registerIpc() {
     const baseText = typeof obj.baseText === 'string' ? obj.baseText : ''
     const clearFinals = obj.clearFinals === true
     petWin.webContents.send('asr:composePreviewSync', { baseText, clearFinals })
-  })
-
-  // TTS segmented sync: forward utterance segments to pet window
-  onIpc('tts:enqueue', (_event, payload: unknown) => {
-    const petWin = windowManager.getPetWindow()
-    if (petWin && !petWin.isDestroyed()) {
-      petWin.webContents.send('tts:enqueue', payload)
-    }
-  })
-
-  onIpc('tts:finalize', (_event, utteranceId: string) => {
-    const petWin = windowManager.getPetWindow()
-    if (petWin && !petWin.isDestroyed()) {
-      petWin.webContents.send('tts:finalize', utteranceId)
-    }
-  })
-
-  onIpc('tts:stopAll', () => {
-    const petWin = windowManager.getPetWindow()
-    if (petWin && !petWin.isDestroyed()) {
-      petWin.webContents.send('tts:stopAll')
-    }
-  })
-
-  // Pet -> Chat: segment started / ended / failed
-  onIpc('tts:segmentStarted', (_event, payload: unknown) => {
-    const chatWin = windowManager.getChatWindow()
-    if (chatWin && !chatWin.isDestroyed()) {
-      chatWin.webContents.send('tts:segmentStarted', payload)
-    }
-  })
-
-  onIpc('tts:utteranceEnded', (_event, payload: unknown) => {
-    const chatWin = windowManager.getChatWindow()
-    if (chatWin && !chatWin.isDestroyed()) {
-      chatWin.webContents.send('tts:utteranceEnded', payload)
-    }
-  })
-
-  onIpc('tts:utteranceFailed', (_event, payload: unknown) => {
-    const chatWin = windowManager.getChatWindow()
-    if (chatWin && !chatWin.isDestroyed()) {
-      chatWin.webContents.send('tts:utteranceFailed', payload)
-    }
   })
 
   handleIpc('window:openChat', () => {
@@ -1660,6 +1453,7 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   aiHttpProxy.close()
+  ttsIpc.close()
   void chatAttachmentIpc.close()
   if (live2dMouseTrackingTimer) {
     clearInterval(live2dMouseTrackingTimer)
