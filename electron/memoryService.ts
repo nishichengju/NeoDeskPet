@@ -5,6 +5,7 @@ import { MemoryIndexQueue } from './memory/memoryIndexQueue'
 import { MemoryKgIndexMaintainer } from './memory/memoryKgIndex'
 import { computeMemoryRetentionScore, MemoryRetrievalEngine } from './memory/memoryRetrieval'
 import { MemoryRecordStore } from './memory/memoryRecordStore'
+import { MemoryRevisionCoordinator } from './memory/memoryRevisionCoordinator'
 import { MemoryTagIndexMaintainer } from './memory/memoryTagIndex'
 import { MemoryVectorIndexMaintainer } from './memory/memoryVectorIndex'
 import { MemoryVectorSearchClient } from './memory/memoryVectorSearchClient'
@@ -62,19 +63,13 @@ function clampFloat(value: unknown, fallback: number, min: number, max: number):
   return Math.max(min, Math.min(max, n))
 }
 
-function normalizeMemoryText(text: string): string {
-  return text
-    .trim()
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 export class MemoryService {
   private db: MemoryDatabaseHandle
   private indexQueue = new MemoryIndexQueue()
   private embeddingClient = new MemoryEmbeddingClient()
   private kgIndexMaintainer: MemoryKgIndexMaintainer
   private recordStore: MemoryRecordStore
+  private revisionCoordinator: MemoryRevisionCoordinator
   private tagIndexMaintainer: MemoryTagIndexMaintainer
   private vectorIndexMaintainer: MemoryVectorIndexMaintainer
   private retrievalEngine: MemoryRetrievalEngine
@@ -86,6 +81,7 @@ export class MemoryService {
     this.db = opened.db
     this.kgIndexMaintainer = new MemoryKgIndexMaintainer(opened.db, this.indexQueue)
     this.recordStore = new MemoryRecordStore(opened.db)
+    this.revisionCoordinator = new MemoryRevisionCoordinator(opened.db, this.indexQueue, this.recordStore)
     this.tagIndexMaintainer = new MemoryTagIndexMaintainer(opened.db, this.indexQueue)
     this.vectorIndexMaintainer = new MemoryVectorIndexMaintainer(opened.db, this.indexQueue, this.embeddingClient)
     this.vectorSearchClient = new MemoryVectorSearchClient(opened.dbPath)
@@ -437,43 +433,7 @@ export class MemoryService {
   }
 
   updateMemory(args: MemoryUpdateArgs): MemoryRecord {
-    const rowid = clampInt(args.rowid, 0, 1, 2_000_000_000)
-    const content = args.content.trim()
-    if (!content) throw new Error('内容不能为空')
-
-    const current = this.recordStore.getByRowid(rowid)
-    if (!current) throw new Error('记录不存在')
-
-    const nextNormalized = normalizeMemoryText(content)
-    const currentNormalized = normalizeMemoryText(current.content)
-    if (nextNormalized.replace(/\s+/g, '') === currentNormalized.replace(/\s+/g, '')) {
-      return current
-    }
-
-    const ts = now()
-    const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim() : 'manual_edit'
-    const source = typeof args.source === 'string' && args.source.trim() ? args.source.trim() : null
-
-    this.recordStore.addVersion({
-      memoryRowid: rowid,
-      oldContent: current.content,
-      newContent: content,
-      reason,
-      source,
-      createdAt: ts,
-    })
-
-    this.db
-      .prepare(
-        "UPDATE memory SET content = ?, updated_at = ?, strength = MIN(1, strength + 0.05), retention = 1, status = 'active' WHERE rowid = ?",
-      )
-      .run(content, ts, rowid)
-    const updated = this.recordStore.getByRowid(rowid)
-    if (!updated) throw new Error('记录不存在')
-
-    // 后台索引：内容变更后需要更新 tags / embedding
-    this.indexQueue.enqueueAll(updated.rowid)
-    return updated
+    return this.revisionCoordinator.updateMemory(args)
   }
 
   updateMemoryMeta(args: MemoryUpdateMetaArgs): MemoryUpdateMetaResult {
@@ -545,264 +505,19 @@ export class MemoryService {
   }
 
   listMemoryVersions(args: MemoryListVersionsArgs): MemoryVersionRecord[] {
-    const rowid = clampInt(args.rowid, 0, 1, 2_000_000_000)
-    const limit = clampInt(args.limit, 50, 1, 200)
-    if (rowid <= 0) return []
-
-    const rows = this.db
-      .prepare(
-        `
-        SELECT
-          id as id,
-          memory_rowid as memoryRowid,
-          old_content as oldContent,
-          new_content as newContent,
-          reason as reason,
-          source as source,
-          created_at as createdAt
-        FROM memory_version
-        WHERE memory_rowid = ?
-        ORDER BY created_at DESC
-        LIMIT ?
-        `,
-      )
-      .all(rowid, limit) as MemoryVersionRecord[]
-
-    return rows
+    return this.revisionCoordinator.listMemoryVersions(args)
   }
 
   rollbackMemoryVersion(args: MemoryRollbackVersionArgs): MemoryRecord {
-    const versionId = args.versionId.trim()
-    if (!versionId) throw new Error('versionId 不能为空')
-
-    const v = this.db
-      .prepare(
-        `
-        SELECT
-          id as id,
-          memory_rowid as memoryRowid,
-          old_content as oldContent,
-          new_content as newContent,
-          reason as reason,
-          source as source,
-          created_at as createdAt
-        FROM memory_version
-        WHERE id = ?
-        LIMIT 1
-        `,
-      )
-      .get(versionId) as MemoryVersionRecord | undefined
-
-    if (!v) throw new Error('版本不存在')
-
-    return this.updateMemory({
-      rowid: v.memoryRowid,
-      content: v.oldContent,
-      reason: `rollback:${versionId}`,
-      source: 'rollback',
-    })
+    return this.revisionCoordinator.rollbackMemoryVersion(args)
   }
 
   listMemoryConflicts(args: MemoryListConflictsArgs): MemoryListConflictsResult {
-    const personaId = args.personaId.trim() || 'default'
-    const scope = args.scope ?? 'persona'
-    const status = args.status ?? 'open'
-    const limit = clampInt(args.limit, 50, 1, 200)
-    const offset = clampInt(args.offset, 0, 0, 1_000_000)
-
-    const where: string[] = []
-    const params: Array<string | number> = []
-
-    if (scope === 'persona') {
-      where.push('m.persona_id = ?')
-      params.push(personaId)
-    } else if (scope === 'shared') {
-      where.push('m.persona_id IS NULL')
-    } else {
-      where.push('(m.persona_id = ? OR m.persona_id IS NULL)')
-      params.push(personaId)
-    }
-
-    if (status !== 'all') {
-      where.push('c.status = ?')
-      params.push(status)
-    }
-
-    where.push("COALESCE(m.status, 'active') <> 'deleted'")
-
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-
-    const total = (this.db
-      .prepare(
-        `
-        SELECT COUNT(1) as c
-        FROM memory_conflict c
-        JOIN memory m ON m.rowid = c.memory_rowid
-        ${whereSql}
-        `,
-      )
-      .get(...params) as { c: number }).c
-
-    const items = this.db
-      .prepare(
-        `
-        SELECT
-          c.id as id,
-          c.memory_rowid as memoryRowid,
-          m.persona_id as basePersonaId,
-          CASE WHEN m.persona_id IS NULL THEN 'shared' ELSE 'persona' END as baseScope,
-          m.content as baseContent,
-          m.memory_type as baseMemoryType,
-          c.conflict_type as conflictType,
-          c.candidate_content as candidateContent,
-          c.candidate_source as candidateSource,
-          c.candidate_importance as candidateImportance,
-          c.candidate_strength as candidateStrength,
-          c.candidate_memory_type as candidateMemoryType,
-          c.status as status,
-          c.created_at as createdAt,
-          c.resolved_at as resolvedAt,
-          c.resolution as resolution
-        FROM memory_conflict c
-        JOIN memory m ON m.rowid = c.memory_rowid
-        ${whereSql}
-        ORDER BY c.created_at DESC
-        LIMIT ? OFFSET ?
-        `,
-      )
-      .all(...params, limit, offset) as MemoryListConflictsResult['items']
-
-    return { total, items }
+    return this.revisionCoordinator.listMemoryConflicts(args)
   }
 
   resolveMemoryConflict(args: MemoryResolveConflictArgs): MemoryResolveConflictResult {
-    const id = args.id.trim()
-    if (!id) throw new Error('id 不能为空')
-
-    const row = this.db
-      .prepare(
-        `
-        SELECT
-          c.id as id,
-          c.memory_rowid as memoryRowid,
-          c.conflict_type as conflictType,
-          c.candidate_content as candidateContent,
-          c.candidate_source as candidateSource,
-          c.candidate_importance as candidateImportance,
-          c.candidate_strength as candidateStrength,
-          c.candidate_memory_type as candidateMemoryType,
-          c.status as status,
-          m.persona_id as basePersonaId,
-          m.scope as baseScope,
-          m.content as baseContent,
-          m.memory_type as baseMemoryType
-        FROM memory_conflict c
-        JOIN memory m ON m.rowid = c.memory_rowid
-        WHERE c.id = ?
-        LIMIT 1
-        `,
-      )
-      .get(id) as
-      | (Pick<MemoryListConflictsResult['items'][number], 'id' | 'memoryRowid' | 'conflictType' | 'candidateContent'> & {
-          candidateSource: string | null
-          candidateImportance: number | null
-          candidateStrength: number | null
-          candidateMemoryType: string | null
-          status: string
-          basePersonaId: string | null
-          baseScope: string
-          baseContent: string
-          baseMemoryType: string
-        })
-      | undefined
-
-    if (!row) throw new Error('冲突记录不存在')
-
-    const ts = now()
-    const finalize = (
-      status: 'resolved' | 'ignored',
-      resolution: string,
-      extra?: { createdRowid?: number; updatedRowid?: number },
-    ): MemoryResolveConflictResult => {
-      this.db
-        .prepare('UPDATE memory_conflict SET status = ?, resolved_at = ?, resolution = ? WHERE id = ?')
-        .run(status, ts, resolution, id)
-      return {
-        ok: true,
-        ...(extra?.createdRowid ? { createdRowid: extra.createdRowid } : {}),
-        ...(extra?.updatedRowid ? { updatedRowid: extra.updatedRowid } : {}),
-      }
-    }
-
-    if (args.action === 'ignore') {
-      return finalize('ignored', 'ignore')
-    }
-
-    if (args.action === 'accept') {
-      const updated = this.updateMemory({
-        rowid: row.memoryRowid,
-        content: row.candidateContent,
-        reason: `conflict_accept:${id}:${row.conflictType}`,
-        source: row.candidateSource ?? 'conflict_accept',
-      })
-      return finalize('resolved', 'accept', { updatedRowid: updated.rowid })
-    }
-
-    if (args.action === 'keepBoth') {
-      const scope = row.baseScope === 'shared' ? 'shared' : 'persona'
-      const personaId = row.basePersonaId ?? 'default'
-      const pid = scope === 'shared' ? null : personaId
-      const createdAt = ts
-      const updatedAt = ts
-      const importance = clampFloat(row.candidateImportance ?? undefined, 0.75, 0, 1)
-      const strength = clampFloat(row.candidateStrength ?? undefined, 0.6, 0, 1)
-      const memoryType = (row.candidateMemoryType ?? row.baseMemoryType ?? 'semantic').trim() || 'semantic'
-      const source = row.candidateSource ?? 'conflict_keep_both'
-
-      this.db
-        .prepare(
-          'INSERT INTO memory (id, persona_id, scope, kind, role, session_id, message_id, content, created_at, updated_at, importance, strength, memory_type, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(
-          randomUUID(),
-          pid,
-          scope,
-          'manual_note',
-          'note',
-          null,
-          null,
-          row.candidateContent,
-          createdAt,
-          updatedAt,
-          importance,
-          strength,
-          memoryType,
-          source,
-        )
-      const inserted = this.db.prepare('SELECT rowid as rowid FROM memory WHERE rowid = last_insert_rowid()').get() as
-        | { rowid?: number }
-        | undefined
-      const createdRowid = clampInt(inserted?.rowid, 0, 1, 2_000_000_000)
-      if (createdRowid <= 0) throw new Error('新增候选记忆失败')
-
-      // 后台索引：新建记忆需要补齐 tags / embedding
-      this.indexQueue.enqueueAll(createdRowid)
-      return finalize('resolved', 'keepBoth', { createdRowid })
-    }
-
-    if (args.action === 'merge') {
-      const mergedRaw = typeof args.mergedContent === 'string' ? args.mergedContent.trim() : ''
-      const merged = mergedRaw || `${row.baseContent.trim()}\n${row.candidateContent.trim()}`.trim()
-      const updated = this.updateMemory({
-        rowid: row.memoryRowid,
-        content: merged,
-        reason: `conflict_merge:${id}:${row.conflictType}`,
-        source: row.candidateSource ?? 'conflict_merge',
-      })
-      return finalize('resolved', 'merge', { updatedRowid: updated.rowid })
-    }
-
-    throw new Error('未知 action')
+    return this.revisionCoordinator.resolveMemoryConflict(args)
   }
 
   runRetentionMaintenance(opts?: {

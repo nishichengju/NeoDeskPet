@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十九批：Memory 聊天/手工写入、向量去重与版本存取已拆分）
+- 状态：P2-1 进行中（第四十批：Memory 版本回滚、冲突处理与事务边界已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -890,6 +890,15 @@ AI 与能力
 - 新增 6 个 Node SQLite 写入协调器测试，覆盖采集开关与聊天 upsert、聊天向量重复合并/源行删除/后续重定向、手工重复无变化刷新、键值替换与版本/索引、provider 故障后 shared 新行降级，以及 offset 向量精确写入 32 字节。
 - 打包 IPC smoke 继续通过真实聊天持久化、手工记忆 CRUD 与版本记录、旧库迁移、FTS/Tag/Vector/KG 索引及召回；`memoryService.ts` 从 1483 行降至 890 行，renderer、preload、Memory IPC、SQLite schema、设置字段和界面均未改变。
 - `npm test` 共 66 个测试文件、296 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 版本查询/回滚、冲突列表与 accept/merge/keepBoth 处理边界，并补充对应事务测试。
+
+第四十批进展（2026-07-14）：
+
+- 新增 `electron/memory/memoryRevisionCoordinator.ts`，统一普通正文编辑、版本列表、版本回滚、冲突筛选分页，以及 ignore/accept/merge/keepBoth 四种解决动作；`MemoryService` 的五组 revision API 现在只做委托，IPC 与 preload 契约保持不变。
+- 普通编辑的“版本插入 + 正文更新”、版本回滚的“版本读取 + 反向编辑”、冲突 accept/merge 的“版本 + 正文 + 冲突完成”和 keepBoth 的“候选新增 + 冲突完成”全部纳入 SQLite 事务；事务提交后才把 rowid 放入 Tag/Vector/KG 队列，避免数据库回滚但内存队列已前进。
+- 修复 revision 路径中 `clampInt(..., min=1)` 会把 `rowid=0` 误夹为第一条记忆的问题：非法编辑现在明确报 `rowid 不合法`，非法版本列表返回空数组，不再可能误读或误改 rowid=1。
+- 新增 6 个 Node SQLite revision 测试，覆盖非法/no-op/真实编辑、版本 limit 与回滚审计、persona/shared/status/分页过滤、ignore/accept/默认 merge、keepBoth 元数据边界，以及 conflict finalize 触发器失败后的正文/版本/状态/索引完整回滚。
+- 打包 IPC smoke 继续通过真实 `updateMemory`、versionCount=1、手工记忆 CRUD、旧库迁移、FTS/Tag/Vector/KG 索引与召回；`memoryService.ts` 从 890 行降至 605 行，renderer、preload、Memory schema、设置字段和界面均未改变。
+- `npm test` 共 67 个测试文件、302 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 persona 管理、Memory 列表/过滤/排序、批量元数据、删除和保留度维护边界，完成 `MemoryService` 领域收口。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -819,3 +819,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`、`artifacts/ui-baseline/chat-default-720x620-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、SQLite schema、设置字段、去重阈值含义、索引队列语义或界面样式。Node SQLite 聚焦测试直接验证聊天与手工写入的数据库结果、版本行、软删除、队列和精确 BLOB；打包 smoke 使用生产 `better-sqlite3` 证明聊天摄取、手工写入、版本/索引/召回和重启路径继续闭环。尚未连接真实云端 embedding provider 验证语义相似度分布、限流与网络抖动，也未对 400 条候选扫描和高并发聊天写入建立性能基线；版本查询/回滚、冲突列表及 accept/merge/keepBoth 仍由 `MemoryService` 编排，下一批继续拆分并增加事务覆盖。
+
+## P2-1：大型模块拆分与领域边界（第四十批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory 普通编辑、版本查询/回滚、冲突列表与 ignore/accept/merge/keepBoth 事务处理
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 67 个测试文件、302 个用例通过 |
+| Memory revision 协调器测试 | 6 个用例通过：非法/no-op/真实编辑、版本 limit/回滚审计、冲突过滤分页、ignore/accept/merge、keepBoth 边界、finalize 失败完整事务回滚 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功 |
+| `npm run ipc:smoke` | 真实 Memory `update=true`、versionCount=1、CRUD、旧库 FTS、Tag/Vector/KG 后台索引与召回、聊天重启、Agent/MCP/媒体/任务路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；0 failure、0 console error、无横向或纵向溢出，Memory、Settings 与 Chat 截图无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`、`artifacts/ui-baseline/chat-default-720x620-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、SQLite schema、冲突字段含义、版本 reason/source 格式、索引队列种类或界面样式。Node SQLite 聚焦测试验证所有 revision 数据结果，并通过故意让 conflict finalize 失败证明正文更新、版本插入和冲突状态会一起回滚；打包 smoke 使用生产 `better-sqlite3` 验证真实更新与版本记录继续闭环。打包 smoke 尚未预置真实 `memory_conflict` 行逐项调用四种 IPC 动作，事务故障注入也只在 Node SQLite 适配器中执行；高并发冲突解决、重复处理同一 conflict 和极大版本历史查询仍需后续集成/性能回归。persona 管理、列表过滤、批量元数据、删除和保留度维护仍由 `MemoryService` 直接持有，下一批继续收口。
