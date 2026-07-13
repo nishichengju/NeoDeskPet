@@ -383,3 +383,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100-expanded.png`、`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 AI HTTP/preload/IPC 协议、provider 请求体、token 估算系数、上下文阈值默认值、planner/Tool Agent 决策、消息 schema、TTS/ASR 或样式；仅修复清空输入/关闭召回后的迟到记忆结果写回。未连接真实 OpenAI-compatible/Claude 模型触发超长上下文压缩，也未连接外部 MCP server 验证实时工具刷新；provider tokenizer 差异、专用压缩 profile 可用性和真实长会话压缩质量仍由后续 AI/MCP 人工回归矩阵验证。
+
+## P2-1：大型模块拆分与领域边界（第十九批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task 持久化归一化、读写接口与异常退出恢复
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 40 个测试文件、163 个用例通过 |
+| Task 存储测试 | 损坏记录拒绝、step/toolRun/usage 清洗、200 条上限、排序/查询、单次写入通知和 pending/running/paused 重启恢复通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功 |
+| `npm run ipc:smoke` | 打包应用创建并完成无工具任务、重启后逐字段读取、dismiss 移除通过；Chat/Memory/AI/TTS 与五类窗口继续通过且无运行时错误 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；任务工具卡展开态、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改任务 store 文件名/schema、Task IPC 通道与返回值、任务创建字段、调度并发数、step 执行、Tool Agent、视觉回执、暂停/恢复/取消语义或样式。真实打包 smoke 覆盖正常完成任务的落盘、重启读取和删除；未通过强制杀进程制造正在执行的真实任务，pending/running/paused 崩溃恢复目前由注入 backend 的单元测试证明，暂停/恢复/取消、工具重试和长任务并发仍由后续 Task 状态机批次扩大验证。

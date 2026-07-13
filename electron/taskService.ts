@@ -1,4 +1,3 @@
-import Store from 'electron-store'
 import { createHash, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -19,13 +18,9 @@ import { localMediaTypeFromPath } from './localMediaRegistry'
 import { isPathWithinRoot } from './localMediaPolicy'
 import { SkillManager, type SkillManagerRuntimeOptions } from './skillRegistry'
 import type { McpManager } from './mcpManager'
-import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, TaskStatus, VisualArtifactRef } from './types'
+import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
+import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, VisualArtifactRef } from './types'
 import { classifyVisionError, decideVisionRoute, resolveVisionFallbackProfile } from './visionRouter'
-
-type TaskStoreState = {
-  version: 1
-  tasks: TaskRecord[]
-}
 
 type TaskRuntime = {
   paused: boolean
@@ -34,8 +29,6 @@ type TaskRuntime = {
   cancelCurrent?: () => void
 }
 
-const MAX_TASKS = 200
-const MAX_STEP_INPUT_CHARS = 8000
 const MAX_STEP_OUTPUT_CHARS = 5000
 const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
 
@@ -264,103 +257,6 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
   if (!Number.isFinite(n)) return fallback
   const i = Math.trunc(n)
   return Math.max(min, Math.min(max, i))
-}
-
-function normalizeTaskRecord(value: unknown): TaskRecord | null {
-  if (!value || typeof value !== 'object') return null
-  const v = value as Partial<TaskRecord>
-  if (typeof v.id !== 'string' || !v.id.trim()) return null
-  if (typeof v.title !== 'string' || !v.title.trim()) return null
-  const status = v.status
-  const allowedStatus: TaskStatus[] = ['pending', 'running', 'paused', 'failed', 'done', 'canceled']
-  if (!allowedStatus.includes(status as TaskStatus)) return null
-
-  const steps = Array.isArray(v.steps) ? (v.steps as TaskStepRecord[]) : []
-  const safeSteps = steps
-    .filter((s) => s && typeof s === 'object' && typeof (s as TaskStepRecord).title === 'string')
-    .slice(0, 120)
-      .map((s) => ({
-        id: typeof s.id === 'string' && s.id.trim() ? s.id : randomUUID(),
-        title: clampText(s.title, 80),
-        status: (s.status ?? 'pending') as TaskStepRecord['status'],
-        tool: typeof s.tool === 'string' ? clampText(s.tool, 80) : undefined,
-        input: typeof s.input === 'string' ? clampText(s.input, MAX_STEP_INPUT_CHARS) : undefined,
-        output: typeof s.output === 'string' ? clampText(s.output, 1200) : undefined,
-        error: typeof s.error === 'string' ? clampText(s.error, 1200) : undefined,
-        startedAt: typeof s.startedAt === 'number' ? s.startedAt : undefined,
-        endedAt: typeof s.endedAt === 'number' ? s.endedAt : undefined,
-    }))
-
-  const toolsUsed = Array.isArray(v.toolsUsed) ? v.toolsUsed.filter((x) => typeof x === 'string').slice(0, 80) : []
-  const finalReply = typeof v.finalReply === 'string' ? clampText(v.finalReply, 12000) : undefined
-  const draftReply = typeof v.draftReply === 'string' ? clampText(v.draftReply, 12000) : undefined
-  const live2dExpression = typeof v.live2dExpression === 'string' ? clampText(v.live2dExpression, 80) : undefined
-  const live2dMotion = typeof v.live2dMotion === 'string' ? clampText(v.live2dMotion, 80) : undefined
-
-  const toolRuns = Array.isArray(v.toolRuns)
-    ? (v.toolRuns as Array<Record<string, unknown>>)
-        .filter((x) => x && typeof x === 'object')
-        .slice(0, 80)
-        .map((r, idx) => ({
-          id: typeof r.id === 'string' && r.id.trim() ? r.id.trim() : `run_${idx}`,
-          toolName: typeof r.toolName === 'string' ? clampText(r.toolName, 80) : '',
-          status: (r.status === 'running' || r.status === 'done' || r.status === 'error' ? r.status : 'done') as
-            | 'running'
-            | 'done'
-            | 'error',
-          inputPreview: typeof r.inputPreview === 'string' ? clampText(r.inputPreview, 6000) : undefined,
-          outputPreview: typeof r.outputPreview === 'string' ? clampText(r.outputPreview, 800) : undefined,
-          imagePaths: Array.isArray(r.imagePaths)
-            ? (r.imagePaths as unknown[])
-                .filter((x) => typeof x === 'string')
-                .map((x) => String(x).trim())
-                .filter(Boolean)
-                .slice(0, 8)
-            : undefined,
-          error: typeof r.error === 'string' ? clampText(r.error, 800) : undefined,
-          startedAt: typeof r.startedAt === 'number' ? r.startedAt : now(),
-          endedAt: typeof r.endedAt === 'number' ? r.endedAt : undefined,
-        }))
-        .filter((r) => r.toolName.trim().length > 0)
-    : undefined
-
-  return {
-    id: v.id,
-    queue: (v.queue ?? 'other') as TaskRecord['queue'],
-    title: clampText(v.title, 120),
-    why: typeof v.why === 'string' ? clampText(v.why, 240) : '',
-    status: status as TaskStatus,
-    createdAt: typeof v.createdAt === 'number' ? v.createdAt : now(),
-    updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : now(),
-    startedAt: typeof v.startedAt === 'number' ? v.startedAt : undefined,
-    endedAt: typeof v.endedAt === 'number' ? v.endedAt : undefined,
-    steps: safeSteps,
-    currentStepIndex: typeof v.currentStepIndex === 'number' ? Math.max(0, Math.trunc(v.currentStepIndex)) : 0,
-    toolsUsed,
-    finalReply,
-    draftReply,
-    live2dExpression,
-    live2dMotion,
-    toolRuns,
-    lastError: typeof v.lastError === 'string' ? clampText(v.lastError, 1600) : undefined,
-    usage:
-      v.usage && typeof v.usage === 'object'
-        ? {
-            promptTokens: typeof v.usage.promptTokens === 'number' ? v.usage.promptTokens : 0,
-            completionTokens: typeof v.usage.completionTokens === 'number' ? v.usage.completionTokens : 0,
-            totalTokens: typeof v.usage.totalTokens === 'number' ? v.usage.totalTokens : 0,
-          }
-        : undefined,
-  }
-}
-
-function normalizeState(state: TaskStoreState | undefined): TaskStoreState {
-  const s = state ?? ({ version: 1, tasks: [] } as TaskStoreState)
-  const rawTasks = Array.isArray(s.tasks) ? s.tasks : []
-  const tasks = rawTasks.map(normalizeTaskRecord).filter(Boolean) as TaskRecord[]
-
-  const next: TaskStoreState = { version: 1, tasks: tasks.slice(0, MAX_TASKS) }
-  return next
 }
 
 function sleep(ms: number): Promise<void> {
@@ -648,56 +544,30 @@ async function imageUrlPartsFromLocalPaths(paths: string[], limit = 4): Promise<
 }
 
 export class TaskService {
-  private readonly store: Store<TaskStoreState>
+  private readonly taskStore: TaskStore
   private readonly runtime = new Map<string, TaskRuntime>()
   private readonly visualContextByTask = new Map<string, TaskVisualContext>()
   private readonly visionCapabilityCache = new Map<string, 'supported' | 'unsupported'>()
-  private readonly onChanged: () => void
   private readonly userDataDir: string
   private readonly mcpManager: McpManager | null
   private readonly skillManager: SkillManager
   private schedulerTimer: NodeJS.Timeout | null = null
 
   constructor(opts: { onChanged: () => void; userDataDir: string; mcpManager?: McpManager | null }) {
-    this.store = new Store<TaskStoreState>({
-      name: 'neodeskpet-tasks',
-      defaults: { version: 1, tasks: [] },
-    })
-    this.onChanged = opts.onChanged
+    this.taskStore = new TaskStore({ onChanged: opts.onChanged })
     this.userDataDir = opts.userDataDir
     this.mcpManager = opts.mcpManager ?? null
     this.skillManager = new SkillManager({ workspaceDir: process.cwd() })
 
-    // 如果上次异常退出，pending/running/paused 状态会悬挂；这里统一标记为 failed（便于用户看见原因）
-    this.writeState((draft) => {
-      const ts = now()
-      for (const t of draft.tasks) {
-        const prev = t.status
-        if (prev === 'pending' || prev === 'running' || prev === 'paused') {
-          t.status = 'failed'
-          t.updatedAt = ts
-          t.endedAt = ts
-          t.lastError =
-            t.lastError ||
-            (prev === 'pending'
-              ? '任务在上次运行时尚未开始（应用被重启/崩溃）'
-              : '任务在上次运行时中断（应用被重启/崩溃）')
-        }
-      }
-    })
+    this.taskStore.recoverInterruptedTasks()
   }
 
   listTasks(): TaskListResult {
-    const state = normalizeState(this.store.store)
-    const items = [...state.tasks].sort((a, b) => b.updatedAt - a.updatedAt)
-    return { items }
+    return this.taskStore.listTasks()
   }
 
   getTask(id: string): TaskRecord | null {
-    const tid = (id ?? '').trim()
-    if (!tid) return null
-    const state = normalizeState(this.store.store)
-    return state.tasks.find((t) => t.id === tid) ?? null
+    return this.taskStore.getTask(id)
   }
 
   // 用户对 image.generate 结果“重新生成”后，把新图写回原任务的 toolRun，
@@ -733,7 +603,7 @@ export class TaskService {
             title: clampText(s.title, 80),
             status: 'pending',
             tool: typeof s.tool === 'string' ? clampText(s.tool, 80) : undefined,
-            input: typeof s.input === 'string' ? clampText(s.input, MAX_STEP_INPUT_CHARS) : undefined,
+            input: typeof s.input === 'string' ? clampText(s.input, MAX_TASK_STEP_INPUT_CHARS) : undefined,
           }))
         : [
             { id: randomUUID(), title: '准备', status: 'pending' },
@@ -768,7 +638,7 @@ export class TaskService {
 
     this.writeState((draft) => {
       draft.tasks.unshift(record)
-      draft.tasks = draft.tasks.slice(0, MAX_TASKS)
+      draft.tasks = draft.tasks.slice(0, MAX_TASK_RECORDS)
     })
 
     this.kickScheduler()
@@ -868,7 +738,7 @@ export class TaskService {
   }
 
   private runScheduler(): void {
-    const state = normalizeState(this.store.store)
+    const state = this.taskStore.readState()
     const running = state.tasks.filter((t) => t.status === 'running').length
     const capacity = Math.max(0, 3 - running)
     if (capacity <= 0) return
@@ -3594,9 +3464,6 @@ export class TaskService {
   }
 
   private writeState(mutator: (draft: TaskStoreState) => void): void {
-    const draft = normalizeState(this.store.store)
-    mutator(draft)
-    this.store.store = draft
-    this.onChanged()
+    this.taskStore.update(mutator)
   }
 }

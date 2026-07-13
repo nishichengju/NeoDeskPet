@@ -472,6 +472,30 @@ try {
     'chat current session was not persisted',
   )
 
+  const taskPersistenceBeforeRestart = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Smoke Task',
+      why: 'Verify packaged task storage',
+      steps: [{ title: 'No-op persisted step' }],
+    })
+    const deadline = Date.now() + 10_000
+    let loaded = await window.neoDeskPet.getTask(created.id)
+    while (loaded && (loaded.status === 'pending' || loaded.status === 'running' || loaded.status === 'paused')) {
+      if (Date.now() >= deadline) throw new Error(`task did not finish before timeout: ${loaded.status}`)
+      await new Promise((resolve) => window.setTimeout(resolve, 50))
+      loaded = await window.neoDeskPet.getTask(created.id)
+    }
+    const listed = await window.neoDeskPet.listTasks()
+    return { taskId: created.id, loaded, listed }
+  })
+  assert(taskPersistenceBeforeRestart.loaded?.status === 'done', 'task did not finish before restart')
+  assert(taskPersistenceBeforeRestart.loaded?.steps[0]?.output === '跳过（无 tool）', 'task step output was not persisted before restart')
+  assert(
+    taskPersistenceBeforeRestart.listed.items.some((task) => task.id === taskPersistenceBeforeRestart.taskId),
+    'created task was not listed before restart',
+  )
+
   const memoryCrudSeed = await settings.evaluate(async () => {
     const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
     const updatedPersona = await window.neoDeskPet.updatePersona(persona.id, {
@@ -687,6 +711,24 @@ try {
     'chat session deletion failed',
   )
 
+  const taskPersistenceAfterRestart = await restartedChat.evaluate(async (taskId) => {
+    const loaded = await window.neoDeskPet.getTask(taskId)
+    const listed = await window.neoDeskPet.listTasks()
+    const dismissed = await window.neoDeskPet.dismissTask(taskId)
+    const afterDismiss = await window.neoDeskPet.listTasks()
+    return { loaded, listed, dismissed, afterDismiss }
+  }, taskPersistenceBeforeRestart.taskId)
+  assert(taskPersistenceAfterRestart.loaded?.status === 'done', 'completed task was lost or changed after restart')
+  assert(
+    taskPersistenceAfterRestart.listed.items.some((task) => task.id === taskPersistenceBeforeRestart.taskId),
+    'completed task was not listed after restart',
+  )
+  assert(taskPersistenceAfterRestart.dismissed?.ok === true, 'task dismiss failed after restart')
+  assert(
+    !taskPersistenceAfterRestart.afterDismiss.items.some((task) => task.id === taskPersistenceBeforeRestart.taskId),
+    'dismissed task remained in the task list',
+  )
+
   const report = {
     generatedAt: new Date().toISOString(),
     executablePath,
@@ -708,6 +750,12 @@ try {
       deleteMessage: chatPersistenceAfterRestart.afterMessageDelete.messages.length === 1,
       clear: chatPersistenceAfterRestart.afterClear.messages.length === 0,
       deleteSession: true,
+    },
+    taskPersistence: {
+      taskId: taskPersistenceBeforeRestart.taskId,
+      beforeRestart: taskPersistenceBeforeRestart.loaded,
+      afterRestart: taskPersistenceAfterRestart.loaded,
+      dismiss: taskPersistenceAfterRestart.dismissed?.ok === true,
     },
     memoryCrud: {
       personaId: memoryCrudSeed.persona.id,

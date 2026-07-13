@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十八批：Chat 上下文预算与压缩 hook 已拆分）
+- 状态：P2-1 进行中（第十九批：Task 存储与重启恢复已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -703,6 +703,15 @@ AI 与能力
 - 修复记忆预取的迟到结果竞态：每次输入、API 或记忆开关变化都会先推进请求代次，清空输入或关闭召回后，旧请求完成时不再把过期 addon 写回当前上下文。
 - `ChatWindow.tsx` 本批净减少 486 个物理行，当前为 3872 行；新增 8 个上下文测试，覆盖文本/图片 token 估算、按预算保留最近消息、内置/MCP 工具目录、真实/预测 usage、压缩成功、失败回退和发布节流。
 - `npm test` 共 39 个测试文件、158 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 AI/TTS IPC 代理、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批进入 `taskService.ts` 的领域拆分。
+
+### P2-1 进展记录（2026-07-13，第十九批）
+
+- 新增 `electron/task/taskStore.ts`，集中持有 `neodeskpet-tasks` electron-store、任务/step/toolRun/usage 持久化归一化、200 条历史上限、列表排序、按 ID 查询、原子写入通知和异常退出后的状态恢复。
+- `TaskStore` 支持注入内存 backend、时钟和 ID 生成器，任务存储可脱离 3400 多行执行器独立测试；生产路径继续使用原文件名、schema version、字段上限和 `onChanged` 广播契约。
+- `TaskService` 的公开 CRUD、调度器和运行循环改为依赖存储接口，构造阶段继续把上次遗留的 pending/running/paused 任务标记为 failed；模型循环、工具执行、视觉回执、暂停/恢复/取消状态机与 IPC 返回结构未改动。
+- `taskService.ts` 从 3602 行降至 3469 行；新增 5 个任务存储测试，覆盖无效记录拒绝、step/toolRun/usage 清洗、200 条上限、更新时间排序、trimmed ID 查询、写入通知和三类中断状态的重启恢复文案。
+- 打包 IPC smoke 新增真实任务往返：创建无工具任务、等待 step 完成、确认列表与输出，关闭应用后重启读取同一记录，再 dismiss 并确认移除。
+- `npm test` 共 40 个测试文件、163 个用例通过；TypeScript、lint、Windows unpacked 打包、任务/Chat/Memory/AI/TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task 调度与运行时状态机。
 
 ## 14. P2-2：前端加载与运行性能
 
