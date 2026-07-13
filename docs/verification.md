@@ -669,3 +669,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义/schema、模型配置字段、视觉路由决策或 provider 传输协议。Skills 和消息会话的聚焦测试锁定了提示顺序、显式技能改写、异常降级和 fallback 回放；打包 smoke 进一步证明这些新边界在 text/native/auto/Claude、真实 MCP 与本地图片组合下不改变行为。尚未用真实超大 Skills 目录测量扫描性能，也未连接真实云端 provider 与外挂视觉 Profile 组合验证供应商私有错误；这些外部差异继续作为人工集成风险保留。
+
+## P2-1：大型模块拆分与领域边界（第三十三批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory SQLite 打开/关闭、schema 初始化、旧库兼容列、依赖索引与首次 FTS 回填
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 57 个测试文件、261 个用例通过 |
+| Memory database 生命周期测试 | 5 个用例通过：全新 schema/PRAGMA/默认 persona、旧列回填与索引顺序、幂等/自定义 persona/更新触发器、旧 KG 实体 FTS、初始化失败关闭且保留原始错误 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | 启动前写入旧版 persona/memory schema；打包应用迁移后 persona 保留、memory rowid=1、`updatedAt=1783962569890`、`status=active`、`memoryType=other`、`pinned=0`、FTS hits=1，并由召回接口返回原正文；既有 Agent/MCP/媒体/任务路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；无 console error、无横向溢出，Memory 900x720 与 640x500 截图无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-min-640x500-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、记忆业务字段含义、召回排序、保留策略、向量计算或界面样式。系统 Node 24 与仓库当前 Electron `better-sqlite3` 的 native ABI 不同，因此普通单测通过可注入构造器使用 Node 内置 SQLite 验证 schema 语义，不在 `npm test` 中执行昂贵 native 重建；Windows unpacked 打包和 IPC smoke 则使用生产 `better-sqlite3` 覆盖真实旧库迁移。尚未对极大旧库测量首次 FTS rebuild 时长，也未模拟迁移中途磁盘写满或损坏数据库；向量 worker、embedding 队列和混合召回仍留在 `MemoryService`，由下一批继续拆分。

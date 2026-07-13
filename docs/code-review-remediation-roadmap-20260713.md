@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十二批：Task Agent Skills 与消息会话装配已拆分）
+- 状态：P2-1 进行中（第三十三批：Memory SQLite 生命周期与兼容迁移已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -827,6 +827,15 @@ AI 与能力
 - 新增 5 个 Skills 准备测试和 4 个消息会话测试，覆盖 verbose/disabled/冲突截断、显式匹配、读取失败、异常隔离、系统消息顺序、历史尾部去重、带图请求、fallback 原位重建、空结果和 4000 字符工具结果回放。
 - 打包 IPC smoke 继续通过 text 503 重试、真实 MCP 结构化图片、Agent MMVector workflow、native role=tool、带本地 PNG 的 auto native→text fallback 及 Claude `/v1/messages` 3/4/7 usage；消息重建后工具只执行一次、视觉与结果回放均命中。
 - `npm test` 共 56 个测试文件、256 个用例通过；TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批进入 `memoryService.ts`，先拆数据库生命周期与检索边界。
+
+### P2-1 进展记录（2026-07-14，第三十三批）
+
+- 新增 `electron/memory/memoryDatabase.ts`，集中管理 `better-sqlite3` 加载、数据库路径、WAL/NORMAL/foreign-key PRAGMA、完整 schema、兼容列、默认 persona、依赖索引与初始化失败清理；`MemoryService` 构造器只接收已初始化的数据库句柄与路径。
+- 调整旧库迁移顺序为“基础 schema -> persona/memory 兼容列 -> 依赖新列的索引 -> 默认 persona -> 首次 FTS 回填”，修复旧版 `memory` 表缺少 `updated_at` 时会先创建 `idx_memory_kind_persona_updated` 并导致启动失败的问题；首次引入 `memory_fts` 和 `kg_entity_fts` 时会分别重建既有记忆与知识图谱实体索引。
+- 初始化失败时会关闭已打开的数据库句柄，同时保留原始 schema 错误，不让二次 close 异常覆盖真正启动原因；重复初始化保留用户自定义的默认 persona，并刷新 memory/KG 更新触发器。
+- 新增 5 个数据库生命周期测试，使用 Node 24 内置 SQLite 适配器覆盖全新数据库、旧列迁移/回填/索引顺序、幂等与触发器刷新、旧 KG 实体 FTS 回填，以及初始化失败清理；运行时仍使用 Electron ABI 对应的 `better-sqlite3`，避免把 native ABI 重建塞入普通单测。
+- 打包 IPC smoke 会在应用启动前写入真实旧版 SQLite schema，再通过 renderer IPC 断言 persona 保留、`updated_at` 回填、安全默认列、FTS 命中和召回正文；这条路径使用 Windows unpacked 应用内真实 `better-sqlite3`，补足单测适配器与生产 native 驱动之间的差异。
+- `memoryService.ts` 从 3445 行降至 3150 行；`npm test` 共 57 个测试文件、261 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 向量 worker、embedding 生命周期与检索编排边界。
 
 ## 14. P2-2：前端加载与运行性能
 

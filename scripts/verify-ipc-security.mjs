@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { _electron as electron } from 'playwright-core'
 
@@ -10,6 +11,7 @@ const outputDir = path.join(projectRoot, 'artifacts', `ipc-security-smoke-${stam
 const userDataDir = path.join(outputDir, 'userData')
 const settingsFile = path.join(userDataDir, 'neodeskpet-settings.json')
 const secretsFile = path.join(userDataDir, 'neodeskpet-secrets.json')
+const memoryDatabaseFile = path.join(userDataDir, 'neodeskpet-memory.sqlite3')
 const packageVersion = JSON.parse(readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).version
 const packagedDir = path.join(projectRoot, 'release', packageVersion, 'win-unpacked')
 const packagedExeName = existsSync(packagedDir)
@@ -32,6 +34,37 @@ mkdirSync(taskMediaDir, { recursive: true })
 writeFileSync(taskMediaImage, smokePng)
 writeFileSync(taskMediaManifest, `${taskMediaImage}\n`, 'utf8')
 writeFileSync(visionSmokeImage, smokePng)
+
+const legacyMemoryPersonaId = 'ipc-legacy-persona'
+const legacyMemoryContent = 'IPC legacy searchable memory'
+const legacyMemoryCreatedAt = Date.now()
+const legacyMemoryDatabase = new DatabaseSync(memoryDatabaseFile)
+legacyMemoryDatabase.exec(`
+  CREATE TABLE persona (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE memory (
+    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    persona_id TEXT,
+    scope TEXT NOT NULL DEFAULT 'persona',
+    kind TEXT NOT NULL,
+    role TEXT,
+    session_id TEXT,
+    message_id TEXT,
+    content TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  INSERT INTO persona (id, name, prompt, created_at, updated_at)
+    VALUES ('${legacyMemoryPersonaId}', 'IPC Legacy Persona', 'legacy prompt', 100, 200);
+  INSERT INTO memory (id, persona_id, scope, kind, role, session_id, message_id, content, created_at)
+    VALUES ('ipc-legacy-memory', '${legacyMemoryPersonaId}', 'persona', 'chat', 'user', 'legacy-session', 'legacy-message', '${legacyMemoryContent}', ${legacyMemoryCreatedAt});
+`)
+legacyMemoryDatabase.close()
 
 const aiSmokeKey = 'ipc-smoke-main-key'
 const aiRequests = []
@@ -1155,6 +1188,36 @@ try {
   )
   assert(taskAgentClaude.dismissed?.ok, 'agent Claude task cleanup failed')
 
+  const memoryMigration = await settings.evaluate(async (personaId) => {
+    const personas = await window.neoDeskPet.listPersonas()
+    const listed = await window.neoDeskPet.listMemory({
+      personaId,
+      scope: 'persona',
+      query: 'legacy searchable',
+      limit: 20,
+    })
+    return { personas, listed }
+  }, legacyMemoryPersonaId)
+  const memoryMigrationRetrieve = await chat.evaluate(
+    async ({ personaId, query }) => window.neoDeskPet.retrieveMemory({ personaId, query, limit: 10, reinforce: false }),
+    { personaId: legacyMemoryPersonaId, query: legacyMemoryContent },
+  )
+  const migratedMemory = memoryMigration.listed.items.find((item) => item.content === legacyMemoryContent)
+  assert(
+    memoryMigration.personas.some((persona) => persona.id === legacyMemoryPersonaId),
+    'legacy memory persona was not preserved during schema migration',
+  )
+  assert(
+    migratedMemory?.updatedAt === legacyMemoryCreatedAt,
+    'legacy memory updated_at was not backfilled from created_at',
+  )
+  assert(
+    migratedMemory?.status === 'active' && migratedMemory?.memoryType === 'other' && migratedMemory?.pinned === 0,
+    'legacy memory compatibility columns were not initialized with safe defaults',
+  )
+  assert(memoryMigrationRetrieve.debug?.counts.fts > 0, 'legacy memory was not rebuilt into memory_fts')
+  assert(memoryMigrationRetrieve.addon.includes(legacyMemoryContent), 'legacy memory was not returned by FTS retrieval')
+
   const memoryCrudSeed = await settings.evaluate(async () => {
     const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
     const updatedPersona = await window.neoDeskPet.updatePersona(persona.id, {
@@ -1499,6 +1562,15 @@ try {
       cleanup: taskAgentClaude.dismissed?.ok === true,
     },
     memoryCrud: {
+      migration: {
+        personaPreserved: memoryMigration.personas.some((persona) => persona.id === legacyMemoryPersonaId),
+        memoryRowid: migratedMemory?.rowid,
+        updatedAt: migratedMemory?.updatedAt,
+        status: migratedMemory?.status,
+        memoryType: migratedMemory?.memoryType,
+        pinned: migratedMemory?.pinned,
+        ftsHits: memoryMigrationRetrieve.debug?.counts.fts ?? 0,
+      },
       personaId: memoryCrudSeed.persona.id,
       memoryRowid: memoryCrudSeed.created.rowid,
       update: memoryCrud.updated.content === 'IPC updated memory',
