@@ -259,18 +259,60 @@ function installChatMock(page, options = {}) {
   }, { seedImage: options.seedImage === true, seedTool: options.seedTool === true })
 }
 
-function installOrbMock(page, state) {
-  return page.addInitScript(({ initialState }) => {
+function installOrbMock(page, options) {
+  return page.addInitScript(({ initialState, seedContent }) => {
     const now = Date.now()
+    const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nT8AAAAASUVORK5CYII='
+    const task = {
+      id: 'baseline-orb-task',
+      queue: 'chat',
+      title: 'Baseline tool',
+      why: 'Verify Orb tool rendering',
+      status: 'done',
+      createdAt: now,
+      updatedAt: now,
+      steps: [],
+      currentStepIndex: 0,
+      toolsUsed: ['delay.sleep'],
+      toolRuns: [
+        {
+          id: 'baseline-orb-run',
+          toolName: 'delay.sleep',
+          status: 'done',
+          inputPreview: '{"ms":1}',
+          outputPreview: 'sleep 1ms',
+          imagePaths: [imageDataUrl],
+          startedAt: now - 1000,
+          endedAt: now,
+        },
+      ],
+    }
+    const messages = seedContent
+      ? [
+          { id: 'orb-user', role: 'user', content: 'Run the baseline tool.', createdAt: now - 2000 },
+          {
+            id: 'orb-assistant',
+            role: 'assistant',
+            content: 'Baseline result.',
+            createdAt: now - 1000,
+            blocks: [
+              { type: 'text', text: '**Baseline result**' },
+              { type: 'status', text: 'Tool completed' },
+              { type: 'tool_use', taskId: task.id, runId: 'baseline-orb-run' },
+            ],
+            attachments: [{ kind: 'image', path: imageDataUrl, filename: 'baseline.png' }],
+          },
+        ]
+      : []
     const summary = {
       id: 'baseline-session',
       name: '界面基线会话',
       personaId: 'default',
       createdAt: now,
       updatedAt: now,
-      messageCount: 0,
+      messageCount: messages.length,
     }
-    const session = { ...summary, nameMode: 'manual', messages: [] }
+    const session = { ...summary, nameMode: 'manual', messages }
     const off = () => undefined
     const api = {
       getOrbUiState: async () => ({ state: initialState }),
@@ -281,15 +323,16 @@ function installOrbMock(page, state) {
       createChatSession: async () => session,
       setCurrentChatSession: async () => summary,
       getChatSession: async () => session,
-      listTasks: async () => ({ items: [] }),
+      listTasks: async () => ({ items: seedContent ? [task] : [] }),
       onTasksChanged: () => off,
       setOrbUiState: async (state) => ({ state }),
       setOrbOverlayBounds: async () => ({ ok: true }),
       clearOrbOverlayBounds: async () => ({ ok: true }),
       getChatAttachmentUrl: async () => ({ ok: false, url: '' }),
+      readChatAttachmentDataUrl: async () => ({ ok: false, dataUrl: '' }),
     }
     Object.defineProperty(window, 'neoDeskPet', { configurable: true, value: api })
-  }, { initialState: state })
+  }, { initialState: options.state, seedContent: options.seedContent === true })
 }
 
 function installMemoryMock(page) {
@@ -451,6 +494,7 @@ const baselines = [
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
   { name: 'orb-bar-560x80-scale100', route: 'orb', width: 560, height: 80, scale: 1, mockOrbState: 'bar' },
   { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel' },
+  { name: 'orb-panel-content-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true },
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
   { name: 'chat-tool-card-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyToolCard: true },
@@ -491,7 +535,10 @@ try {
       seedImage: baseline.verifyImageViewer,
       seedTool: baseline.verifyToolCard,
     })
-    if (baseline.mockOrbState) await installOrbMock(page, baseline.mockOrbState)
+    if (baseline.mockOrbState) await installOrbMock(page, {
+      state: baseline.mockOrbState,
+      seedContent: baseline.seedOrbContent,
+    })
     if (baseline.mockMemory) await installMemoryMock(page)
     if (baseline.mockSettings) await installSettingsMock(page)
 
@@ -511,6 +558,11 @@ try {
         body: { scrollWidth: document.body.scrollWidth, scrollHeight: document.body.scrollHeight },
         horizontalOverflow: document.body.scrollWidth > document.documentElement.clientWidth,
         verticalOverflow: document.body.scrollHeight > document.documentElement.clientHeight,
+        orbContent: {
+          messages: document.querySelectorAll('.ndp-orbpanel-msg').length,
+          toolCards: document.querySelectorAll('.ndp-tooluse').length,
+          attachments: document.querySelectorAll('.ndp-orbpanel-attachment').length,
+        },
         settingsNavigation: settingsLayout && settingsNav
           ? {
               layoutWidth: settingsLayout.clientWidth,
@@ -543,6 +595,15 @@ try {
     }
     if (baseline.route === 'settings' && metrics.settingsNavigation?.layoutScrollWidth > metrics.settingsNavigation?.layoutWidth) {
       failures.push('settings layout has horizontal overflow')
+    }
+    if (baseline.verifyOrbContent && metrics.orbContent.messages < 2) {
+      failures.push(`orb content has only ${metrics.orbContent.messages} messages`)
+    }
+    if (baseline.verifyOrbContent && metrics.orbContent.toolCards < 1) {
+      failures.push('orb content tool card is missing')
+    }
+    if (baseline.verifyOrbContent && metrics.orbContent.attachments < 2) {
+      failures.push(`orb content has only ${metrics.orbContent.attachments} attachments`)
     }
 
     let expandedChat = null

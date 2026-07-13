@@ -12,19 +12,19 @@ import type {
 } from '../../electron/types'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, getAIService, type ChatMessage } from '../services/aiService'
-import { MarkdownMessage } from '../components/MarkdownMessage'
 import {
   computeAppendDelta,
   filterVisibleToolRuns,
-  isAgentShellToolName,
   joinTextBlocks,
   mergeLeadingPunctuationAcrossToolBoundary,
   normalizeInterleavedTextSegment,
 } from '../utils/chatMessages'
 import { OrbBallView } from './OrbBallView'
 import { OrbBarView, type OrbPendingAttachment } from './OrbBarView'
-import { OrbImagePreview, OrbLocalVideo, ToolUseDuration } from './OrbMessageMedia'
+import { OrbAssistantMessageContent } from './OrbAssistantMessageContent'
+import { OrbMessageAttachments } from './OrbMessageAttachments'
 import { OrbPanelView } from './OrbPanelView'
+import type { OrbImageViewerRequestItem } from './orbMessageContentUtils'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
 type PopoverKind = 'history'
@@ -116,7 +116,6 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     dockSideRef.current = dockSide
   }, [dockSide])
 
-  type ImageViewerRequestItem = { source: string; title?: string }
   type ImageViewerItem = { src: string; title: string }
   const [pendingAttachments, setPendingAttachments] = useState<OrbPendingAttachment[]>([])
   const [imageViewer, setImageViewer] = useState<{ open: boolean; items: ImageViewerItem[]; index: number; scale: number }>({
@@ -1645,7 +1644,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
   )
 
   const openImageViewer = useCallback(
-    async (items: ImageViewerRequestItem[], startIndex = 0) => {
+    async (items: OrbImageViewerRequestItem[], startIndex = 0) => {
       const cleaned = items
         .map((it) => ({ source: String(it?.source ?? '').trim(), title: String(it?.title ?? '').trim() }))
         .filter((it) => Boolean(it.source))
@@ -1738,189 +1737,16 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [closeImageViewer, imageViewer.open, nextImageViewer, prevImageViewer])
 
-  const renderToolCard = useCallback(
-    (taskId: string, runId?: string) => {
-      const t = tasksById.get(taskId)
-      if (!t) return <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: ToolUse（任务未加载</div>
-
-      // agent.run 壳 run/step 不渲染为工具卡（旧存档里可能已写入）
-      const runs = filterVisibleToolRuns(Array.isArray(t.toolRuns) ? t.toolRuns : [])
-      const steps = (Array.isArray(t.steps) ? t.steps : []).filter((s) => !isAgentShellToolName((s as { tool?: unknown })?.tool))
-
-      const renderRun = (r: (typeof runs)[number], idx: number) => {
-        const progress = runs.length > 1 ? `${idx + 1}/${runs.length}` : ''
-        const pillStatus = r.status === 'error' ? 'failed' : r.status
-        const toolImagePaths = Array.isArray(r.imagePaths)
-          ? Array.from(new Set(r.imagePaths.map((x) => String(x ?? '').trim()).filter(Boolean))).slice(0, 8)
-          : []
-        const allToolImagePaths = Array.from(
-          new Set(
-            runs.flatMap((run) =>
-              Array.isArray(run.imagePaths)
-                ? run.imagePaths.map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 8)
-                : [],
-            ),
-          ),
-        )
-        const toolImageViewerItems = allToolImagePaths.map((imgPath, imgIdx) => ({ source: imgPath, title: `图片 ${imgIdx + 1}` }))
-        const startedAt = typeof r.startedAt === 'number' ? r.startedAt : 0
-        const endedAt = typeof r.endedAt === 'number' ? r.endedAt : null
-        const toolImageBlock =
-          toolImagePaths.length > 0 ? (
-            <div className="ndp-orbpanel-attachments" data-orb-nodrag="true">
-              {toolImagePaths.map((imgPath, imgIdx) => (
-                <div
-                  key={`tool-outside-img-${String(r.id ?? `${taskId}-run-${idx}`)}-${imgIdx}`}
-                  className="ndp-orbpanel-attachment"
-                  title={imgPath}
-                  onClick={() => {
-                    const navIndex = allToolImagePaths.findIndex((p) => p === imgPath)
-                    void openImageViewer(toolImageViewerItems, navIndex >= 0 ? navIndex : imgIdx)
-                  }}
-                >
-                  <OrbImagePreview api={api} className="ndp-orbpanel-image" imagePath={imgPath} alt={`tool-image-${imgIdx + 1}`} />
-                  <div className="ndp-orbpanel-attachment-meta">image {imgIdx + 1}</div>
-                </div>
-              ))}
-            </div>
-          ) : null
-        return (
-          <>
-            {toolImageBlock}
-            <details key={String(r.id ?? `${taskId}-run-${idx}`)} className="ndp-tooluse">
-              <summary className="ndp-tooluse-summary">
-                <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
-                  DeskPet · ToolUse: {r.toolName}
-                  {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
-                </span>
-                <ToolUseDuration startedAt={startedAt} endedAt={endedAt} />
-              </summary>
-              <div className="ndp-tooluse-body">
-                <div className="ndp-tooluse-run">
-                  <div className="ndp-tooluse-run-title">
-                    <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${r.status}`}>{r.status}</span>
-                    <span className="ndp-tooluse-run-name">{r.toolName}</span>
-                  </div>
-                  {r.inputPreview ? <div className="ndp-tooluse-run-io">in: {r.inputPreview}</div> : null}
-                  {r.outputPreview ? <div className="ndp-tooluse-run-io">out: {r.outputPreview}</div> : null}
-                  {r.error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {r.error}</div> : null}
-                </div>
-              </div>
-            </details>
-          </>
-        )
-      }
-
-      const renderStep = (s: (typeof steps)[number], idx: number) => {
-        const tool = typeof (s as { tool?: unknown }).tool === 'string' ? String((s as { tool: string }).tool) : ''
-        const name = tool || String((s as { title?: unknown }).title ?? `step-${idx}`)
-        const progress = steps.length > 1 ? `${idx + 1}/${steps.length}` : ''
-        const statusText = String((s as { status?: unknown }).status ?? 'pending')
-        const statusKey = statusText === 'error' ? 'error' : statusText === 'done' ? 'done' : statusText === 'running' ? 'running' : statusText === 'paused' ? 'paused' : 'pending'
-        const pillStatus =
-          statusText === 'failed' || statusText === 'error'
-            ? 'failed'
-            : statusText === 'done'
-              ? 'done'
-              : statusText === 'running'
-                ? 'running'
-                : statusText === 'paused'
-                  ? 'paused'
-                  : 'pending'
-
-        const input = typeof (s as { input?: unknown }).input === 'string' ? String((s as { input: string }).input) : ''
-        const output = typeof (s as { output?: unknown }).output === 'string' ? String((s as { output: string }).output) : ''
-        const error = typeof (s as { error?: unknown }).error === 'string' ? String((s as { error: string }).error) : ''
-        const startedAt = typeof (s as { startedAt?: unknown }).startedAt === 'number' ? (s as { startedAt: number }).startedAt : 0
-        const endedAt = typeof (s as { endedAt?: unknown }).endedAt === 'number' ? (s as { endedAt: number }).endedAt : null
-
-        return (
-          <details key={String((s as { id?: unknown }).id ?? `${taskId}-step-${idx}`)} className="ndp-tooluse">
-            <summary className="ndp-tooluse-summary">
-              <span className={`ndp-tooluse-pill ndp-tooluse-pill-${pillStatus}`}>
-                DeskPet · ToolUse: {name}
-                {progress ? <span style={{ opacity: 0.8 }}>{progress}</span> : null}
-              </span>
-              <ToolUseDuration startedAt={startedAt} endedAt={endedAt} />
-            </summary>
-            <div className="ndp-tooluse-body">
-              <div className="ndp-tooluse-run">
-                <div className="ndp-tooluse-run-title">
-                  <span className={`ndp-tooluse-run-status ndp-tooluse-run-status-${statusKey}`}>{statusText}</span>
-                  <span className="ndp-tooluse-run-name">{name}</span>
-                </div>
-                {input ? <div className="ndp-tooluse-run-io">in: {input}</div> : null}
-                {output ? <div className="ndp-tooluse-run-io">out: {output}</div> : null}
-                {error ? <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {error}</div> : null}
-              </div>
-            </div>
-          </details>
-        )
-      }
-
-      if (runId) {
-        // runId 精确指向某一次真实工具调用；匹配不到时（例如旧存档里 agent.run 壳 run 的 block）
-        // 直接不渲染，避免 fallback 把全部 runs 重复渲染一遍。
-        const idx = runs.findIndex((r) => String(r.id ?? '') === runId)
-        return idx >= 0 ? renderRun(runs[idx], idx) : null
-      }
-
-      if (runs.length > 0) return <>{runs.map((r, idx) => renderRun(r, idx))}</>
-
-      const usefulSteps = steps.filter((s) => {
-        const ss = s as unknown as { tool?: unknown; output?: unknown; error?: unknown }
-        return Boolean(ss.tool || ss.output || ss.error)
-      })
-      if (usefulSteps.length > 0) return <>{usefulSteps.map((s, idx) => renderStep(s, idx))}</>
-
-      if (t.lastError) return <div className="ndp-tooluse-run-io ndp-tooluse-run-error">err: {t.lastError}</div>
-      return null
-    },
-    [api, openImageViewer, tasksById],
-  )
-
   const renderMessageBlocks = useCallback(
-    (m: ChatMessageRecord) => {
-      const blocks: ChatMessageBlock[] =
-        Array.isArray(m.blocks) && m.blocks.length > 0
-          ? m.blocks
-          : m.taskId
-            ? (() => {
-              const taskId = String(m.taskId ?? '').trim()
-              const t = taskId ? tasksById.get(taskId) : null
-              const runs = filterVisibleToolRuns(Array.isArray(t?.toolRuns) ? (t?.toolRuns ?? []) : [])
-              if (runs.length === 0) return [{ type: 'text', text: String(m.content ?? '') }]
-              return [{ type: 'text', text: String(m.content ?? '') }, { type: 'tool_use', taskId }]
-            })()
-            : [{ type: 'text', text: String(m.content ?? '') }]
-
-      let toolSeen = 0
-      let statusSeen = 0
-      let textSeen = 0
-      return blocks.map((b) => {
-        if (b.type === 'text') {
-          const text = String(b.text ?? '')
-          if (!text) return null
-          return <MarkdownMessage key={`${m.id}-t-${textSeen++}`} text={text} />
-        }
-        if (b.type === 'status') {
-          const text = String(b.text ?? '').trim()
-          if (!text) return null
-          return (
-            <div key={`${m.id}-s-${statusSeen++}`} className="ndp-orbpanel-status">
-              {text}
-            </div>
-          )
-        }
-        if (b.type === 'tool_use') {
-          const rid = (b as { runId?: string }).runId
-          const key = rid?.trim() ? `${m.id}-u-${rid}` : `${m.id}-u-${b.taskId}-${toolSeen++}`
-          return <div key={key}>{renderToolCard(b.taskId, rid)}</div>
-        }
-        return null
-      })
-    },
-    [renderToolCard, tasksById],
+    (message: ChatMessageRecord) => (
+      <OrbAssistantMessageContent
+        api={api}
+        message={message}
+        tasksById={tasksById}
+        onOpenImageViewer={openImageViewer}
+      />
+    ),
+    [api, openImageViewer, tasksById],
   )
 
   const openAttachment = useCallback(
@@ -1945,106 +1771,14 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
   )
 
   const renderMessageAttachments = useCallback(
-    (m: ChatMessageRecord) => {
-      const normalized: Array<{
-        kind: 'image' | 'video'
-        path?: string
-        resourceId?: string
-        dataUrl?: string
-        filename?: string
-      }> = []
-
-      if (Array.isArray(m.attachments)) {
-        for (const a of m.attachments) {
-          if (!a || typeof a !== 'object') continue
-          const kind = (a as { kind?: unknown }).kind === 'video' ? 'video' : (a as { kind?: unknown }).kind === 'image' ? 'image' : ''
-          const p = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
-          const resourceId =
-            typeof (a as { resourceId?: unknown }).resourceId === 'string'
-              ? String((a as { resourceId: string }).resourceId).trim()
-              : ''
-          const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
-          if (!kind || !p) continue
-          normalized.push({ kind, path: p, ...(resourceId ? { resourceId } : {}), ...(filename ? { filename } : {}) })
-        }
-      }
-
-      if (normalized.length === 0) {
-        if (m.videoPath) normalized.push({ kind: 'video', path: String(m.videoPath) })
-        if (m.imagePath) normalized.push({ kind: 'image', path: String(m.imagePath) })
-        if (m.image && !m.imagePath) normalized.push({ kind: 'image', dataUrl: String(m.image) })
-      }
-
-      if (normalized.length === 0) return null
-
-      const attachmentImageViewerItems = normalized
-        .filter((a) => a.kind === 'image')
-        .map((a, idx) => {
-          const dataUrl = String(a.dataUrl ?? '').trim()
-          const p = String(a.path ?? '').trim()
-          const source = dataUrl || p
-          return {
-            source,
-            title: String(a.filename ?? '').trim() || `图片 ${idx + 1}`,
-          }
-        })
-        .filter((x) => Boolean(x.source))
-
-      return (
-        <div className="ndp-orbpanel-attachments" data-orb-nodrag="true">
-          {normalized.map((a) => {
-            const key = `${String(a.kind)}-${String(a.path ?? a.dataUrl ?? '')}`
-            if (a.kind === 'video') {
-              const p = String(a.path ?? '').trim()
-              if (!p) return null
-              return (
-                <div key={key} className="ndp-orbpanel-attachment" title={p} onClick={() => void openAttachment(p, a.resourceId)}>
-                  <OrbLocalVideo
-                    api={api}
-                    className="ndp-orbpanel-video"
-                    videoPath={p}
-                    resourceId={a.resourceId}
-                    controls
-                    preload="metadata"
-                    playsInline
-                  />
-                  <div className="ndp-orbpanel-attachment-meta">{a.filename || 'video'}</div>
-                </div>
-              )
-            }
-
-            const dataUrl = String(a.dataUrl ?? '').trim()
-            const p = String(a.path ?? '').trim()
-            const src = dataUrl || p
-            if (!src) return null
-            const imageNavIndex = attachmentImageViewerItems.findIndex((x) => x.source === src)
-            return (
-              <div
-                key={key}
-                className="ndp-orbpanel-attachment"
-                title={src}
-                onClick={() => {
-                  if (imageNavIndex >= 0) void openImageViewer(attachmentImageViewerItems, imageNavIndex)
-                }}
-              >
-                {dataUrl ? (
-                  <img className="ndp-orbpanel-image" src={dataUrl} alt={a.filename || 'image'} />
-                ) : (
-                  <OrbImagePreview
-                    api={api}
-                    className="ndp-orbpanel-image"
-                    imagePath={p}
-                    resourceId={a.resourceId}
-                    alt={a.filename || 'image'}
-                  />
-                )}
-                <div className="ndp-orbpanel-attachment-meta">{a.filename || 'image'}</div>
-              </div>
-            )
-          })}
-        </div>
-      )
-    },
+    (message: ChatMessageRecord) => (
+      <OrbMessageAttachments
+        api={api}
+        message={message}
+        onOpenAttachment={openAttachment}
+        onOpenImageViewer={openImageViewer}
+      />
+    ),
     [api, openAttachment, openImageViewer],
   )
 

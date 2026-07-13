@@ -950,3 +950,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/orb-panel-560x720-scale100.png`。本批未修改 Panel CSS、会话标题/计数文案、用户/助手气泡 class、Markdown 规则、编辑 textarea 行数、保存/重发/取消语义、右键菜单动作或打开完整聊天后的 Bar 切换。服务端静态渲染测试覆盖消息与编辑状态，打包 IPC smoke 验证真实 Orb/Chat 状态往返，浏览器基线验证默认空会话 Panel。当前 UI baseline 尚未在 Orb Panel 中预置多条消息并实际触发行内编辑、右键菜单或工具卡展开；工具卡、附件列表、历史 popover、图片查看器和消息操作仍由 `OrbApp` 构造，下一批继续收口。
+
+## P2-1：大型模块拆分与领域边界（第四十六批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Orb 工具卡、助手消息 block、消息附件与内容归一化工具
+
+| 检查 | 结果 |
+| --- | --- |
+| Orb 消息内容聚焦测试 | 5 个用例通过：结构化/legacy 附件及顺序、旧消息工具 block、Agent 外壳过滤、多 run 进度/失败状态、助手 block 与附件点击委托 |
+| `npm test` | 75 个测试文件、331 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功；renderer 主 chunk 约 1.409 MB |
+| `npm run ipc:smoke` | Orb ball/panel/ball 状态往返、真实聊天/任务/Memory/Agent/MCP/媒体/TTS/ASR 与重启路径全部通过，所有窗口 runtimeErrors 为空 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 18 个场景通过；新增 `orb-panel-content-560x720-scale100`，识别 2 条消息、1 张工具卡、2 个附件，0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/orb-panel-content-560x720-scale100.png` 与 `artifacts/ui-baseline/orb-panel-560x720-scale100.png`。本批未修改 Orb Panel CSS、消息气泡 class、Markdown 规则、任务/消息持久化结构、附件 API、安全边界、工具运行状态文案或图片查看器缩放逻辑；缺失任务文案只补齐原本遗漏的右括号，多 run 顶层 key 只消除 React 列表告警。聚焦测试验证纯归一化和服务端静态渲染，打包 IPC smoke 验证真实 Orb preload 与任务/附件链路，浏览器基线验证有内容 Panel 的工具图片和消息图片均实际渲染。当前自动化尚未在真实 Electron Orb 中点击视频、跨多张工具图片导航、展开工具详情、触发行内编辑或右键消息菜单；历史 popover、图片查看器外壳和消息操作仍留在 `OrbApp`，下一批继续拆分。

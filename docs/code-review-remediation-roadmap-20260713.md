@@ -942,6 +942,14 @@ AI 与能力
 - 新增 3 个 Panel 视图测试，覆盖标题/计数/空状态、用户 Markdown/助手内容/附件顺序，以及用户编辑显示保存并重发、助手编辑不显示重发和三个编辑动作委托；`OrbApp.tsx` 从 2431 行降至 2377 行。
 - `npm test` 共 74 个测试文件、326 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 17 个 UI baseline 场景均通过；人工检查 Orb Panel 截图无视觉回归。下一批继续拆分工具卡与消息附件渲染，随后处理历史 popover、图片查看器和消息菜单。
 
+第四十六批进展（2026-07-14）：
+
+- 新增 `src/orb/OrbToolCard.tsx`、`OrbAssistantMessageContent.tsx`、`OrbMessageAttachments.tsx` 与 `orbMessageContentUtils.ts`，抽离真实工具 run、legacy step 兜底、助手 text/status/tool block、结构化/旧附件归一化和图片查看器条目构造；`OrbApp` 只保留任务映射、附件打开与查看器状态编排。
+- 工具卡继续过滤 `agent.run` 外壳，保留 `runId` 精确匹配失败时不渲染、无 `runId` 时展示全部可见 runs、跨全部可见 runs 的工具图片导航，以及视频/图片/legacy data URL 的原有附件顺序；多 run 顶层改用带稳定 key 的 `Fragment`，避免 React 列表告警。
+- 修复任务未加载错误文案缺少右括号的问题；新增 5 个消息内容测试，覆盖结构化/legacy 附件、旧消息工具 block 兜底、Agent 外壳过滤、多 run 进度与失败状态、助手 block 顺序、缺失任务错误和附件点击委托。`OrbApp.tsx` 从 2377 行降至 2111 行。
+- UI baseline 新增预置用户/助手消息、状态、真实工具 run、工具图片和消息图片的 `orb-panel-content-560x720-scale100.png`；基线从 17 增至 18 个场景，新场景确认 2 条消息、1 张工具卡、2 个附件，0 failure、0 console error、无横向或纵向溢出，截图经人工检查无布局回归。
+- `npm test` 共 75 个测试文件、331 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 18 个 UI baseline 场景均通过。下一批继续拆分历史 popover、图片查看器或消息菜单，优先选择能保持 Orb 状态机边界清晰的一组。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤
