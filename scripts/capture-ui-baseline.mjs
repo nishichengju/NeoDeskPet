@@ -259,8 +259,8 @@ function installChatMock(page, options = {}) {
   }, { seedImage: options.seedImage === true, seedTool: options.seedTool === true })
 }
 
-function installOrbPanelMock(page) {
-  return page.addInitScript(() => {
+function installOrbMock(page, state) {
+  return page.addInitScript(({ initialState }) => {
     const now = Date.now()
     const summary = {
       id: 'baseline-session',
@@ -273,7 +273,7 @@ function installOrbPanelMock(page) {
     const session = { ...summary, nameMode: 'manual', messages: [] }
     const off = () => undefined
     const api = {
-      getOrbUiState: async () => ({ state: 'panel' }),
+      getOrbUiState: async () => ({ state: initialState }),
       onOrbStateChanged: () => off,
       getSettings: async () => ({ activePersonaId: 'default' }),
       onSettingsChanged: () => off,
@@ -289,7 +289,7 @@ function installOrbPanelMock(page) {
       getChatAttachmentUrl: async () => ({ ok: false, url: '' }),
     }
     Object.defineProperty(window, 'neoDeskPet', { configurable: true, value: api })
-  })
+  }, { initialState: state })
 }
 
 function installMemoryMock(page) {
@@ -448,7 +448,8 @@ const baselines = [
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
   { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true },
-  { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbPanel: true },
+  { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
+  { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel' },
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
   { name: 'chat-tool-card-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyToolCard: true },
@@ -489,7 +490,7 @@ try {
       seedImage: baseline.verifyImageViewer,
       seedTool: baseline.verifyToolCard,
     })
-    if (baseline.mockOrbPanel) await installOrbPanelMock(page)
+    if (baseline.mockOrbState) await installOrbMock(page, baseline.mockOrbState)
     if (baseline.mockMemory) await installMemoryMock(page)
     if (baseline.mockSettings) await installSettingsMock(page)
 

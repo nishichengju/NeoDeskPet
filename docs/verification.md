@@ -884,3 +884,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 本批未修改 preload/API 契约、Orb 模式状态机、窗口尺寸、CSS class、会话持久化、任务结构或附件安全边界。共享文本函数由 Chat 与 Orb 共用，聚焦测试补齐中文逗号和冒号结束边界；媒体解析测试验证直接 URL 不触发 IPC、本地 path/resourceId 精确委托以及失败返回空源。组件把解析结果绑定到当前媒体 source key，依赖变化后的首帧不会复用旧源，并通过存活标记忽略过期 Promise；但当前 Node 测试环境未真实挂载 React DOM，因此 1 秒运行中计时刷新和连续快速切换多个本地媒体仍主要依赖实现审查与后续交互回归。Orb 主体仍有 2638 行，Ball/Bar/Panel、历史、图片查看器和消息操作将继续分批拆分；Chat/Orb 通用媒体 URL 缓存合并留到 P2-2。
+
+## P2-1：大型模块拆分与领域边界（第四十三批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Orb Ball 视图、不可达自绘菜单清理和 Ball UI baseline
+
+| 检查 | 结果 |
+| --- | --- |
+| Orb Ball 视图测试 | 2 个用例通过：右侧 dock 静态 DOM/标题/图标、mouseup 屏幕坐标委托 |
+| `npm test` | 72 个测试文件、320 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功；renderer 主 chunk 约 1.408 MB |
+| `npm run ipc:smoke` | Orb ball/panel/ball 状态往返、overlay 设置/清理、`showOrbContextMenu` preload 权限及聊天/任务/Memory/Agent/MCP/TTS/ASR 与重启路径全部通过，所有窗口 runtimeErrors 为空 |
+| `npm run media:smoke` | 图片 data URL、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 16 个场景通过；新增 `orb-ball-80x80-scale100`，0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/orb-ball-80x80-scale100.png` 与 `artifacts/ui-baseline/orb-panel-560x720-scale100.png`。本批未修改 CSS、Orb 点击/拖拽阈值、dock side 判断、ball/bar/panel 状态迁移、主进程原生菜单实现或窗口尺寸；删除的两份自绘菜单 JSX 没有任何可达的状态写入，真实右键仍通过 `showOrbContextMenu` 闭环。服务端静态渲染测试验证 Ball DOM 和坐标适配，打包 IPC smoke 验证真实 Orb 状态往返，浏览器基线验证 80×80 小视口布局。当前自动化尚未模拟真实操作系统窗口上的长距离拖拽、多屏边界与不同 DPI 吸附位置；Bar 输入/附件、Panel 消息列表、历史 popover、图片查看器和消息菜单仍留在 `OrbApp`，下一批继续拆分。

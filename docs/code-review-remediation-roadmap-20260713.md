@@ -919,6 +919,14 @@ AI 与能力
 - `OrbApp.tsx` 从 2832 行降至 2638 行；Ball/Bar/Panel 状态机、会话历史、消息操作、图片查看器和 CSS 未改动。`npm test` 共 71 个测试文件、318 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。
 - P2-1 下一批继续按职责拆分 Orb 的 Ball/Bar/Panel 视图与交互接线；通用 Chat/Orb 媒体 URL 缓存合并仍留在 P2-2，避免本批扩大到 Chat 渲染路径。
 
+第四十三批进展（2026-07-14）：
+
+- 新增 `src/orb/OrbBallView.tsx`，抽离固定悬浮球的左右吸附布局、拖拽起止坐标转发、右键入口、标题和图标 DOM；`OrbApp` 继续持有窗口状态机、点击/拖拽判定、dock side 同步与主进程 IPC。
+- 审计确认两份 `popover.kind === 'menu'` 自绘菜单 JSX 在整个组件中没有任何 `setPopover({kind:'menu'})` 入口，实际右键始终由 `showOrbContextMenu` 调用主进程原生菜单；本批删除不可达分支和 `MENU_WIDTH`，并将 popover 类型收紧为仅保留真实使用的 history。
+- 新增 2 个 Ball 视图测试，覆盖左右 dock 的固定布局、标题/图标 DOM 和 mouseup 屏幕坐标委托；`OrbApp.tsx` 从 2638 行降至 2534 行，未修改 Ball 点击打开 Bar/Panel、拖拽阈值、吸附算法或原生菜单动作。
+- UI baseline 将 Orb mock 归一为可配置 state，并新增 `orb-ball-80x80-scale100.png`；基线从 15 增至 16 个场景，Ball 与 Panel 均无横向/纵向溢出、console error 或 failure，Ball 截图经人工检查无视觉回归。
+- `npm test` 共 72 个测试文件、320 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 16 个 UI baseline 场景均通过。下一批继续拆分 Bar 输入/附件展示边界，再进入 Panel 消息列表。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

@@ -21,10 +21,11 @@ import {
   mergeLeadingPunctuationAcrossToolBoundary,
   normalizeInterleavedTextSegment,
 } from '../utils/chatMessages'
+import { OrbBallView } from './OrbBallView'
 import { OrbImagePreview, OrbLocalVideo, ToolUseDuration } from './OrbMessageMedia'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
-type PopoverKind = 'menu' | 'history'
+type PopoverKind = 'history'
 type OrbUiTransition =
   | 'idle'
   | 'opening-bar'
@@ -39,7 +40,6 @@ const ORB_POPOVER_GAP = 10
 const ORB_UI_OPEN_MS = 220
 const ORB_UI_CLOSE_MS = 260
 
-const MENU_WIDTH = 240
 const MENU_RADIUS = 16
 
 const HISTORY_WIDTH = 320
@@ -183,7 +183,6 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
 
   const [popover, setPopover] = useState<
     | null
-    | { kind: 'menu'; left: number; top: number; arrowX: number; ready: boolean }
     | {
         kind: 'history'
         left: number
@@ -2078,66 +2077,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
           closePopover()
         }}
       >
-        <div
-          className="ndp-orbapp-ball ndp-orbapp-ball-fixed"
-          style={{
-            alignSelf: dockSide === 'left' ? 'flex-start' : 'flex-end',
-          }}
-          onMouseDown={startDrag}
-          onMouseUp={(e) => stopDrag({ x: e.screenX, y: e.screenY })}
-          onContextMenu={openMenuPopover}
-          title="单击：打开输入栏｜右键：菜单｜拖拽：移动并吸附"
-        >
-          <div className="ndp-orbapp-ball-icon"></div>
-        </div>
-
-        {popover?.kind === 'menu' && popover.ready ? (
-          <div
-            className="ndp-orbapp-popover"
-            data-orb-popover="true"
-            style={
-              {
-                left: popover.left,
-                top: popover.top,
-                width: MENU_WIDTH,
-                borderRadius: MENU_RADIUS,
-                ['--ndp-orbapp-popover-arrow-x' as never]: `${popover.arrowX}px`,
-              } as React.CSSProperties
-            }
-          >
-            <button
-              className="ndp-orbapp-popover-item"
-              onClick={() => void api?.openSettings().finally(() => openBall())}
-              title="设置"
-            >
-              <span className="ndp-orbapp-popover-icon"></span>设置
-            </button>
-            <button
-              className="ndp-orbapp-popover-item"
-              onClick={() => {
-                closePopover()
-                void api?.setDisplayMode('live2d').catch(() => undefined)
-              }}
-              title="切换 Live2D 桌宠"
-            >
-              <span className="ndp-orbapp-popover-icon">🧸</span>切换 Live2D 桌宠
-            </button>
-            <button
-              className="ndp-orbapp-popover-item"
-              onClick={() => {
-                closePopover()
-                void api?.setDisplayMode('hidden').catch(() => undefined)
-              }}
-              title="关闭悬浮窗"
-            >
-              <span className="ndp-orbapp-popover-icon">✕</span>关闭悬浮窗
-            </button>
-            <div className="ndp-orbapp-popover-divider" />
-            <button className="ndp-orbapp-popover-item" onClick={() => void api?.quit().finally(() => openBall())} title="退出">
-              <span className="ndp-orbapp-popover-icon">⏻</span>退出
-            </button>
-          </div>
-        ) : null}
+        <OrbBallView dockSide={dockSide} onMouseDown={startDrag} onDragStop={stopDrag} onContextMenu={openMenuPopover} />
       </div>
     )
   }
@@ -2476,50 +2416,6 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
           </button>
           <button className="ndp-orbapp-msgmenu-item" onClick={() => void handleDeleteTurn(messageMenuTarget.id)}>
             删除本轮
-          </button>
-        </div>
-      ) : null}
-
-      {popover?.kind === 'menu' && popover.ready ? (
-        <div
-          className="ndp-orbapp-popover"
-          data-orb-popover="true"
-          style={
-            {
-              left: popover.left,
-              top: popover.top,
-              width: MENU_WIDTH,
-              borderRadius: MENU_RADIUS,
-              ['--ndp-orbapp-popover-arrow-x' as never]: `${popover.arrowX}px`,
-            } as React.CSSProperties
-          }
-        >
-          <button className="ndp-orbapp-popover-item" onClick={() => void api?.openSettings().finally(() => openBall())} title="设置">
-            <span className="ndp-orbapp-popover-icon"></span>设置
-          </button>
-          <button
-            className="ndp-orbapp-popover-item"
-            onClick={() => {
-              closePopover()
-              void api?.setDisplayMode('live2d').catch(() => undefined)
-            }}
-            title="切换 Live2D 桌宠"
-          >
-            <span className="ndp-orbapp-popover-icon">🧸</span>切换 Live2D 桌宠
-          </button>
-          <button
-            className="ndp-orbapp-popover-item"
-            onClick={() => {
-              closePopover()
-              void api?.setDisplayMode('hidden').catch(() => undefined)
-            }}
-            title="关闭悬浮窗"
-          >
-            <span className="ndp-orbapp-popover-icon">✕</span>关闭悬浮窗
-          </button>
-          <div className="ndp-orbapp-popover-divider" />
-          <button className="ndp-orbapp-popover-item" onClick={() => void api?.quit().finally(() => openBall())} title="退出">
-            <span className="ndp-orbapp-popover-icon">⏻</span>退出
           </button>
         </div>
       ) : null}
