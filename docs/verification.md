@@ -345,3 +345,22 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100.png`。本批未修改 TTS preload/IPC 协议、Pet 音频播放、文本分句算法、AI 请求协议、消息持久化或样式；未连接真实 GPT-SoVITS 服务和声卡做端到端音频播放，服务端兼容性、音频设备错误与长文本连续播放仍由后续人工 TTS 回归矩阵验证。`ChatWindow.tsx` 后续继续拆分 AI 请求与流式响应 hooks。
+
+## P2-1：大型模块拆分与领域边界（第十七批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat AI 请求生命周期、普通流式/非流式响应与消息落盘
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 38 个测试文件、150 个用例通过 |
+| AI 控制器测试 | 新旧请求 loading 竞态、前后台统一中断、流式成功/部分失败、占位插入顺序、迟到结果、Live2D 标签去重、非流式 metadata 和上下文错误通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 真实 AI 普通/流代理、鉴权注入、TTS 双向 relay、Chat 持久化和五类窗口运行通过，renderer 无运行时错误 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；默认/紧凑 Chat 输入区、空态与停止交互无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png`、`artifacts/ui-baseline/chat-compact-420x560-scale100.png`。本批未修改 AI HTTP/preload/IPC 协议、provider 请求体、planner/Tool Agent 决策、记忆召回、上下文压缩算法、TTS 分句算法、消息 schema 或样式。未连接真实 OpenAI-compatible/Claude 模型做端到端生成，真实 provider 的 SSE 分块差异、长响应网络中断和计费 usage 仍需后续人工 AI 回归矩阵验证；当前证据覆盖 renderer runner、打包后的主进程普通/流代理和窗口运行。

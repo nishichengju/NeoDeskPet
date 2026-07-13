@@ -10,12 +10,13 @@ import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
 import { ChatToolUseCard } from './chat/ChatToolUseCard'
 import { ChatSessionList } from './chat/ChatSessionList'
 import { useAsrComposePreview, useChatAsr } from './chat/useChatAsr'
+import { formatChatAiErrorForUser, useChatAi } from './chat/useChatAi'
 import { useChatTts } from './chat/useChatTts'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
 import { splitTextIntoTtsSegments } from '../services/textSegmentation'
-import { BUBBLE_PREVIEW_FALLBACK_PREFIX, buildContextCompressionSummaryPrompt, buildInterruptedStreamContent, canonicalizeLocalImagePath, collapseAssistantRuns, computeAppendDelta, filterVisibleToolRuns, joinTextBlocks, mergeLeadingPunctuationAcrossToolBoundary, normalizeAssistantDisplayText, normalizeInterleavedTextSegment, normalizeMessageBlocks, pickRicherToolBlocks, sliceTail, toLocalMediaSrc } from '../utils/chatMessages'
+import { BUBBLE_PREVIEW_FALLBACK_PREFIX, buildContextCompressionSummaryPrompt, canonicalizeLocalImagePath, collapseAssistantRuns, computeAppendDelta, filterVisibleToolRuns, joinTextBlocks, mergeLeadingPunctuationAcrossToolBoundary, normalizeAssistantDisplayText, normalizeInterleavedTextSegment, normalizeMessageBlocks, pickRicherToolBlocks, sliceTail, toLocalMediaSrc } from '../utils/chatMessages'
 import { createStreamFlushThrottle, extractLastLive2DTags, extractLive2DTags, extractTailLive2DTags } from '../utils/live2dStream'
 import { buildPlannerSystemPrompt, parsePlannerDecision, requestLikelyNeedsToolAction } from '../utils/planner'
 import { buildToolResultSystemAddon, buildWorldBookAddon } from '../utils/promptAddons'
@@ -75,7 +76,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessageRecord[]>([])
   const [tasks, setTasks] = useState<TaskRecord[]>([])
-  const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [currentPersona, setCurrentPersona] = useState<Persona | null>(null)
@@ -87,7 +87,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const inputRef = useRef('')
   const messagesRef = useRef<ChatMessageRecord[]>([])
   const toolAnimRef = useRef<{ motionGroups: string[]; expressions: string[] }>({ motionGroups: [], expressions: [] })
-  const isLoadingRef = useRef(false)
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [showSessionList, setShowSessionList] = useState(false)
@@ -109,8 +108,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null)
   const confirmClearButtonRef = useRef<HTMLButtonElement>(null)
-  const aiAbortRef = useRef<AbortController | null>(null)
-  const chatStopSeqRef = useRef(0)
   const plannerPendingRef = useRef(false)
   const bubblePreviewLastSigRef = useRef<string>('')
   const bubblePreviewSendDebugAtRef = useRef(0)
@@ -645,9 +642,32 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     [api, debugLog],
   )
 
-  useEffect(() => {
-    isLoadingRef.current = isLoading
-  }, [isLoading])
+  const newMessageId = useCallback(() => {
+    if ('crypto' in globalThis && typeof globalThis.crypto.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID()
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  }, [])
+
+  const {
+    beginAiRequest,
+    finishAiRequest,
+    interruptAiRequests: interrupt,
+    isLoading,
+    isLoadingRef,
+    runStandardAiResponse,
+  } = useChatAi({
+    api,
+    createMessageId: newMessageId,
+    onAlert: (message) => window.alert(message),
+    onResponseComplete: (sessionId) => {
+      void runAutoExtractIfNeeded(sessionId)
+    },
+    sendBubblePreview,
+    setError,
+    setLastApiUsage,
+    setMessages,
+  })
 
   useEffect(() => {
     tasksRef.current = tasks
@@ -751,7 +771,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     const session = await api.getChatSession(currentSessionId).catch(() => null)
     if (!session) return
     setMessages(session.messages)
-  }, [api, currentSessionId])
+  }, [api, currentSessionId, isLoadingRef])
 
   // 隐藏窗口后台 autoSend 后，首次打开聊天窗可能出现 UI state 未刷新（只看到 assistant、缺 user）的情况。
   // 这里在窗口变为可见/获得焦点时，主动从持久化 session 拉一次消息，保证 UI 与存储一致。
@@ -1008,13 +1028,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     [api],
   )
 
-  const newMessageId = useCallback(() => {
-    if ('crypto' in globalThis && typeof globalThis.crypto.randomUUID === 'function') {
-      return globalThis.crypto.randomUUID()
-    }
-    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-  }, [])
-
   // 将任务的“人话回复”同步回对应会话（仅对 planner 创建的任务生效）
   useEffect(() => {
     if (!api) return
@@ -1161,8 +1174,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           if (taskFinalizingRef.current.has(t.id)) continue
           taskFinalizingRef.current.add(t.id)
 
-          let finalizeAbort: AbortController | null = null
-          let finalizeAbortExposed = false
+          let finalizeRequest: ReturnType<typeof beginAiRequest> | null = null
 
           void (async () => {
             const loadFinalizeBaseBlocks = async (): Promise<ChatMessageBlock[]> => {
@@ -1238,15 +1250,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               },
             ]
 
-            finalizeAbort = new AbortController()
-            finalizeAbortExposed = sessionId === currentSessionId
-            const finalizeStopSeq = chatStopSeqRef.current
-            const isFinalizeStopped = () => finalizeAbort?.signal.aborted === true || chatStopSeqRef.current !== finalizeStopSeq
-            if (finalizeAbortExposed) {
-              aiAbortRef.current = finalizeAbort
-              isLoadingRef.current = true
-              setIsLoading(true)
-            }
+            finalizeRequest = beginAiRequest({ trackLoading: sessionId === currentSessionId })
+            const finalizeAbort = finalizeRequest.abortController
+            const isFinalizeStopped = finalizeRequest.isStopped
 
             const previewProg = taskBubblePreviewProgressRef.current.get(t.id)
             const elapsedSincePreface = previewProg?.lastShownAt ? Date.now() - previewProg.lastShownAt : Number.POSITIVE_INFINITY
@@ -1433,11 +1439,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               taskOriginBlocksRef.current.delete(t.id)
               taskToolUseSplitRef.current.delete(t.id)
               taskBubblePreviewProgressRef.current.delete(t.id)
-              if (finalizeAbortExposed && aiAbortRef.current === finalizeAbort) {
-                aiAbortRef.current = null
-                isLoadingRef.current = false
-                setIsLoading(false)
-              }
+              if (finalizeRequest) finishAiRequest(finalizeRequest)
             })
 
           continue
@@ -1661,9 +1663,11 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   }, [
     addSessionToolFacts,
     api,
+    beginAiRequest,
     buildVisionPartsFromImagePaths,
     currentSessionId,
     debugLog,
+    finishAiRequest,
     runAutoExtractIfNeeded,
     sendBubblePreview,
   ])
@@ -2270,26 +2274,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     }
   }, [])
 
-  const formatAiErrorForUser = useCallback((raw: string): { message: string; shouldAlert: boolean } => {
-    const text = String(raw ?? '').trim()
-    const lower = text.toLowerCase()
-    const isContextTooLong =
-      lower.includes('context_length') ||
-      lower.includes('maximum context') ||
-      (lower.includes('context') && lower.includes('length')) ||
-      (lower.includes('token') && (lower.includes('limit') || lower.includes('maximum'))) ||
-      text.includes('上下文') ||
-      text.includes('长度超出') ||
-      text.includes('超出上下文')
-
-    if (!isContextTooLong) return { message: text || '未知错误', shouldAlert: false }
-
-    return {
-      message: `上下文过长导致请求失败，可右键“一键总结”或清空对话后重试。（原始错误：${text || 'unknown'}）`,
-      shouldAlert: true,
-    }
-  }, [])
-
   const pickAvatar = useCallback(
     (role: 'user' | 'assistant') => {
       if (role === 'user') userAvatarInputRef.current?.click()
@@ -2317,31 +2301,6 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     setSessions(filtered)
     setCurrentSessionId(filtered.some((s) => s.id === currentSessionId) ? currentSessionId : (filtered[0]?.id ?? null))
   }, [api, filterSessionsForPersona, getActivePersonaId])
-
-  const interrupt = useCallback(
-    (opts?: { stopTts?: boolean }) => {
-      chatStopSeqRef.current += 1
-      try {
-        aiAbortRef.current?.abort()
-      } catch (_) {
-        /* ignore */
-      }
-      aiAbortRef.current = null
-
-      if (opts?.stopTts !== false) {
-        try {
-          api?.stopTtsAll()
-        } catch (_) {
-          /* ignore */
-        }
-      }
-
-      sendBubblePreview({ clear: true }, { force: true })
-      isLoadingRef.current = false
-      setIsLoading(false)
-    },
-    [api, sendBubblePreview],
-  )
 
   const isAssistantOutputting = isLoading || currentActiveChatTaskIds.length > 0 || hasActiveTts
 
@@ -2491,11 +2450,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       syncAsrComposePreview('', { clearFinals: true })
     }
     setError(null)
-    isLoadingRef.current = true
-    setIsLoading(true)
     sendBubblePreview({ placeholder: true, text: '思考中…', autoHideDelay: 0 })
-    const abort = new AbortController()
-    aiAbortRef.current = abort
+    const request = beginAiRequest()
+    const abort = request.abortController
 
     try {
       // Build chat history for context
@@ -2935,8 +2892,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       if (ttsSegmented) {
         const utteranceId = newMessageId()
         beginTtsUtterance(utteranceId)
-        const segmentedStopSeq = chatStopSeqRef.current
-        const isSegmentedStopped = () => abort.signal.aborted || chatStopSeqRef.current !== segmentedStopSeq
+        const isSegmentedStopped = request.isStopped
 
         try {
           const response = enableChatStreaming
@@ -2975,7 +2931,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               return
             }
             sendBubblePreview({ clear: true }, { force: true })
-            const errUi = formatAiErrorForUser(response.error)
+            const errUi = formatChatAiErrorForUser(response.error)
             setError(errUi.message)
             if (errUi.shouldAlert) window.alert(errUi.message)
             clearTtsUtterance(utteranceId)
@@ -3038,151 +2994,14 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         return
       }
 
-      if (enableChatStreaming) {
-        const assistantId = newMessageId()
-        let created = false
-        const createdAt = Date.now()
-        let acc = ''
-        let pending = ''
-        let lastExpression: string | undefined
-        let lastMotion: string | undefined
-        const streamStopSeq = chatStopSeqRef.current
-        const isStreamStopped = () => abort.signal.aborted || chatStopSeqRef.current !== streamStopSeq
-
-        const ensureMessageCreated = () => {
-          if (isStreamStopped()) return
-          if (created) return
-          created = true
-          const assistantMessage: ChatMessageRecord = {
-            id: assistantId,
-            role: 'assistant',
-            content: '',
-            createdAt,
-          }
-          setMessages((prev) => [...prev, assistantMessage])
-          api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-        }
-
-        const flush = () => {
-          if (isStreamStopped()) {
-            pending = ''
-            return
-          }
-          if (!pending) return
-          const appended = pending
-          acc += pending
-          pending = ''
-          if (!created) ensureMessageCreated()
-          const display = normalizeAssistantDisplayText(acc)
-          if (display.trim()) sendBubblePreview({ text: display, autoHideDelay: 0 })
-          setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: display } : m)))
-
-          const tags = extractTailLive2DTags(acc, appended.length)
-          if (tags.expression && tags.expression !== lastExpression) {
-            lastExpression = tags.expression
-            api.triggerExpression(tags.expression)
-          }
-          if (tags.motion && tags.motion !== lastMotion) {
-            lastMotion = tags.motion
-            api.triggerMotion(tags.motion, 0)
-          }
-        }
-        const flushThrottle = createStreamFlushThrottle(flush)
-
-        const response = await aiService.chatStream(chatHistory, {
-          signal: abort.signal,
-          systemAddon,
-          onDelta: (delta) => {
-            if (isStreamStopped()) return
-            pending += delta
-            flushThrottle.schedule()
-          },
-        })
-        flushThrottle.finalize()
-        if (isStreamStopped()) {
-          sendBubblePreview({ clear: true }, { force: true })
-          return
-        }
-
-        if (response.error) {
-          if (response.error === ABORTED_ERROR) {
-            // 被打断：不写入错误信息，直接结束
-            sendBubblePreview({ clear: true }, { force: true })
-            return
-          }
-          const partialForUi = normalizeAssistantDisplayText(response.content || acc, { trim: true })
-          if (partialForUi) sendBubblePreview({ text: partialForUi, autoHideDelay: 0 })
-          else sendBubblePreview({ clear: true }, { force: true })
-          const errUi = formatAiErrorForUser(response.error)
-          setError(errUi.message)
-          if (errUi.shouldAlert) window.alert(errUi.message)
-          const nextContent = buildInterruptedStreamContent(partialForUi, response.error)
-          if (created) {
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: nextContent } : m)))
-            await api.updateChatMessage(currentSessionId, assistantId, nextContent).catch(() => undefined)
-          } else {
-            const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: nextContent, createdAt }
-            setMessages((prev) => [...prev, msg])
-            await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
-          }
-          return
-        }
-
-        const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
-        // 更新真实的 API usage 统计
-        if (response.usage) setLastApiUsage(response.usage)
-        if (created) {
-          setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: finalContent } : m)))
-          await api.updateChatMessage(currentSessionId, assistantId, finalContent).catch(() => undefined)
-        } else {
-          const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: finalContent, createdAt }
-          setMessages((prev) => [...prev, msg])
-          await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
-        }
-        if (finalContent.trim()) sendBubblePreview({ text: finalContent, autoHideDelay: 0 })
-        if (finalContent) api.sendBubbleMessage(finalContent)
-        void runAutoExtractIfNeeded(currentSessionId)
-        return
-      }
-
-      const response = await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
-
-      if (response.error) {
-        if (response.error === ABORTED_ERROR) {
-          sendBubblePreview({ clear: true }, { force: true })
-          return
-        }
-        sendBubblePreview({ clear: true }, { force: true })
-        const errUi = formatAiErrorForUser(response.error)
-        setError(errUi.message)
-        if (errUi.shouldAlert) window.alert(errUi.message)
-        const assistantMessage: ChatMessageRecord = {
-          id: newMessageId(),
-          role: 'assistant',
-          content: `[错误] ${response.error}`,
-          createdAt: Date.now(),
-        }
-        setMessages((prev) => [...prev, assistantMessage])
-        await api.addChatMessage(currentSessionId, assistantMessage)
-        return
-      }
-
-      const assistantMessage: ChatMessageRecord = {
-        id: newMessageId(),
-        role: 'assistant',
-        content: response.content,
-        createdAt: Date.now(),
-      }
-      // 更新真实的 API usage 统计
-      if (response.usage) setLastApiUsage(response.usage)
-      setMessages((prev) => [...prev, assistantMessage])
-      await api.addChatMessage(currentSessionId, assistantMessage)
-
-      if (response.expression) api.triggerExpression(response.expression)
-      if (response.motion) api.triggerMotion(response.motion, 0)
-      if (response.content?.trim()) sendBubblePreview({ text: response.content, autoHideDelay: 0 })
-      if (response.content) api.sendBubbleMessage(response.content)
-      void runAutoExtractIfNeeded(currentSessionId)
+      await runStandardAiResponse({
+        aiService,
+        chatHistory,
+        request,
+        sessionId: currentSessionId,
+        streaming: enableChatStreaming,
+        systemAddon,
+      })
     } catch (err) {
       sendBubblePreview({ clear: true }, { force: true })
       const errorMessage = err instanceof Error ? err.message : String(err)
@@ -3196,13 +3015,12 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       setMessages((prev) => [...prev, assistantMessage])
       await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
     } finally {
-      if (aiAbortRef.current === abort) aiAbortRef.current = null
-      isLoadingRef.current = false
-      setIsLoading(false)
+      finishAiRequest(request)
       refreshSessions().catch(() => undefined)
     }
   }, [
     api,
+    beginAiRequest,
     beginTtsUtterance,
     buildVisionPartsFromImagePaths,
     canUseMainVision,
@@ -3212,18 +3030,20 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     currentSessionId,
     debugLog,
     getActivePersonaId,
+    isLoadingRef,
     newMessageId,
     pendingAttachments,
     personaSystemAddon,
     removeDuplicatedPersonaFromMemoryAddon,
     buildSessionToolFactsAddon,
+    finishAiRequest,
     refreshSessions,
     registerTtsUtterance,
     retrieveEnabled,
     interrupt,
     runAutoExtractIfNeeded,
+    runStandardAiResponse,
     maybeCompressChatHistoryToMaxContext,
-    formatAiErrorForUser,
     syncAsrComposePreview,
     sendBubblePreview,
   ])
@@ -3669,11 +3489,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
       setContextMenu(null)
       setError(null)
-      setIsLoading(true)
-      isLoadingRef.current = true
       sendBubblePreview({ placeholder: true, text: '思考中…', autoHideDelay: 0 })
-      const abort = new AbortController()
-      aiAbortRef.current = abort
+      const request = beginAiRequest()
+      const abort = request.abortController
       try {
         api.stopTtsAll()
       } catch (_) {
@@ -3682,9 +3500,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
 
       const truncated = messages.slice(0, userIndex + 1)
       setMessages(truncated)
-      await api.setChatMessages(currentSessionId, truncated)
 
       try {
+        await api.setChatMessages(currentSessionId, truncated)
         let chatHistory: ChatMessage[] = truncated.map((m) => {
           if (m.role !== 'user') return { role: 'assistant', content: m.content }
 
@@ -3739,6 +3557,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         if (ttsSegmented) {
           const utteranceId = newMessageId()
           beginTtsUtterance(utteranceId)
+          const isRegenerateStopped = request.isStopped
 
           try {
             const assistantCreatedAt = Date.now()
@@ -3750,7 +3569,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             let sentSegments = 0
 
             const ensureMessageCreated = (content: string) => {
-              if (created) return
+              if (created || isRegenerateStopped()) return
               created = true
               const assistantMessage: ChatMessageRecord = {
                 id: utteranceId,
@@ -3771,6 +3590,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             }
 
             const enqueueStableSegments = (displayText: string, forceAll: boolean) => {
+              if (isRegenerateStopped()) return
               const display = normalizeAssistantDisplayText(displayText)
               const segs = splitTextIntoTtsSegments(display, { lang: 'zh', textSplitMethod: 'cut5' })
               const stableCount = countStableTtsSegments(display, segs, forceAll)
@@ -3799,6 +3619,10 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             }
 
             const flush = () => {
+              if (isRegenerateStopped()) {
+                pending = ''
+                return
+              }
               if (!pending) return
               const appended = pending
               acc += pending
@@ -3826,6 +3650,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                   signal: abort.signal,
                   systemAddon,
                   onDelta: (delta) => {
+                    if (isRegenerateStopped()) return
                     pending += delta
                     flushThrottle.schedule()
                   },
@@ -3833,6 +3658,11 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               : await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
 
             flushThrottle.finalize()
+
+            if (isRegenerateStopped()) {
+              clearTtsUtterance(utteranceId, { removeSegmentedFlag: created })
+              return
+            }
 
             if (response.error) {
               if (response.error === ABORTED_ERROR) {
@@ -3845,7 +3675,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
                 clearTtsUtterance(utteranceId, { removeSegmentedFlag: created })
                 return
               }
-              const errUi = formatAiErrorForUser(response.error)
+              const errUi = formatChatAiErrorForUser(response.error)
               setError(errUi.message)
               if (errUi.shouldAlert) window.alert(errUi.message)
               try {
@@ -3898,135 +3728,14 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           return
         }
 
-        if (enableChatStreaming) {
-          const assistantId = newMessageId()
-          let created = false
-          const createdAt = Date.now()
-          let acc = ''
-          let pending = ''
-          let lastExpression: string | undefined
-          let lastMotion: string | undefined
-
-          const ensureMessageCreated = () => {
-            if (created) return
-            created = true
-            const assistantMessage: ChatMessageRecord = {
-              id: assistantId,
-              role: 'assistant',
-              content: '',
-              createdAt,
-            }
-            setMessages((prev) => [...prev, assistantMessage])
-            api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
-          }
-
-          const flush = () => {
-            if (!pending) return
-            const appended = pending
-            acc += pending
-            pending = ''
-            if (!created) ensureMessageCreated()
-            const display = normalizeAssistantDisplayText(acc)
-            if (display.trim()) sendBubblePreview({ text: display, autoHideDelay: 0 })
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: display } : m)))
-
-            const tags = extractTailLive2DTags(acc, appended.length)
-            if (tags.expression && tags.expression !== lastExpression) {
-              lastExpression = tags.expression
-              api.triggerExpression(tags.expression)
-            }
-            if (tags.motion && tags.motion !== lastMotion) {
-              lastMotion = tags.motion
-              api.triggerMotion(tags.motion, 0)
-            }
-          }
-          const flushThrottle = createStreamFlushThrottle(flush)
-
-          const response = await aiService.chatStream(chatHistory, {
-            signal: abort.signal,
-            systemAddon,
-            onDelta: (delta) => {
-              pending += delta
-              flushThrottle.schedule()
-            },
-          })
-          flushThrottle.finalize()
-
-          if (response.error) {
-            if (response.error === ABORTED_ERROR) {
-              sendBubblePreview({ clear: true }, { force: true })
-              return
-            }
-            const partialForUi = normalizeAssistantDisplayText(response.content || acc, { trim: true })
-            if (partialForUi) sendBubblePreview({ text: partialForUi, autoHideDelay: 0 })
-            else sendBubblePreview({ clear: true }, { force: true })
-            const errUi = formatAiErrorForUser(response.error)
-            setError(errUi.message)
-            if (errUi.shouldAlert) window.alert(errUi.message)
-            const nextContent = buildInterruptedStreamContent(partialForUi, response.error)
-            if (created) {
-              setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: nextContent } : m)))
-              await api.updateChatMessage(currentSessionId, assistantId, nextContent).catch(() => undefined)
-            } else {
-              const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: nextContent, createdAt }
-              setMessages((prev) => [...prev, msg])
-              await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
-            }
-            return
-          }
-
-          const finalContent = normalizeAssistantDisplayText(response.content, { trim: true })
-          // 更新真实的 API usage 统计
-          if (response.usage) setLastApiUsage(response.usage)
-          if (created) {
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: finalContent } : m)))
-            await api.updateChatMessage(currentSessionId, assistantId, finalContent).catch(() => undefined)
-          } else {
-            const msg: ChatMessageRecord = { id: assistantId, role: 'assistant', content: finalContent, createdAt }
-            setMessages((prev) => [...prev, msg])
-            await api.addChatMessage(currentSessionId, msg).catch(() => undefined)
-          }
-
-          if (finalContent.trim()) sendBubblePreview({ text: finalContent, autoHideDelay: 0 })
-          if (finalContent) api.sendBubbleMessage(finalContent)
-          void runAutoExtractIfNeeded(currentSessionId)
-          return
-        }
-
-        const response = await aiService.chat(chatHistory, { signal: abort.signal, systemAddon })
-        if (response.error) {
-          if (response.error === ABORTED_ERROR) return
-          sendBubblePreview({ clear: true }, { force: true })
-          const errUi = formatAiErrorForUser(response.error)
-          setError(errUi.message)
-          if (errUi.shouldAlert) window.alert(errUi.message)
-          const assistantMessage: ChatMessageRecord = {
-            id: newMessageId(),
-            role: 'assistant',
-            content: `[错误] ${response.error}`,
-            createdAt: Date.now(),
-          }
-          setMessages((prev) => [...prev, assistantMessage])
-          await api.addChatMessage(currentSessionId, assistantMessage)
-          return
-        }
-
-        const assistantMessage: ChatMessageRecord = {
-          id: newMessageId(),
-          role: 'assistant',
-          content: response.content,
-          createdAt: Date.now(),
-        }
-        // 更新真实的 API usage 统计
-        if (response.usage) setLastApiUsage(response.usage)
-        setMessages((prev) => [...prev, assistantMessage])
-        await api.addChatMessage(currentSessionId, assistantMessage)
-
-        if (response.expression) api.triggerExpression(response.expression)
-        if (response.motion) api.triggerMotion(response.motion, 0)
-        if (response.content?.trim()) sendBubblePreview({ text: response.content, autoHideDelay: 0 })
-        if (response.content) api.sendBubbleMessage(response.content)
-        void runAutoExtractIfNeeded(currentSessionId)
+        await runStandardAiResponse({
+          aiService,
+          chatHistory,
+          request,
+          sessionId: currentSessionId,
+          streaming: enableChatStreaming,
+          systemAddon,
+        })
       } catch (err) {
         sendBubblePreview({ clear: true }, { force: true })
         const errorMessage = err instanceof Error ? err.message : String(err)
@@ -4040,32 +3749,32 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         setMessages((prev) => [...prev, assistantMessage])
         await api.addChatMessage(currentSessionId, assistantMessage).catch(() => undefined)
       } finally {
-        if (aiAbortRef.current === abort) aiAbortRef.current = null
-        isLoadingRef.current = false
-        setIsLoading(false)
+        finishAiRequest(request)
         refreshSessions().catch(() => undefined)
       }
     },
     [
       api,
+      beginAiRequest,
       beginTtsUtterance,
       canUseVision,
       clearTtsUtterance,
       currentSessionId,
       getActivePersonaId,
       interrupt,
+      isLoadingRef,
       messages,
       send,
       newMessageId,
       personaSystemAddon,
       removeDuplicatedPersonaFromMemoryAddon,
+      finishAiRequest,
       refreshSessions,
       registerTtsUtterance,
       sendBubblePreview,
       settings,
-      runAutoExtractIfNeeded,
+      runStandardAiResponse,
       maybeCompressChatHistoryToMaxContext,
-      formatAiErrorForUser,
       updateTtsUtteranceFallback,
     ],
   )

@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十六批：Chat TTS hook 已拆分）
+- 状态：P2-1 进行中（第十七批：Chat AI 请求与流式响应 hook 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -685,6 +685,15 @@ AI 与能力
 - `ChatWindow.tsx` 从第十五批后的 4691 行降至 4597 行；相较 Chat 拆分开始时累计减少 1039 行。
 - 新增 6 个 TTS 控制器测试，覆盖 pending/注册、乱序 segment 单调揭示、未知/非法事件、注册前失败清理、结束后原会话回调、中断移除分段控制、全量停止重置和三类事件订阅清理。
 - `npm test` 共 37 个测试文件、142 个用例通过；TypeScript、lint、Windows unpacked 打包、TTS IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 的 AI 请求与流式响应 hooks。
+
+### P2-1 进展记录（2026-07-13，第十七批）
+
+- 新增 `src/windows/chat/useChatAi.ts`，集中管理 Chat AI 请求登记、`AbortController`、停止代次、同步 loading ref/state、统一中断与卸载清理；普通发送、旧重新生成 fallback 和任务完成后的二段回复已接入同一请求生命周期。
+- 将非分段 TTS 的流式/非流式响应执行迁移到独立 runner：统一负责单条 assistant 消息创建与增量更新、80ms flush 节流、气泡预览、Live2D 标签去重触发、usage 更新、成功/失败落盘和自动提炼回调；planner、Tool Agent、记忆召回、上下文压缩及分段 TTS 业务仍留在原流程。
+- 修复旧请求 `finally` 可能在新请求已经开始后错误清除 loading 的竞态；统一停止会中止已登记的前台和后台请求，迟到 delta/完成结果不会再写入消息。重新生成持久化失败也会进入统一 `finally`，流式异常路径会可靠清理未触发的 flush timer。
+- 重新生成的分段 TTS 流补充统一停止检查：中断后不再接受迟到 delta、创建消息或追加音频段，并清理未完成的 segmented 控制状态。
+- `ChatWindow.tsx` 本批净减少 291 个物理行，当前为 4358 行；新增 8 个 AI 控制器/响应 runner 测试，覆盖新旧请求 loading 竞态、前后台统一中断、流式成功、占位插入/最终更新顺序、Live2D 标签去重、部分失败保留、迟到结果拒绝、非流式 metadata 和上下文错误提示。
+- `npm test` 共 38 个测试文件、150 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 AI/TTS IPC 代理、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Chat 上下文预算/压缩状态，再进入 `taskService.ts` 领域拆分。
 
 ## 14. P2-2：前端加载与运行性能
 
