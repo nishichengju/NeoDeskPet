@@ -56,7 +56,6 @@ import type {
   DisplayMode,
   OrbUiState,
   McpStateSnapshot,
-  ChatMessageRecord,
   ContextUsageSnapshot,
   MemoryDeleteArgs,
   MemoryDeleteByFilterArgs,
@@ -103,6 +102,7 @@ import {
   type IpcChannel,
 } from './ipcPermissions'
 import { registerSettingsIpc } from './ipc/registerSettingsIpc'
+import { registerChatPersistenceIpc } from './ipc/registerChatPersistenceIpc'
 
 const APP_ID = 'io.github.nishichengju.neodeskpet'
 app.setName('NeoDeskPet')
@@ -1108,193 +1108,27 @@ function registerIpc() {
   )
   handleIpc('ai:httpStreamCancel', (event, streamId: string) => aiHttpProxy.cancelStream(event.sender.id, streamId))
 
-  // Chat persistence
-  handleIpc('chat:list', () => listChatSessions())
-  handleIpc('chat:get', (_event, sessionId?: string) => getChatSession(sessionId))
-  handleIpc('chat:create', (_event, name?: string, personaId?: string) => createChatSession(name, personaId))
-  handleIpc('chat:setCurrent', (_event, sessionId: string) => setCurrentChatSession(sessionId))
-  handleIpc('chat:rename', (_event, sessionId: string, name: string) => renameChatSession(sessionId, name))
-  handleIpc('chat:delete', (_event, sessionId: string) => deleteChatSession(sessionId))
-  handleIpc('chat:clear', (_event, sessionId: string) => clearChatSession(sessionId))
-  handleIpc('chat:setMessages', (_event, sessionId: string, messages: ChatMessageRecord[]) =>
-    setChatMessages(sessionId, messages),
-  )
-  handleIpc('chat:addMessage', (_event, sessionId: string, message: ChatMessageRecord) => {
-    const session = addChatMessage(sessionId, message)
-    try {
-      const memEnabled = getSettings().memory.enabled
-      if (!memEnabled) return session
-      if (message.role !== 'assistant') return session
-      const personaId = session.personaId || 'default'
-
-      let includeUser = true
-      try {
-        const persona = memoryService?.getPersona(personaId)
-        if (persona) includeUser = persona.captureUser
-      } catch {
-        includeUser = true
-      }
-
-      let userContent = ''
-      let userMessageId = ''
-      if (includeUser) {
-        const idx = session.messages.findIndex((m) => m.id === message.id)
-        for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
-          const m = session.messages[i]
-          if (m.role === 'user') {
-            userContent = m.content
-            userMessageId = m.id
-            break
-          }
-        }
-      }
-
-      const parts: string[] = []
-      if (userContent.trim()) parts.push(`用户：${userContent}`)
-      if (message.content.trim()) parts.push(`助手：${message.content}`)
-      const turnContent = parts.join('\n').trim()
-      if (!turnContent) return session
-
-      const ingestMessageId = userMessageId ? `turn:${userMessageId}` : message.id
-      const settings = getSettings()
-      void (memoryService?.ingestChatMessage(
-        {
-          personaId,
-          sessionId,
-          messageId: ingestMessageId,
-          role: message.role,
-          content: turnContent,
-          createdAt: message.createdAt,
-        },
-        settings.memory,
-        settings.ai,
-      ) ?? Promise.resolve()).catch(() => {})
-    } catch (_) {
-      /* ignore */
-    }
-    return session
+  registerChatPersistenceIpc({
+    handle: handleIpc,
+    chatStore: {
+      listChatSessions,
+      getChatSession,
+      createChatSession,
+      setCurrentChatSession,
+      renameChatSession,
+      deleteChatSession,
+      clearChatSession,
+      setChatMessages,
+      addChatMessage,
+      updateChatMessage,
+      updateChatMessageRecord,
+      deleteChatMessage,
+      setChatSessionAutoExtractCursor,
+      setChatSessionAutoExtractMeta,
+    },
+    getSettings,
+    getMemoryService: () => memoryService,
   })
-  handleIpc('chat:updateMessage', (_event, sessionId: string, messageId: string, content: string) => {
-    const session = updateChatMessage(sessionId, messageId, content)
-    try {
-      const memEnabled = getSettings().memory.enabled
-      if (!memEnabled) return session
-      const msg = session.messages.find((m) => m.id === messageId)
-      if (!msg) return session
-      if (msg.role !== 'assistant') return session
-      const personaId = session.personaId || 'default'
-
-      let includeUser = true
-      try {
-        const persona = memoryService?.getPersona(personaId)
-        if (persona) includeUser = persona.captureUser
-      } catch {
-        includeUser = true
-      }
-
-      let userContent = ''
-      let userMessageId = ''
-      if (includeUser) {
-        const idx = session.messages.findIndex((m) => m.id === msg.id)
-        for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
-          const m = session.messages[i]
-          if (m.role === 'user') {
-            userContent = m.content
-            userMessageId = m.id
-            break
-          }
-        }
-      }
-
-      const parts: string[] = []
-      if (userContent.trim()) parts.push(`用户：${userContent}`)
-      if (msg.content.trim()) parts.push(`助手：${msg.content}`)
-      const turnContent = parts.join('\n').trim()
-      if (!turnContent) return session
-
-      const ingestMessageId = userMessageId ? `turn:${userMessageId}` : msg.id
-      const settings = getSettings()
-      void (memoryService?.ingestChatMessage(
-        {
-          personaId,
-          sessionId,
-          messageId: ingestMessageId,
-          role: msg.role,
-          content: turnContent,
-          createdAt: msg.createdAt,
-        },
-        settings.memory,
-        settings.ai,
-      ) ?? Promise.resolve()).catch(() => {})
-    } catch (_) {
-      /* ignore */
-    }
-    return session
-  })
-  handleIpc('chat:updateMessageRecord', (_event, sessionId: string, messageId: string, patch: unknown) => {
-    const session = updateChatMessageRecord(sessionId, messageId, patch)
-    try {
-      const memEnabled = getSettings().memory.enabled
-      if (!memEnabled) return session
-      const msg = session.messages.find((m) => m.id === messageId)
-      if (!msg) return session
-      if (msg.role !== 'assistant') return session
-      const personaId = session.personaId || 'default'
-
-      let includeUser = true
-      try {
-        const persona = memoryService?.getPersona(personaId)
-        if (persona) includeUser = persona.captureUser
-      } catch {
-        includeUser = true
-      }
-
-      let userContent = ''
-      let userMessageId = ''
-      if (includeUser) {
-        const idx = session.messages.findIndex((m) => m.id === msg.id)
-        for (let i = (idx >= 0 ? idx : session.messages.length) - 1; i >= 0; i--) {
-          const m = session.messages[i]
-          if (m.role === 'user') {
-            userContent = m.content
-            userMessageId = m.id
-            break
-          }
-        }
-      }
-
-      const parts: string[] = []
-      if (userContent.trim()) parts.push(`用户：${userContent}`)
-      if (msg.content.trim()) parts.push(`助手：${msg.content}`)
-      const turnContent = parts.join('\n').trim()
-      if (!turnContent) return session
-
-      const ingestMessageId = userMessageId ? `turn:${userMessageId}` : msg.id
-      const settings = getSettings()
-      void (memoryService?.ingestChatMessage(
-        {
-          personaId,
-          sessionId,
-          messageId: ingestMessageId,
-          role: msg.role,
-          content: turnContent,
-          createdAt: msg.createdAt,
-        },
-        settings.memory,
-        settings.ai,
-      ) ?? Promise.resolve()).catch(() => {})
-    } catch (_) {
-      /* ignore */
-    }
-    return session
-  })
-  handleIpc('chat:deleteMessage', (_event, sessionId: string, messageId: string) => deleteChatMessage(sessionId, messageId))
-  handleIpc('chat:setAutoExtractCursor', (_event, sessionId: string, cursor: number) =>
-    setChatSessionAutoExtractCursor(sessionId, cursor),
-  )
-  handleIpc('chat:setAutoExtractMeta', (_event, sessionId: string, patch: unknown) =>
-    setChatSessionAutoExtractMeta(sessionId, patch),
-  )
 
   // Chat attachments: persist dropped/pasted media into userData for stable paths.
   handleIpc('chat:saveAttachment', async (_event, payload: unknown) => {

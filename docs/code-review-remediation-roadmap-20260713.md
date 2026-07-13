@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第一批：Settings IPC 已拆分）
+- 状态：P2-1 进行中（第二批：Settings 与 Chat 持久化 IPC 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -543,6 +543,15 @@ AI 与能力
 - IPC 权限测试改为递归扫描全部 `electron/**/*.ts`，继续确保 118 个注册通道与权限矩阵一一对应、无重复、无直接绕过统一包装器的 `ipcMain.handle/on`。
 - 新增设置 IPC 行为测试，覆盖 28 通道注册、密钥专用写入边界、Memory/MCP/ASR 副作用和 AI Profile 密钥继承。
 - `npm test` 共 77 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC 双启动 smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
+
+### P2-1 进展记录（2026-07-13，第二批）
+
+- 将 14 个 Chat 会话持久化通道迁移到 `electron/ipc/registerChatPersistenceIpc.ts`，覆盖会话列表、创建/切换/重命名/删除、消息增删改、全量消息替换和自动提炼元数据。
+- 三处重复的“助手消息写入长期记忆”流程收敛为单一内部函数，继续按 persona 的 `captureUser` 决定是否拼接上一条用户消息；MemoryService 未初始化或异步摄取失败时不会影响聊天 SQLite 写入。
+- `electron/main.ts` 从第一批后的 2436 行降至 2270 行；相较 P2-1 开始时累计减少 473 行。附件持久化和本地媒体解析仍保留在主进程，作为后续独立拆分单元。
+- 新增 5 个 Chat 持久化 IPC 测试，覆盖 14 通道注册、会话操作委托、添加/普通编辑/结构化编辑后的记忆 turn、persona 用户采集策略、记忆关闭和故障隔离。
+- 打包 IPC smoke 新增真实 SQLite 往返：创建会话、写入与编辑消息、设置提炼元数据、关闭应用、重启读取、删除消息、清空并删除会话；同时确认 Chat 写入触发的 Memory embedding 请求使用主进程密钥代理。
+- `npm test` 共 82 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC 双启动 smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
 
 ## 14. P2-2：前端加载与运行性能
 

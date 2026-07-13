@@ -31,6 +31,7 @@ const aiServer = http.createServer(async (request, response) => {
     path: request.url,
     authMatches: request.headers.authorization === `Bearer ${aiSmokeKey}`,
     streaming: body.stream === true,
+    model: body.model,
   })
 
   if (body.stream === true) {
@@ -224,6 +225,50 @@ try {
   assert(aiRequests.length === 2 && aiRequests.every((request) => request.authMatches), 'AI proxy did not inject the configured key')
   assert(aiRequests.every((request) => request.path === '/v1/chat/completions'), 'AI proxy used an unexpected endpoint')
 
+  const chatPersistenceBeforeRestart = await chat.evaluate(async () => {
+    const created = await window.neoDeskPet.createChatSession('IPC Smoke Session', 'default')
+    await window.neoDeskPet.setCurrentChatSession(created.id)
+    await window.neoDeskPet.addChatMessage(created.id, {
+      id: 'ipc-smoke-user',
+      role: 'user',
+      content: '持久化问题',
+      createdAt: 1,
+    })
+    await window.neoDeskPet.addChatMessage(created.id, {
+      id: 'ipc-smoke-assistant',
+      role: 'assistant',
+      content: '初始回答',
+      createdAt: 2,
+    })
+    await window.neoDeskPet.updateChatMessage(created.id, 'ipc-smoke-assistant', '编辑回答')
+    await window.neoDeskPet.updateChatMessageRecord(created.id, 'ipc-smoke-assistant', {
+      content: '结构化更新',
+      updatedAt: 3,
+    })
+    await window.neoDeskPet.setChatAutoExtractCursor(created.id, 2)
+    await window.neoDeskPet.setChatAutoExtractMeta(created.id, {
+      autoExtractLastRunAt: 4,
+      autoExtractLastWriteCount: 1,
+      autoExtractLastError: '',
+    })
+    await window.neoDeskPet.renameChatSession(created.id, 'IPC Smoke Renamed')
+    const loaded = await window.neoDeskPet.getChatSession(created.id)
+    const listed = await window.neoDeskPet.listChatSessions()
+    return { sessionId: created.id, loaded, listed }
+  })
+  assert(chatPersistenceBeforeRestart.loaded.name === 'IPC Smoke Renamed', 'chat rename was not persisted')
+  assert(chatPersistenceBeforeRestart.loaded.messages.length === 2, 'chat messages were not persisted before restart')
+  assert(
+    chatPersistenceBeforeRestart.loaded.messages[1]?.content === '结构化更新',
+    'chat message updates were not persisted before restart',
+  )
+  assert(chatPersistenceBeforeRestart.loaded.autoExtractCursor === 2, 'chat auto-extract cursor was not persisted')
+  assert(chatPersistenceBeforeRestart.loaded.autoExtractLastWriteCount === 1, 'chat auto-extract metadata was not persisted')
+  assert(
+    chatPersistenceBeforeRestart.listed.currentSessionId === chatPersistenceBeforeRestart.sessionId,
+    'chat current session was not persisted',
+  )
+
   const keys = {
     pet: await apiKeys(pet),
     chat: await apiKeys(chat),
@@ -357,8 +402,33 @@ try {
     return { ok: response.ok, status: response.status, body: JSON.parse(response.bodyText) }
   })
   assert(restartProxyRequest.ok && restartProxyRequest.body?.via === 'main-process', 'AI proxy failed after restart')
-  assert(aiRequests.length === 3 && aiRequests.at(-1)?.authMatches, 'AI key was not restored after restart')
-  assert(aiRequests.at(-1)?.path === '/v1/chat/completions', 'AI proxy used an unexpected endpoint after restart')
+  const restartRecordedRequest = aiRequests.findLast((request) => request.model === 'ipc-smoke-restart')
+  assert(restartRecordedRequest?.authMatches, 'AI key was not restored after restart')
+  assert(restartRecordedRequest?.path === '/v1/chat/completions', 'AI proxy used an unexpected endpoint after restart')
+
+  const chatPersistenceAfterRestart = await restartedChat.evaluate(async (sessionId) => {
+    const loaded = await window.neoDeskPet.getChatSession(sessionId)
+    await window.neoDeskPet.deleteChatMessage(sessionId, 'ipc-smoke-user')
+    const afterMessageDelete = await window.neoDeskPet.getChatSession(sessionId)
+    await window.neoDeskPet.clearChatSession(sessionId)
+    const afterClear = await window.neoDeskPet.getChatSession(sessionId)
+    const afterSessionDelete = await window.neoDeskPet.deleteChatSession(sessionId)
+    return { loaded, afterMessageDelete, afterClear, afterSessionDelete }
+  }, chatPersistenceBeforeRestart.sessionId)
+  assert(chatPersistenceAfterRestart.loaded.name === 'IPC Smoke Renamed', 'chat session was lost after restart')
+  assert(chatPersistenceAfterRestart.loaded.messages.length === 2, 'chat messages were lost after restart')
+  assert(
+    chatPersistenceAfterRestart.loaded.messages[1]?.content === '结构化更新',
+    'updated chat message was lost after restart',
+  )
+  assert(chatPersistenceAfterRestart.afterMessageDelete.messages.length === 1, 'chat message deletion failed')
+  assert(chatPersistenceAfterRestart.afterClear.messages.length === 0, 'chat clear failed')
+  assert(
+    !chatPersistenceAfterRestart.afterSessionDelete.sessions.some(
+      (session) => session.id === chatPersistenceBeforeRestart.sessionId,
+    ),
+    'chat session deletion failed',
+  )
 
   const report = {
     generatedAt: new Date().toISOString(),
@@ -372,6 +442,14 @@ try {
     settingsNavigation: {
       onCreate: settingsNavigationOnCreate?.trim() ?? '',
       onReuse: settingsNavigationOnReuse?.trim() ?? '',
+    },
+    chatPersistence: {
+      sessionId: chatPersistenceBeforeRestart.sessionId,
+      beforeRestart: chatPersistenceBeforeRestart.loaded,
+      afterRestart: chatPersistenceAfterRestart.loaded,
+      deleteMessage: chatPersistenceAfterRestart.afterMessageDelete.messages.length === 1,
+      clear: chatPersistenceAfterRestart.afterClear.messages.length === 0,
+      deleteSession: true,
     },
     runtimeErrors,
     aiProxy: {

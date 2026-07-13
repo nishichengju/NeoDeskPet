@@ -62,3 +62,22 @@
 | `npm run ui:baseline` | 13 个场景通过 |
 
 本批未修改 renderer、preload、权限矩阵或数据库结构。P2-1 仍在进行中，后续继续拆分 Chat、Task、Memory、TTS 和 Window IPC。
+
+## P2-1：大型模块拆分与领域边界（第二批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 会话持久化与长期记忆摄取 IPC
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 22 个测试文件、82 个用例通过 |
+| Chat IPC 行为测试 | 14 通道、会话委托、三种消息更新、persona 采集策略和故障隔离通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 真实 SQLite 会话在重启前后内容与元数据一致，增删改、清空、删除会话通过 |
+| Chat → Memory | 打包环境触发 embedding 请求，鉴权仍由主进程密钥代理注入 |
+| `npm run media:smoke` | 通过 |
+| `npm run ui:baseline` | 13 个场景通过 |
+
+本批未修改 Chat renderer、preload API、IPC 权限矩阵或 SQLite schema。Chat 附件与本地媒体 IPC 尚未迁移，将作为后续独立单元处理。
