@@ -649,6 +649,17 @@ try {
       const current = await window.neoDeskPet.getTask(taskId)
       throw new Error(`task ${taskId} did not reach ${expectedStatuses.join('/')} (current=${current?.status ?? 'missing'})`)
     }
+    const waitForActiveStep = async (taskId, timeoutMs = 10_000) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const current = await window.neoDeskPet.getTask(taskId)
+        const step = current?.steps?.[current.currentStepIndex]
+        if (current?.status === 'running' && step?.status === 'running') return current
+        await new Promise((resolve) => window.setTimeout(resolve, 10))
+      }
+      const current = await window.neoDeskPet.getTask(taskId)
+      throw new Error(`task ${taskId} did not expose an active step (current=${current?.status ?? 'missing'})`)
+    }
     const steps = Array.from({ length: 12 }, (_, index) => ({ title: `No-op lifecycle step ${index + 1}` }))
 
     const pausable = await window.neoDeskPet.createTask({
@@ -669,12 +680,28 @@ try {
       title: 'IPC Cancel Task',
       steps,
     })
-    const runningBeforeCancel = await waitForStatus(cancelable.id, ['running'])
+    const runningBeforeCancel = await waitForActiveStep(cancelable.id)
     const canceled = await window.neoDeskPet.cancelTask(cancelable.id)
     await new Promise((resolve) => window.setTimeout(resolve, 180))
     const afterCancel = await window.neoDeskPet.getTask(cancelable.id)
+
+    const direct = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Direct Tool Task',
+      steps: [{ title: 'Direct delay', tool: 'delay.sleep', input: '{"ms":1}' }],
+    })
+    const directCompleted = await waitForStatus(direct.id, ['done', 'failed', 'canceled'])
+
+    const failing = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Direct Tool Failure Task',
+      steps: [{ title: 'Unknown direct tool', tool: 'missing.tool', input: '{"value":1}' }],
+    })
+    const failed = await waitForStatus(failing.id, ['done', 'failed', 'canceled'])
     const pauseDismissed = await window.neoDeskPet.dismissTask(pausable.id)
     const cancelDismissed = await window.neoDeskPet.dismissTask(cancelable.id)
+    const directDismissed = await window.neoDeskPet.dismissTask(direct.id)
+    const failedDismissed = await window.neoDeskPet.dismissTask(failing.id)
 
     return {
       runningBeforePause,
@@ -686,8 +713,12 @@ try {
       runningBeforeCancel,
       canceled,
       afterCancel,
+      directCompleted,
+      failed,
       pauseDismissed,
       cancelDismissed,
+      directDismissed,
+      failedDismissed,
     }
   })
   assert(taskLifecycle.runningBeforePause.status === 'running', 'pause/resume task never entered running state')
@@ -702,7 +733,27 @@ try {
   assert(taskLifecycle.runningBeforeCancel.status === 'running', 'cancel task never entered running state')
   assert(taskLifecycle.canceled?.status === 'canceled', 'task cancel did not persist canceled state')
   assert(taskLifecycle.afterCancel?.status === 'canceled', 'canceled task changed state after cancellation')
-  assert(taskLifecycle.pauseDismissed?.ok && taskLifecycle.cancelDismissed?.ok, 'task lifecycle cleanup failed')
+  assert(taskLifecycle.afterCancel?.steps?.[taskLifecycle.afterCancel.currentStepIndex]?.status === 'skipped', 'canceled task left its active step running')
+  assert(taskLifecycle.afterCancel?.steps?.[taskLifecycle.afterCancel.currentStepIndex]?.error === '任务已取消', 'canceled step did not record its terminal reason')
+  assert(taskLifecycle.directCompleted?.status === 'done', `direct tool task failed: ${taskLifecycle.directCompleted?.lastError ?? 'missing'}`)
+  assert(taskLifecycle.directCompleted?.steps?.[0]?.status === 'done', 'direct tool step was not marked done')
+  assert(
+    taskLifecycle.directCompleted?.toolRuns?.some((run) => run.toolName === 'delay.sleep' && run.status === 'done'),
+    'direct tool task did not persist its done toolRun',
+  )
+  assert(taskLifecycle.failed?.status === 'failed', 'unknown direct tool task was not marked failed')
+  assert(taskLifecycle.failed?.steps?.[0]?.status === 'failed', 'unknown direct tool step was not marked failed')
+  assert(
+    taskLifecycle.failed?.toolRuns?.some((run) => run.toolName === 'missing.tool' && run.status === 'error'),
+    'unknown direct tool task did not persist its error toolRun',
+  )
+  assert(
+    taskLifecycle.pauseDismissed?.ok &&
+      taskLifecycle.cancelDismissed?.ok &&
+      taskLifecycle.directDismissed?.ok &&
+      taskLifecycle.failedDismissed?.ok,
+    'task lifecycle cleanup failed',
+  )
 
   await settings.evaluate(async () => {
     await window.neoDeskPet.setAISettings({ model: 'ipc-agent-smoke' })
@@ -1187,7 +1238,17 @@ try {
       completedStatus: taskLifecycle.completed.status,
       completedSteps: taskLifecycle.completed.currentStepIndex,
       canceledStatus: taskLifecycle.afterCancel?.status,
-      cleanup: Boolean(taskLifecycle.pauseDismissed?.ok && taskLifecycle.cancelDismissed?.ok),
+      canceledStepStatus: taskLifecycle.afterCancel?.steps?.[taskLifecycle.afterCancel.currentStepIndex]?.status,
+      directStatus: taskLifecycle.directCompleted?.status,
+      directToolRun: taskLifecycle.directCompleted?.toolRuns?.[0]?.status,
+      failedStatus: taskLifecycle.failed?.status,
+      failedToolRun: taskLifecycle.failed?.toolRuns?.[0]?.status,
+      cleanup: Boolean(
+        taskLifecycle.pauseDismissed?.ok &&
+          taskLifecycle.cancelDismissed?.ok &&
+          taskLifecycle.directDismissed?.ok &&
+          taskLifecycle.failedDismissed?.ok,
+      ),
     },
     taskAgentProtocol: {
       status: taskAgentProtocol.completed?.status,

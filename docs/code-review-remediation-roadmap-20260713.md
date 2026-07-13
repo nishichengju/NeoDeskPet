@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二十七批：Task Agent 视觉会话与恢复编排已拆分）
+- 状态：P2-1 进行中（第二十八批：Task step 执行与状态收尾已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -782,6 +782,15 @@ AI 与能力
 - text fallback 会按当时的 artifact 目录重新生成视觉目录，并重新注入当前主模型图片；新增打包 IPC smoke 在既有 `thought_signature` auto fallback 路径中附带真实本地 PNG，三次 provider 请求均检测到 `image_url`，同时 `delay.sleep` 仍只执行一次且文本请求保留已完成 `TOOL_RESULT`。
 - `taskService.ts` 从第二十六批后的 2005 行降至 1651 行；新增 7 个视觉会话测试，覆盖持久化/旧图片归一化、artifact 顺序与硬上限、main/fallback/off 初始路由、错误剥离与能力更新、取消传播、`vision.look` 三类路由、工具图片组序号和模型安全输出。
 - `npm test` 共 48 个测试文件、214 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task step 执行与状态收尾边界，并扩大真实多图片工具和外挂视觉故障回归。
+
+### P2-1 进展记录（2026-07-13，第二十八批）
+
+- 新增 `electron/task/taskExecutionRunner.ts`，集中管理 running/paused 状态门禁、step running/done/failed/skipped 生命周期、暂停前后检查、取消优先级、`toolsUsed`、直接 step toolRun、任务完成/失败和统一 `onFinished` 清理回调。
+- `TaskService.runTask` 缩为依赖适配：负责从 TaskStore 读取/更新目标任务、解析 step input、调用实际工具、解析图片路径，并在 runner 结束后清理 runtime/视觉上下文和唤醒 scheduler；工具实现、Task IPC、任务 store/schema 与 Agent 内部 toolRun 契约未改动。
+- 修复两个状态收尾缺口：无剩余 step 时不再在完成分支和 `finally` 中重复删除 runtime/触发 scheduler；任务在暂停门禁期间被删除后不会继续执行旧 step。取消运行中 step 时会把 step 终态写为 `skipped`、原因写为“任务已取消”，直接工具卡同步由 running 收口为 error，避免取消任务仍显示执行中。
+- 新增 6 个 runner 测试，覆盖多 step 顺序与 agent.run 壳卡排除、空任务单次清理、暂停恢复、取消终态、执行失败和门禁期间任务删除；`taskService.ts` 从第二十七批后的 1651 行降至 1542 行。
+- 打包 IPC smoke 扩展真实状态机路径：等待活跃 step 后取消并断言 `skipped`，直接 `delay.sleep` task 必须生成 done step/toolRun，未知 `missing.tool` 必须同步生成 failed task/step 和 error toolRun，四类任务均完成清理。
+- `npm test` 共 49 个测试文件、220 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task 工具执行适配、图片落盘和专用工作流边界，完成 `taskService.ts` 领域收口。
 
 ## 14. P2-2：前端加载与运行性能
 

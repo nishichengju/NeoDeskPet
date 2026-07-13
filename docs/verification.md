@@ -563,3 +563,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具 schema、模型设置字段、最大回合或界面样式。独立会话测试证明 artifact 顺序和严格校验、主/外挂/关闭路由、unsupported 恢复、取消传播及工具图片登记；打包 smoke 进一步证明主模型图片会跨 native continuation 与 text fallback 重建保留。尚未连接真实云端视觉 provider 或真实外挂 Profile 制造供应商特有错误，也未用真实 MCP 多图片、浏览器截图和生图服务覆盖同一轮多个视觉结果；这些外部组合仍作为后续集成风险保留。
+
+## P2-1：大型模块拆分与领域边界（第二十八批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task step 状态机、直接 toolRun、暂停/取消门禁与统一收尾
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 49 个测试文件、220 个用例通过 |
+| Task execution runner 测试 | 6 个用例通过：多 step 顺序/直接工具记录/agent.run 壳卡排除、空任务单次清理、暂停恢复、取消 step/toolRun 收尾、失败 task/step/toolRun、门禁期间任务删除 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | 暂停/恢复继续通过；活跃 step 取消后为 skipped；直接 `delay.sleep` 生成 done step/toolRun；未知 `missing.tool` 生成 failed task/step 与 error toolRun；既有 Agent text/native/auto/Claude 路径全部通过 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；取消/成功/失败任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义、Agent 消息协议、模型配置或界面样式。runner 单测和打包 smoke 共同覆盖暂停、取消、成功、失败、空任务和资源清理；取消中的 Agent 内部外部工具是否都能立即响应仍取决于各执行器的 Abort/stop 实现，真实 CLI/MCP/浏览器长任务中断和三个并发槽位的长时间交错仍是后续集成风险。

@@ -41,6 +41,7 @@ import {
   normalizeVisualArtifacts,
   type TaskAgentVisualContext,
 } from './task/taskAgentVisionSession'
+import { TaskExecutionRunner } from './task/taskExecutionRunner'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord } from './types'
@@ -397,13 +398,6 @@ function extractImageRefsFromToolText(text: string): string[] {
   for (const m of raw.matchAll(/(?:[a-zA-Z]:\\|\\\\|\/)[^\r\n"'`<>|?*]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'`<>]*)?/g)) add(m[0])
 
   return Array.from(out).slice(0, 8)
-}
-
-// agent.run 是“对话代理”的编排壳：真实工具调用由其内部 upsertToolRun 逐条记录。
-// 壳 step 自身不能再记入 toolRuns，否则纯聊天也会在气泡/聊天里渲染一张 agent.run 工具卡。
-function shouldRecordStepToolRun(tool: unknown): tool is string {
-  const name = typeof tool === 'string' ? tool.trim() : ''
-  return name.length > 0 && name !== 'agent.run'
 }
 
 function imageMimeFromPath(filePath: string): string {
@@ -1512,139 +1506,35 @@ export class TaskService {
 
   private async runTask(id: string): Promise<void> {
     const rt = this.runtime.ensure(id)
-    try {
-      while (!rt.canceled) {
-        const t = this.getTask(id)
-        if (!t) return
-        if (t.status !== 'running' && t.status !== 'paused') return
-
-        if (t.status === 'paused') {
-          await this.waitIfPaused(id)
-          continue
-        }
-
-        const idx = t.currentStepIndex
-        const step = t.steps[idx]
-        const directRunId = `step-${step?.id || idx}`
-        if (!step) {
-          this.writeState((draft) => {
-            const it = draft.tasks.find((x) => x.id === id)
-            if (!it) return
-            it.status = 'done'
-            it.updatedAt = now()
-            it.endedAt = now()
-          })
-          this.runtime.delete(id)
-          this.scheduler.kick()
-          return
-        }
-
-        // 标记 step running
+    const runner = new TaskExecutionRunner({
+      taskId: id,
+      readTask: () => this.getTask(id),
+      updateTask: (mutator) => {
+        let updated = false
         this.writeState((draft) => {
-          const it = draft.tasks.find((x) => x.id === id)
-          if (!it) return
-          const s = it.steps[it.currentStepIndex]
-          if (!s) return
-          s.status = 'running'
-          s.startedAt = s.startedAt ?? now()
-          it.updatedAt = now()
-          if (s.tool && !it.toolsUsed.includes(s.tool)) {
-            it.toolsUsed = [...it.toolsUsed, s.tool].slice(0, 80)
-          }
-          if (shouldRecordStepToolRun(s.tool)) {
-            const prev = Array.isArray(it.toolRuns) ? it.toolRuns.filter((r) => r.id !== directRunId) : []
-            it.toolRuns = [
-              ...prev,
-              {
-                id: directRunId,
-                toolName: s.tool,
-                status: 'running' as const,
-                inputPreview: clampText(s.input || '{}', s.tool === 'image.generate' ? 6000 : 500),
-                startedAt: s.startedAt ?? now(),
-              },
-            ].slice(0, 80)
-          }
+          const task = draft.tasks.find((item) => item.id === id)
+          if (!task) return
+          updated = mutator(task)
         })
-
-        await this.waitIfPaused(id)
-        if (rt.canceled) return
-
+        return updated
+      },
+      waitIfPaused: () => this.waitIfPaused(id),
+      isCanceled: () => rt.canceled,
+      executeStep: async (task, step) => {
         const toolInput = parseToolInput(step.input)
-        const output = await this.runTool(step.tool, toolInput, t, rt)
+        const output = await this.runTool(step.tool, toolInput, task, rt)
         const imagePaths = step.tool ? await this.resolveToolImagePaths(id, output, []) : []
-
-        await this.waitIfPaused(id)
-        if (rt.canceled) return
-
-        this.writeState((draft) => {
-          const it = draft.tasks.find((x) => x.id === id)
-          if (!it) return
-          const s = it.steps[it.currentStepIndex]
-          if (!s) return
-          s.status = 'done'
-          s.endedAt = now()
-          s.output = clampStepOutput(output || '完成')
-          it.currentStepIndex += 1
-          if (shouldRecordStepToolRun(s.tool)) {
-            const prev = Array.isArray(it.toolRuns) ? it.toolRuns : []
-            const base = prev.find((r) => r.id === directRunId)
-            it.toolRuns = [
-              ...prev.filter((r) => r.id !== directRunId),
-              {
-                id: directRunId,
-                toolName: s.tool,
-                status: 'done' as const,
-                inputPreview: base?.inputPreview ?? clampText(s.input || '{}', s.tool === 'image.generate' ? 6000 : 500),
-                outputPreview: clampText(output, 800),
-                imagePaths: normalizeImagePathList(imagePaths, 8),
-                startedAt: base?.startedAt ?? s.startedAt ?? now(),
-                endedAt: now(),
-              },
-            ].slice(0, 80)
-          }
-          it.updatedAt = now()
-        })
-      }
-    } catch (err) {
-      if (rt.canceled) return
-      const msg = err instanceof Error ? err.message : String(err)
-      this.writeState((draft) => {
-        const it = draft.tasks.find((x) => x.id === id)
-        if (!it) return
-        it.status = 'failed'
-        it.lastError = clampText(msg, 1600) || '任务失败'
-        it.updatedAt = now()
-        it.endedAt = now()
-        const s = it.steps[it.currentStepIndex]
-        if (s && s.status === 'running') {
-          s.status = 'failed'
-          s.error = it.lastError
-          s.endedAt = now()
-          if (shouldRecordStepToolRun(s.tool)) {
-            const runId = `step-${s.id || it.currentStepIndex}`
-            const prev = Array.isArray(it.toolRuns) ? it.toolRuns : []
-            const base = prev.find((r) => r.id === runId)
-            it.toolRuns = [
-              ...prev.filter((r) => r.id !== runId),
-              {
-                id: runId,
-                toolName: s.tool,
-                status: 'error' as const,
-                inputPreview: base?.inputPreview ?? clampText(s.input || '{}', s.tool === 'image.generate' ? 6000 : 500),
-                error: it.lastError,
-                startedAt: base?.startedAt ?? s.startedAt ?? now(),
-                endedAt: now(),
-              },
-            ].slice(0, 80)
-          }
-        }
-      })
-    } finally {
-      rt.cancelCurrent = undefined
-      this.runtime.delete(id)
-      this.visualContextByTask.delete(id)
-      this.scheduler.kick()
-    }
+        return { output, imagePaths }
+      },
+      normalizeImagePaths: normalizeImagePathList,
+      onFinished: () => {
+        rt.cancelCurrent = undefined
+        this.runtime.delete(id)
+        this.visualContextByTask.delete(id)
+        this.scheduler.kick()
+      },
+    })
+    await runner.run()
   }
 
   private writeState(mutator: (draft: TaskStoreState) => void): void {
