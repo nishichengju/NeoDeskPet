@@ -1345,6 +1345,54 @@ try {
   tagInspectionDatabase.close()
   assert(tagNames.includes('camelcasemarker'), 'tag maintenance did not persist the normalized lowercase tag')
   assert(!tagNames.includes('CamelCaseMarker'), 'tag maintenance persisted a duplicate mixed-case tag')
+  await settings.evaluate(async () => window.neoDeskPet.setMemorySettings({ vectorEnabled: true }))
+  const vectorIndexContent = 'IPC vector background maintenance memory'
+  const vectorIndexUpdated = await memory.evaluate(
+    async ({ rowid, content }) =>
+      window.neoDeskPet.updateMemory({
+        rowid,
+        content,
+        reason: 'ipc_vector_index_smoke',
+        source: 'ipc_vector_index_smoke',
+      }),
+    { rowid: tagMemory.rowid, content: vectorIndexContent },
+  )
+  let vectorIndexRow = null
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const vectorInspectionDatabase = new DatabaseSync(memoryDatabaseFile)
+    vectorIndexRow = vectorInspectionDatabase
+      .prepare(
+        'SELECT model, dims, content_hash as contentHash, LENGTH(embedding) as byteLength, updated_at as updatedAt FROM memory_embedding WHERE memory_rowid = ?',
+      )
+      .get(tagMemory.rowid)
+    vectorInspectionDatabase.close()
+    if (
+      vectorIndexRow?.model === legacyVectorModel &&
+      Number(vectorIndexRow?.updatedAt ?? 0) >= vectorIndexUpdated.updatedAt
+    ) {
+      break
+    }
+  }
+  const vectorIndexRequests = embeddingRequests.filter(
+    (request) => request.model === legacyVectorModel && request.inputs.includes(vectorIndexContent),
+  )
+  assert(
+    vectorIndexRow?.model === legacyVectorModel &&
+      vectorIndexRow?.dims === 8 &&
+      vectorIndexRow?.byteLength === 32 &&
+      Number(vectorIndexRow?.updatedAt ?? 0) >= vectorIndexUpdated.updatedAt,
+    'packaged vector maintenance did not persist the expected embedding row',
+  )
+  assert(
+    typeof vectorIndexRow?.contentHash === 'string' && vectorIndexRow.contentHash.length === 40,
+    'packaged vector maintenance did not persist the embedding content hash',
+  )
+  assert(
+    vectorIndexRequests.length === 1 && vectorIndexRequests[0]?.authMatches === true,
+    'packaged vector maintenance did not use the configured authenticated embeddings API',
+  )
+  await settings.evaluate(async () => window.neoDeskPet.setMemorySettings({ vectorEnabled: false }))
   await settings.evaluate(async (rowid) => window.neoDeskPet.deleteMemory({ rowid }), tagMemory.rowid)
 
   const memoryCrudSeed = await settings.evaluate(async () => {
@@ -1713,6 +1761,15 @@ try {
         returned: tagRetrieve?.addon.includes(tagMemoryContent) ?? false,
         tags: tagNames,
         lowercaseOnly: tagNames.includes('camelcasemarker') && !tagNames.includes('CamelCaseMarker'),
+      },
+      vectorIndex: {
+        model: vectorIndexRow?.model,
+        dims: vectorIndexRow?.dims,
+        byteLength: vectorIndexRow?.byteLength,
+        contentHashLength: vectorIndexRow?.contentHash?.length,
+        updatedAt: vectorIndexRow?.updatedAt,
+        requests: vectorIndexRequests.length,
+        requestAuthenticated: vectorIndexRequests[0]?.authMatches === true,
       },
       personaId: memoryCrudSeed.persona.id,
       memoryRowid: memoryCrudSeed.created.rowid,

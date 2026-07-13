@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十五批：Memory 索引队列与 Tag 维护边界已拆分）
+- 状态：P2-1 进行中（第三十六批：Memory Vector 后台索引维护边界已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -855,6 +855,15 @@ AI 与能力
 - 新增 3 个索引队列测试和 3 个 Tag 维护测试，覆盖三队列隔离、顺序/去重/kick、无效 rowid、禁用时保留 pending、pending 重建、事务时间戳、删除行过滤、批次唯一候选，以及英文大小写和中文 n-gram 提取。
 - 打包 IPC smoke 创建 `IPC CamelCaseMarker maintenance memory`，等待真实后台 debounce 队列完成索引，再由 tag 召回层命中并直接读取生产 SQLite；结果 tag hits=2，目标记忆返回，落库标签仅为 `camelcasemarker/ipc/maintenance/memory`，没有混合大小写重复项。
 - `memoryService.ts` 从第三十四批后的 2915 行降至 2728 行；`npm test` 共 61 个测试文件、274 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批沿用统一队列继续拆分 Vector 索引候选/持久化，然后进入 KG 抽取与图谱写入边界。
+
+第三十六批进展（2026-07-14）：
+
+- 新增 `electron/memory/memoryVectorIndex.ts`，集中管理 Vector 功能开关与 embeddings 配置校验、pending/兜底候选选择、候选去重、内容 hash 判定、仅更新时间戳和事务化 `memory_embedding` upsert；`MemoryService.runVectorEmbeddingMaintenance` 现在只做委托。
+- Vector 维护继续复用统一 `MemoryIndexQueue` 和共享 `MemoryEmbeddingClient`，配置无效时不会提前消费 pending；兜底扫描排除当前 pending rowid，避免同一批次重复占位和重复请求。
+- embedding BLOB 使用 `Float32Array` 的实际 `byteOffset/byteLength` 创建，避免子视图把底层缓冲区无关字节写入 SQLite；provider 失败时不产生部分 embedding 写入。
+- 新增 3 个 Vector 维护测试，覆盖禁用/缺模型/缺 API 时保留 pending、pending 与兜底候选去重、touch 与 embedding 持久化，以及 provider 失败事务完整性。
+- 打包 IPC smoke 更新真实记忆并等待后台 debounce 维护完成；生产 SQLite 写入 model=`ipc-memory-vector-smoke`、dims=8、BLOB=32 bytes、content hash=40 字符，embeddings API 仅请求 1 次且携带配置鉴权。
+- `memoryService.ts` 从第三十五批后的 2728 行降至 2600 行；`npm test` 共 62 个测试文件、277 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 KG 实体/关系抽取、候选维护与图谱事务持久化边界。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -7,6 +7,7 @@ import {
 } from './memory/memoryEmbeddingClient'
 import { MemoryIndexQueue } from './memory/memoryIndexQueue'
 import { MemoryTagIndexMaintainer, extractMemoryTags } from './memory/memoryTagIndex'
+import { MemoryVectorIndexMaintainer } from './memory/memoryVectorIndex'
 import { MemoryVectorSearchClient } from './memory/memoryVectorSearchClient'
 import type {
   AISettings,
@@ -311,12 +312,14 @@ export class MemoryService {
   private embeddingClient = new MemoryEmbeddingClient()
   private chatIngestRedirect = new Map<string, number>()
   private tagIndexMaintainer: MemoryTagIndexMaintainer
+  private vectorIndexMaintainer: MemoryVectorIndexMaintainer
   private vectorSearchClient: MemoryVectorSearchClient
 
   constructor(userDataDir: string) {
     const opened = openMemoryDatabase(userDataDir)
     this.db = opened.db
     this.tagIndexMaintainer = new MemoryTagIndexMaintainer(opened.db, this.indexQueue)
+    this.vectorIndexMaintainer = new MemoryVectorIndexMaintainer(opened.db, this.indexQueue, this.embeddingClient)
     this.vectorSearchClient = new MemoryVectorSearchClient(opened.dbPath)
   }
 
@@ -876,138 +879,7 @@ export class MemoryService {
     aiSettings: AISettings,
     opts?: { batchSize?: number },
   ): Promise<{ scanned: number; embedded: number; skipped: number; error?: string }> {
-    const enabled = memSettings.vectorEnabled ?? false
-    if (!enabled) return { scanned: 0, embedded: 0, skipped: 0 }
-
-    const model = (memSettings.vectorEmbeddingModel ?? '').trim()
-    if (!model) return { scanned: 0, embedded: 0, skipped: 0, error: 'embeddings 模型为空' }
-
-    const config = resolveMemoryEmbeddingConfig(memSettings, aiSettings, { requireExplicitModel: true })
-    if (!config) {
-      const err = 'embeddings API 未配置（缺少 apiKey/baseUrl）'
-      return { scanned: 0, embedded: 0, skipped: 0, error: err }
-    }
-
-    const batchSize = clampInt(opts?.batchSize, 8, 1, 64)
-    const pending = this.indexQueue.take('embedding', batchSize)
-
-    type Candidate = {
-      rowid: number
-      content: string
-      updatedAt: number
-      existModel: string | null
-      existHash: string | null
-      existUpdatedAt: number | null
-    }
-
-    const rows: Candidate[] = []
-    if (pending.length > 0) {
-      const placeholders = pending.map(() => '?').join(',')
-      const found = this.db
-        .prepare(
-          `
-          SELECT
-            m.rowid as rowid,
-            m.content as content,
-            m.updated_at as updatedAt,
-            e.model as existModel,
-            e.content_hash as existHash,
-            e.updated_at as existUpdatedAt
-          FROM memory m
-          LEFT JOIN memory_embedding e ON e.memory_rowid = m.rowid
-          WHERE m.rowid IN (${placeholders})
-            AND COALESCE(m.status, 'active') <> 'deleted'
-            AND LENGTH(TRIM(m.content)) >= 2
-          `,
-        )
-        .all(...pending) as Candidate[]
-      rows.push(...found)
-    }
-
-    const remaining = batchSize - rows.length
-    if (remaining > 0) {
-      const more = this.db
-        .prepare(
-          `
-          SELECT
-            m.rowid as rowid,
-            m.content as content,
-            m.updated_at as updatedAt,
-            e.model as existModel,
-            e.content_hash as existHash,
-            e.updated_at as existUpdatedAt
-          FROM memory m
-          LEFT JOIN memory_embedding e ON e.memory_rowid = m.rowid
-          WHERE COALESCE(m.status, 'active') <> 'deleted'
-            AND LENGTH(TRIM(m.content)) >= 2
-            AND (e.memory_rowid IS NULL OR e.model <> ? OR e.updated_at < m.updated_at)
-          ORDER BY m.updated_at DESC, m.rowid DESC
-          LIMIT ?
-          `,
-        )
-        .all(model, remaining) as Candidate[]
-      rows.push(...more)
-    }
-
-    if (rows.length === 0) return { scanned: 0, embedded: 0, skipped: 0 }
-
-    const toEmbed: Array<{ rowid: number; text: string; hash: string }> = []
-    const toTouch: number[] = []
-
-    for (const r of rows) {
-      const clipped = normalizeMemoryText(r.content).slice(0, 2000)
-      const h = hashMemoryEmbeddingInput(model, clipped)
-      if (r.existModel === model && r.existHash === h && (r.existUpdatedAt ?? 0) >= (r.updatedAt ?? 0)) {
-        toTouch.push(r.rowid)
-        continue
-      }
-      toEmbed.push({ rowid: r.rowid, text: clipped, hash: h })
-    }
-
-    if (toTouch.length > 0) {
-      const placeholders = toTouch.map(() => '?').join(',')
-      this.db
-        .prepare(`UPDATE memory_embedding SET updated_at = ? WHERE memory_rowid IN (${placeholders})`)
-        .run(now(), ...toTouch)
-    }
-
-    if (toEmbed.length === 0) return { scanned: rows.length, embedded: 0, skipped: toTouch.length }
-
-    try {
-      const embedded = await this.embeddingClient.embedTexts(
-        config,
-        toEmbed.map((item) => item.text),
-      )
-
-      const ts = now()
-      const upsert = this.db.prepare(
-        `
-        INSERT INTO memory_embedding (memory_rowid, model, dims, content_hash, embedding, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(memory_rowid) DO UPDATE SET
-          model = excluded.model,
-          dims = excluded.dims,
-          content_hash = excluded.content_hash,
-          embedding = excluded.embedding,
-          updated_at = excluded.updated_at
-        `,
-      )
-
-      const tx = this.db.transaction(() => {
-        for (let i = 0; i < toEmbed.length; i++) {
-          const item = toEmbed[i]
-          const vec = embedded[i].vec
-          const buf = Buffer.from(vec.buffer)
-          upsert.run(item.rowid, model, vec.length, item.hash, buf, ts, ts)
-        }
-      })
-
-      tx()
-      return { scanned: rows.length, embedded: toEmbed.length, skipped: toTouch.length }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { scanned: rows.length, embedded: 0, skipped: toTouch.length, error: msg }
-    }
+    return this.vectorIndexMaintainer.run(memSettings, aiSettings, opts)
   }
 
   async runKgMaintenance(
