@@ -1312,6 +1312,41 @@ try {
   )
   await settings.evaluate(async () => window.neoDeskPet.setMemorySettings({ vectorEnabled: false }))
 
+  const tagMemoryContent = 'IPC CamelCaseMarker maintenance memory'
+  const tagMemory = await settings.evaluate(
+    async ({ personaId, content }) =>
+      window.neoDeskPet.upsertManualMemory({
+        personaId,
+        scope: 'persona',
+        content,
+        source: 'ipc-tag-smoke',
+        memoryType: 'semantic',
+      }),
+    { personaId: legacyMemoryPersonaId, content: tagMemoryContent },
+  )
+  let tagRetrieve = null
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    tagRetrieve = await chat.evaluate(
+      async ({ personaId, query }) => window.neoDeskPet.retrieveMemory({ personaId, query, limit: 5, reinforce: false }),
+      { personaId: legacyMemoryPersonaId, query: 'camelcasemarker' },
+    )
+    if ((tagRetrieve.debug?.counts.tag ?? 0) > 0) break
+  }
+  assert(tagRetrieve?.debug?.counts.tag > 0, 'packaged tag maintenance did not populate the tag retrieval layer')
+  assert(tagRetrieve.addon.includes(tagMemoryContent), 'packaged tag retrieval did not return the indexed memory')
+  const tagInspectionDatabase = new DatabaseSync(memoryDatabaseFile)
+  const tagNames = tagInspectionDatabase
+    .prepare(
+      'SELECT t.name as name FROM memory_tag mt JOIN tag t ON t.id = mt.tag_id WHERE mt.memory_rowid = ? ORDER BY t.name',
+    )
+    .all(tagMemory.rowid)
+    .map((row) => row.name)
+  tagInspectionDatabase.close()
+  assert(tagNames.includes('camelcasemarker'), 'tag maintenance did not persist the normalized lowercase tag')
+  assert(!tagNames.includes('CamelCaseMarker'), 'tag maintenance persisted a duplicate mixed-case tag')
+  await settings.evaluate(async (rowid) => window.neoDeskPet.deleteMemory({ rowid }), tagMemory.rowid)
+
   const memoryCrudSeed = await settings.evaluate(async () => {
     const persona = await window.neoDeskPet.createPersona('IPC Memory Persona')
     const updatedPersona = await window.neoDeskPet.updatePersona(persona.id, {
@@ -1672,6 +1707,12 @@ try {
         repeatedReturned: vectorRetrieveSecond.addon.includes(legacyVectorMemoryContent),
         queryRequests: vectorQueryRequests.length,
         requestAuthenticated: vectorQueryRequests[0]?.authMatches === true,
+      },
+      tagIndex: {
+        hits: tagRetrieve?.debug?.counts.tag ?? 0,
+        returned: tagRetrieve?.addon.includes(tagMemoryContent) ?? false,
+        tags: tagNames,
+        lowercaseOnly: tagNames.includes('camelcasemarker') && !tagNames.includes('CamelCaseMarker'),
       },
       personaId: memoryCrudSeed.persona.id,
       memoryRowid: memoryCrudSeed.created.rowid,

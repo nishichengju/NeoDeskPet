@@ -712,3 +712,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、记忆 schema、向量模型设置含义、worker SQL/余弦评分、混合召回权重或界面样式。单元测试通过注入 fetch/worker 覆盖异常和生命周期，打包 smoke 则使用真实 Electron worker、生产 `better-sqlite3`、旧库 embedding BLOB 与加密自定义向量密钥证明端到端召回；重复查询只命中一次 API 直接验证共享 LRU 生效。尚未连接真实云端 embedding provider 测量限流、超时和超大批次，也未对十万级 embedding 扫描做耗时基线；索引维护候选、tag/KG 写入与混合召回编排仍留在 `MemoryService`，由下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第三十五批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory tag/embedding/KG pending 队列、Tag 候选选择、标签提取与事务持久化
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 61 个测试文件、274 个用例通过 |
+| Memory 索引队列测试 | 3 个用例通过：rowid 去重/插入顺序/逐次 kick、tag/embedding/KG 隔离与 `enqueueAll`、无效 rowid/零 limit/关闭 kick |
+| Memory Tag 索引测试 | 3 个用例通过：英文小写去重与中文 n-gram、pending 行事务重建/时间戳、禁用保留 pending、删除行过滤和唯一兜底批次 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker 和品牌元数据写入成功 |
+| `npm run ipc:smoke` | 新增真实后台 Tag 维护：tag hits=2、目标记忆返回、SQLite 标签为 `camelcasemarker/ipc/maintenance/memory`、lowercaseOnly=true；旧库迁移、向量 worker/cache、Agent/MCP/媒体/任务路径全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；无 console error、无横向溢出，Memory 界面无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、数据库 schema、Tag 召回权重、向量/KG 设置或界面样式。Node SQLite 聚焦测试验证 pending 队列、候选排重和事务写入，打包 smoke 则通过真实应用 debounce 调度、生产 `better-sqlite3` 和 renderer 召回接口证明 Tag 索引确实落库并参与排序。现有英文混合大小写旧标签不会在本批主动全库清理，但相关记忆下次进入 pending 重建时会收敛为小写；Vector/KG 维护仍各自持有候选 SQL 和持久化流程，下一批继续抽离。

@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十四批：Memory Embedding 客户端与向量 Worker 生命周期已拆分）
+- 状态：P2-1 进行中（第三十五批：Memory 索引队列与 Tag 维护边界已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -846,6 +846,15 @@ AI 与能力
 - 新增 3 个 Embedding 客户端测试和 4 个 Vector worker 客户端测试，覆盖主/自定义配置、endpoint、批内去重、LRU 复用、乱序 index、provider/零向量错误、worker 复用、并发响应、崩溃重启、超时、关闭和同步发送失败清理。
 - 打包 IPC smoke 在旧库中预置与查询无词面重合的 8 维 embedding，通过加密的 `memory-vector` secret 调用本地 embeddings API，再由打包后的 worker 扫描真实 `better-sqlite3`：向量层 attempted=true、hits=1、两次召回均返回目标记忆、查询 API 请求仅 1 次且鉴权正确。
 - `npm test` 共 59 个测试文件、268 个用例通过；TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Memory 索引维护候选/持久化与混合召回编排边界。
+
+### P2-1 进展记录（2026-07-14，第三十五批）
+
+- 新增 `electron/memory/memoryIndexQueue.ts`，统一管理 tag、embedding、KG 三类待索引 rowid、去重、顺序消费和 maintenance kick；`enqueueAll` 保证新建、更新、合并与冲突处理不会漏掉某一类索引。无效、零或负 rowid 会直接忽略，修复旧 `clampInt(..., min=1)` 可能把 0 错误夹成 rowid=1 入队的问题。
+- 新增 `electron/memory/memoryTagIndex.ts`，集中管理英文/数字关键词、中文 4/3/2-gram、停用词、数量上限、pending 候选、历史缺索引扫描、事务清理与 `tag/memory_tag` 写入；`MemoryService.runTagMaintenance` 现在只做委托，混合召回继续复用同一 tag 提取函数。
+- Tag 候选兜底扫描会排除本批 pending rowid，避免同一记忆被重复清空/写入并重复计入 scanned；英文关键词在 Unicode 兜底阶段统一小写，修复 `alpha` 与 `Alpha/ALPHA` 同时落库的重复标签噪声。
+- 新增 3 个索引队列测试和 3 个 Tag 维护测试，覆盖三队列隔离、顺序/去重/kick、无效 rowid、禁用时保留 pending、pending 重建、事务时间戳、删除行过滤、批次唯一候选，以及英文大小写和中文 n-gram 提取。
+- 打包 IPC smoke 创建 `IPC CamelCaseMarker maintenance memory`，等待真实后台 debounce 队列完成索引，再由 tag 召回层命中并直接读取生产 SQLite；结果 tag hits=2，目标记忆返回，落库标签仅为 `camelcasemarker/ipc/maintenance/memory`，没有混合大小写重复项。
+- `memoryService.ts` 从第三十四批后的 2915 行降至 2728 行；`npm test` 共 61 个测试文件、274 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批沿用统一队列继续拆分 Vector 索引候选/持久化，然后进入 KG 抽取与图谱写入边界。
 
 ## 14. P2-2：前端加载与运行性能
 

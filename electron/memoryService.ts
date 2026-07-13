@@ -5,6 +5,8 @@ import {
   hashMemoryEmbeddingInput,
   resolveMemoryEmbeddingConfig,
 } from './memory/memoryEmbeddingClient'
+import { MemoryIndexQueue } from './memory/memoryIndexQueue'
+import { MemoryTagIndexMaintainer, extractMemoryTags } from './memory/memoryTagIndex'
 import { MemoryVectorSearchClient } from './memory/memoryVectorSearchClient'
 import type {
   AISettings,
@@ -162,79 +164,6 @@ function extractJsonObject(text: string): Record<string, unknown> | null {
   return null
 }
 
-function extractTagsFromText(textRaw: string, opts?: { maxTags?: number }): string[] {
-  const maxTags = clampInt(opts?.maxTags, 24, 4, 80)
-  const text = normalizeMemoryText(textRaw)
-    .replace(/[，。！？；：,.!?;:、【】「」『』（）()《》<>“”"']/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  if (!text) return []
-
-  const tags: string[] = []
-  const seen = new Set<string>()
-
-  const stop = new Set([
-    '我',
-    '你',
-    '他',
-    '她',
-    '它',
-    '我们',
-    '你们',
-    '他们',
-    '这是',
-    '那个',
-    '这个',
-    '什么',
-    '怎么',
-    '为什么',
-    '是否',
-    '还是',
-    '记得',
-    '还记得',
-    '能不能',
-    '可以吗',
-  ])
-
-  const push = (t: string) => {
-    const tag = t.trim()
-    if (tag.length < 2) return
-    if (tag.length > 40) return
-    if (stop.has(tag)) return
-    if (seen.has(tag)) return
-    seen.add(tag)
-    tags.push(tag)
-  }
-
-  // 英文/数字关键词
-  for (const m of text.matchAll(/[A-Za-z0-9_]{2,}/g)) {
-    push(m[0].toLowerCase())
-    if (tags.length >= maxTags) return tags
-  }
-
-  // 中文（Han）用 n-gram 提升“截句/换说法”命中
-  for (const m of text.matchAll(/[\p{Script=Han}]{2,}/gu)) {
-    const chunk = m[0]
-    const chars = Array.from(chunk).slice(0, 32)
-    for (const n of [4, 3, 2]) {
-      if (chars.length < n) continue
-      for (let i = 0; i <= chars.length - n; i++) {
-        push(chars.slice(i, i + n).join(''))
-        if (tags.length >= maxTags) return tags
-      }
-    }
-  }
-
-  // 兜底：其他字母/数字连续片段
-  for (const m of text.matchAll(/[\p{L}\p{N}]{2,}/gu)) {
-    push(m[0])
-    if (tags.length >= maxTags) return tags
-  }
-
-  return tags
-}
-
 function extractKeyValue(textRaw: string): { key: string; value: string } | null {
   const text = normalizeMemoryText(textRaw)
   if (!text) return null
@@ -378,16 +307,16 @@ function formatTs(ts: number): string {
 
 export class MemoryService {
   private db: MemoryDatabaseHandle
-  private pendingTagRowids = new Set<number>()
-  private pendingEmbeddingRowids = new Set<number>()
-  private pendingKgRowids = new Set<number>()
+  private indexQueue = new MemoryIndexQueue()
   private embeddingClient = new MemoryEmbeddingClient()
   private chatIngestRedirect = new Map<string, number>()
+  private tagIndexMaintainer: MemoryTagIndexMaintainer
   private vectorSearchClient: MemoryVectorSearchClient
 
   constructor(userDataDir: string) {
     const opened = openMemoryDatabase(userDataDir)
     this.db = opened.db
+    this.tagIndexMaintainer = new MemoryTagIndexMaintainer(opened.db, this.indexQueue)
     this.vectorSearchClient = new MemoryVectorSearchClient(opened.dbPath)
   }
 
@@ -594,42 +523,9 @@ export class MemoryService {
     return best
   }
 
-  private takePending(set: Set<number>, limit: number): number[] {
-    const out: number[] = []
-    for (const v of set) {
-      out.push(v)
-      set.delete(v)
-      if (out.length >= limit) break
-    }
-    return out
-  }
-
-  private maintenanceKick: (() => void) | null = null
-
   /** 注册"有新索引工作入队"的通知回调（debounce 由调用方负责） */
   setMaintenanceKick(cb: (() => void) | null): void {
-    this.maintenanceKick = cb
-  }
-
-  private enqueueTagIndex(rowid: number): void {
-    const id = clampInt(rowid, 0, 1, 2_000_000_000)
-    if (id <= 0) return
-    this.pendingTagRowids.add(id)
-    this.maintenanceKick?.()
-  }
-
-  private enqueueEmbeddingIndex(rowid: number): void {
-    const id = clampInt(rowid, 0, 1, 2_000_000_000)
-    if (id <= 0) return
-    this.pendingEmbeddingRowids.add(id)
-    this.maintenanceKick?.()
-  }
-
-  private enqueueKgIndex(rowid: number): void {
-    const id = clampInt(rowid, 0, 1, 2_000_000_000)
-    if (id <= 0) return
-    this.pendingKgRowids.add(id)
-    this.maintenanceKick?.()
+    this.indexQueue.setKick(cb)
   }
 
   private getMemoryByRowid(rowid: number): MemoryRecord | null {
@@ -856,9 +752,7 @@ export class MemoryService {
         } catch {
           /* ignore */
         }
-        this.enqueueTagIndex(redirected)
-        this.enqueueEmbeddingIndex(redirected)
-        this.enqueueKgIndex(redirected)
+        this.indexQueue.enqueueAll(redirected)
         return
       }
     }
@@ -962,9 +856,7 @@ export class MemoryService {
             /* ignore */
           }
 
-          this.enqueueTagIndex(dup.rowid)
-          this.enqueueEmbeddingIndex(dup.rowid)
-          this.enqueueKgIndex(dup.rowid)
+          this.indexQueue.enqueueAll(dup.rowid)
           return
         }
       } catch {
@@ -972,82 +864,11 @@ export class MemoryService {
       }
     }
 
-    this.enqueueTagIndex(rowid)
-    this.enqueueEmbeddingIndex(rowid)
-    this.enqueueKgIndex(rowid)
+    this.indexQueue.enqueueAll(rowid)
   }
 
   runTagMaintenance(settings: MemorySettings, opts?: { batchSize?: number }): { scanned: number; updated: number } {
-    const tagEnabled = settings.tagEnabled ?? true
-    if (!tagEnabled) return { scanned: 0, updated: 0 }
-
-    const batchSize = clampInt(opts?.batchSize, 80, 10, 500)
-    const picked = this.takePending(this.pendingTagRowids, batchSize)
-
-    type Row = { rowid: number; content: string }
-    const rows: Row[] = []
-
-    if (picked.length > 0) {
-      const placeholders = picked.map(() => '?').join(',')
-      const found = this.db
-        .prepare(
-          `
-          SELECT rowid as rowid, content as content
-          FROM memory
-          WHERE rowid IN (${placeholders})
-            AND COALESCE(status, 'active') <> 'deleted'
-            AND LENGTH(TRIM(content)) >= 2
-          `,
-        )
-        .all(...picked) as Row[]
-      rows.push(...found)
-    }
-
-    const remaining = batchSize - rows.length
-    if (remaining > 0) {
-      const more = this.db
-        .prepare(
-          `
-          SELECT m.rowid as rowid, m.content as content
-          FROM memory m
-          LEFT JOIN memory_tag mt ON mt.memory_rowid = m.rowid
-          WHERE mt.memory_rowid IS NULL
-            AND COALESCE(m.status, 'active') <> 'deleted'
-            AND LENGTH(TRIM(m.content)) >= 2
-          ORDER BY m.updated_at DESC, m.rowid DESC
-          LIMIT ?
-          `,
-        )
-        .all(remaining) as Row[]
-      rows.push(...more)
-    }
-
-    if (rows.length === 0) return { scanned: 0, updated: 0 }
-
-    const ts = now()
-    const insertTag = this.db.prepare('INSERT INTO tag(name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING')
-    const getTag = this.db.prepare('SELECT id as id FROM tag WHERE name = ? LIMIT 1')
-    const clear = this.db.prepare('DELETE FROM memory_tag WHERE memory_rowid = ?')
-    const insertRel = this.db.prepare(
-      'INSERT OR IGNORE INTO memory_tag(memory_rowid, tag_id, created_at) VALUES (?, ?, ?)',
-    )
-
-    const tx = this.db.transaction((items: Row[]) => {
-      for (const r of items) {
-        const tags = extractTagsFromText(r.content, { maxTags: 24 })
-        const finalTags = tags.length ? tags : ['__no_tag__']
-        clear.run(r.rowid)
-        for (const name of finalTags) {
-          insertTag.run(name, ts)
-          const idRow = getTag.get(name) as { id?: number } | undefined
-          const tagId = clampInt(idRow?.id, 0, 1, 2_000_000_000)
-          if (tagId > 0) insertRel.run(r.rowid, tagId, ts)
-        }
-      }
-    })
-
-    tx(rows)
-    return { scanned: rows.length, updated: rows.length }
+    return this.tagIndexMaintainer.run(settings, opts)
   }
 
   async runVectorEmbeddingMaintenance(
@@ -1068,7 +889,7 @@ export class MemoryService {
     }
 
     const batchSize = clampInt(opts?.batchSize, 8, 1, 64)
-    const pending = this.takePending(this.pendingEmbeddingRowids, batchSize)
+    const pending = this.indexQueue.take('embedding', batchSize)
 
     type Candidate = {
       rowid: number
@@ -1209,7 +1030,7 @@ export class MemoryService {
     }
 
     const batchSize = clampInt(opts?.batchSize, 2, 1, 10)
-    const picked = this.takePending(this.pendingKgRowids, batchSize)
+    const picked = this.indexQueue.take('kg', batchSize)
 
     type Row = {
       rowid: number
@@ -1885,9 +1706,7 @@ export class MemoryService {
 
             const updated = this.getMemoryByRowid(dup.rowid)
             if (!updated) throw new Error('重复合并命中，但记录不存在')
-            this.enqueueTagIndex(updated.rowid)
-            this.enqueueEmbeddingIndex(updated.rowid)
-            this.enqueueKgIndex(updated.rowid)
+            this.indexQueue.enqueueAll(updated.rowid)
             return updated
           }
         }
@@ -1916,9 +1735,7 @@ export class MemoryService {
     }
 
     // 后台索引：避免阻塞 UI
-    this.enqueueTagIndex(row.rowid)
-    this.enqueueEmbeddingIndex(row.rowid)
-    this.enqueueKgIndex(row.rowid)
+    this.indexQueue.enqueueAll(row.rowid)
     return row
   }
 
@@ -1958,9 +1775,7 @@ export class MemoryService {
     if (!updated) throw new Error('记录不存在')
 
     // 后台索引：内容变更后需要更新 tags / embedding
-    this.enqueueTagIndex(updated.rowid)
-    this.enqueueEmbeddingIndex(updated.rowid)
-    this.enqueueKgIndex(updated.rowid)
+    this.indexQueue.enqueueAll(updated.rowid)
     return updated
   }
 
@@ -2274,9 +2089,7 @@ export class MemoryService {
       if (createdRowid <= 0) throw new Error('新增候选记忆失败')
 
       // 后台索引：新建记忆需要补齐 tags / embedding
-      this.enqueueTagIndex(createdRowid)
-      this.enqueueEmbeddingIndex(createdRowid)
-      this.enqueueKgIndex(createdRowid)
+      this.indexQueue.enqueueAll(createdRowid)
       return finalize('resolved', 'keepBoth', { createdRowid })
     }
 
@@ -2615,7 +2428,7 @@ export class MemoryService {
     // M5：Tag 网络召回（本地，解决“截句/外壳词/换说法”）
     const tagEnabled = memSettings.tagEnabled ?? true
     const tagMaxExpand = clampInt(memSettings.tagMaxExpand, 6, 0, 40)
-    const queryTags = tagEnabled ? extractTagsFromText(query, { maxTags: 12 }) : []
+    const queryTags = tagEnabled ? extractMemoryTags(query, { maxTags: 12 }) : []
     const baseTagNames = queryTags.filter((t) => t && !t.startsWith('__')).slice(0, 12)
 
     let allTagIds: number[] = []
