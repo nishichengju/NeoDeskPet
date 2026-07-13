@@ -343,6 +343,77 @@ try {
   assert(ttsEnqueueRelay.utteranceId === 'ipc-tts-relay', 'Chat to Pet TTS relay failed')
   assert(ttsSegmentRelay.utteranceId === 'ipc-tts-relay', 'Pet to Chat TTS relay failed')
 
+  const petPresentationPromise = pet.evaluate(() => new Promise((resolve, reject) => {
+    const state = { expression: '', bubble: '', preview: null, compose: null }
+    const timeout = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('Presentation relay timed out'))
+    }, 10_000)
+    const maybeDone = () => {
+      if (!state.expression || !state.bubble || !state.preview || !state.compose) return
+      cleanup()
+      resolve(state)
+    }
+    const cleanup = () => {
+      window.clearTimeout(timeout)
+      offExpression()
+      offBubble()
+      offPreview()
+      offCompose()
+    }
+    const offExpression = window.neoDeskPet.onLive2dExpression((value) => {
+      state.expression = value
+      maybeDone()
+    })
+    const offBubble = window.neoDeskPet.onBubbleMessage((value) => {
+      state.bubble = value
+      maybeDone()
+    })
+    const offPreview = window.neoDeskPet.onBubblePreview((value) => {
+      state.preview = value
+      maybeDone()
+    })
+    const offCompose = window.neoDeskPet.onAsrComposePreview((value) => {
+      state.compose = value
+      maybeDone()
+    })
+  }))
+  await chat.evaluate(() => {
+    window.neoDeskPet.triggerExpression('ipc-expression')
+    window.neoDeskPet.sendBubbleMessage('ipc bubble')
+    window.neoDeskPet.sendBubblePreview({ text: 'ipc preview', placeholder: true, autoHideDelay: 321.9 })
+    window.neoDeskPet.syncAsrComposePreview({ baseText: 'ipc compose', clearFinals: true })
+  })
+  const presentationRelay = await petPresentationPromise
+
+  const chatAsrPromise = chat.evaluate(() => new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      off()
+      reject(new Error('ASR transcript relay timed out'))
+    }, 10_000)
+    const off = window.neoDeskPet.onAsrTranscript((text) => {
+      window.clearTimeout(timeout)
+      off()
+      resolve(text)
+    })
+    window.neoDeskPet.notifyAsrTranscriptReady()
+  }))
+  await pet.evaluate(() => {
+    window.neoDeskPet.reportLive2dCapabilities({
+      modelJsonUrl: 'file:///ipc/model.json',
+      updatedAt: Date.now(),
+      parameters: [{ id: 'ParamAngleX', min: -30, max: 30, def: 0 }],
+    })
+    window.neoDeskPet.reportAsrTranscript('ipc transcript')
+  })
+  const asrTranscriptRelay = await chatAsrPromise
+
+  assert(presentationRelay.expression === 'ipc-expression', 'Live2D expression relay failed')
+  assert(presentationRelay.bubble === 'ipc bubble', 'Bubble message relay failed')
+  assert(presentationRelay.preview?.text === 'ipc preview' && presentationRelay.preview?.autoHideDelay === 321, 'Bubble preview normalization failed')
+  assert(presentationRelay.compose?.baseText === 'ipc compose' && presentationRelay.compose?.clearFinals === true, 'ASR compose preview relay failed')
+  assert(asrTranscriptRelay === 'ipc transcript', 'ASR transcript relay failed')
+
   const chatPersistenceBeforeRestart = await chat.evaluate(async () => {
     const created = await window.neoDeskPet.createChatSession('IPC Smoke Session', 'default')
     await window.neoDeskPet.setCurrentChatSession(created.id)
@@ -640,6 +711,11 @@ try {
       requests: ttsRequests,
       chatToPetRelay: ttsEnqueueRelay,
       petToChatRelay: ttsSegmentRelay,
+    },
+    presentationRelay: {
+      ...presentationRelay,
+      asrTranscript: asrTranscriptRelay,
+      capabilitiesAccepted: true,
     },
     runtimeErrors,
     aiProxy: {

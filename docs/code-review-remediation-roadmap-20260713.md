@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第六批：Settings、Chat、Task、Memory 与 TTS IPC 已拆分）
+- 状态：P2-1 进行中（第七批：Settings、Chat、Task、Memory、TTS 与 Presentation IPC 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -588,6 +588,15 @@ AI 与能力
 - 新增 5 个 TTS IPC 测试，覆盖 11 个通道、选项目录回退、URL 边界、JSON/二进制响应契约、流分块/取消以及双向窗口转发。
 - 打包 IPC smoke 新增真实本地 TTS 假服务，验证 JSON 权重端点、音频 ArrayBuffer、分块流、非法路径拒绝、Chat → Pet enqueue 与 Pet → Chat segmentStarted 转发。
 - `npm test` 共 101 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
+
+### P2-1 进展记录（2026-07-13，第七批）
+
+- 将 9 个 Live2D、Bubble 与 ASR 转发通道迁移到 `electron/ipc/registerPresentationIpc.ts`，统一桌宠与 Chat 间的表情、动作、气泡、识别文本和输入基线同步。
+- `PresentationIpcService` 接管 ASR 待处理文本和 Chat renderer 就绪标记：窗口未就绪时继续排队，auto-send 可按原逻辑静默创建 Chat，renderer 报告就绪后直接投递。
+- 气泡 preview 继续只透传白名单字段，并对 `autoHideDelay` 执行有限数值与整数归一化；Live2D capabilities 拒绝仍记录警告，不影响窗口运行。
+- `electron/main.ts` 从第六批后的 1766 行降至 1661 行；相较 P2-1 开始时累计减少 1082 行。
+- 新增 5 个 Presentation IPC 测试，覆盖 9 通道、Live2D 能力报告、气泡归一化、ASR 排队/清空/就绪直发、错误 sender 和 auto-send 隐藏窗口创建。
+- 打包 IPC smoke 新增 Live2D 表情、气泡消息/preview、ASR compose preview、capabilities 上报和 ASR transcript 双向转发；`npm test` 共 106 个用例通过，其余构建与 smoke 门禁全部通过。
 
 ## 14. P2-2：前端加载与运行性能
 

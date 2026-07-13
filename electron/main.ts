@@ -73,6 +73,7 @@ import { ChatAttachmentIpcService } from './ipc/registerChatAttachmentIpc'
 import { registerTaskIpc } from './ipc/registerTaskIpc'
 import { registerMemoryIpc } from './ipc/registerMemoryIpc'
 import { TtsIpcService } from './ipc/registerTtsIpc'
+import { PresentationIpcService } from './ipc/registerPresentationIpc'
 
 const APP_ID = 'io.github.nishichengju.neodeskpet'
 app.setName('NeoDeskPet')
@@ -411,8 +412,6 @@ function startLive2dMouseTrackingPump(): void {
 }
 
 let registeredAsrHotkey: string | null = null
-let pendingAsrTranscript: string[] = []
-let asrTranscriptReadyWebContentsId: number | null = null
 let lastContextUsage: ContextUsageSnapshot | null = null
 
 const OPEN_TYPELESS_MANAGED_ASR_SCRIPT_DIR = path.join(process.env.APP_ROOT, 'OpenTypeless-main')
@@ -1032,117 +1031,13 @@ function registerIpc() {
 
   registerMemoryIpc({ handle: handleIpc, getMemoryService: () => memoryService, getSettings })
   ttsIpc.register(handleIpc, onIpc)
-
-  // Live2D expression/motion triggers - broadcast to pet window
-  onIpc('live2d:triggerExpression', (_event, expressionName: string) => {
-    const petWin = windowManager.getPetWindow()
-    if (petWin && !petWin.isDestroyed()) {
-      petWin.webContents.send('live2d:expression', expressionName)
-    }
-  })
-
-  onIpc('live2d:triggerMotion', (_event, motionGroup: string, index: number) => {
-    const petWin = windowManager.getPetWindow()
-    if (petWin && !petWin.isDestroyed()) {
-      petWin.webContents.send('live2d:motion', motionGroup, index)
-    }
-  })
-
-  // Live2D capabilities - report from pet window (for tools/agent)
-  onIpc('live2d:capabilities', (_event, payload: unknown) => {
-    const res = setLive2dCapabilitiesFromRenderer(payload)
-    if (!res.ok) {
-      console.warn('[Live2D] capabilities report rejected:', res.error)
-    }
-  })
-
-  // Bubble message - forward from chat window to pet window
-  onIpc('bubble:sendMessage', (_event, message: string) => {
-    const petWin = windowManager.getPetWindow()
-    if (petWin && !petWin.isDestroyed()) {
-      petWin.webContents.send('bubble:message', message)
-    }
-  })
-
-  // Bubble preview (chat -> pet): 仅用于实时可视化占位/流式文本，不触发 TTS。
-  onIpc('bubble:preview', (_event, payload: unknown) => {
-    const petWin = windowManager.getPetWindow()
-    if (!petWin || petWin.isDestroyed()) return
-
-    const obj = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
-    const text = typeof obj.text === 'string' ? obj.text : ''
-    const clear = obj.clear === true
-    const placeholder = obj.placeholder === true
-    const pinPrevious = obj.pinPrevious === true
-    const autoHideDelay =
-      typeof obj.autoHideDelay === 'number' && Number.isFinite(obj.autoHideDelay) ? Math.trunc(obj.autoHideDelay) : undefined
-
-    petWin.webContents.send('bubble:preview', {
-      ...(text ? { text } : {}),
-      ...(clear ? { clear: true } : {}),
-      ...(placeholder ? { placeholder: true } : {}),
-      ...(pinPrevious ? { pinPrevious: true } : {}),
-      ...(typeof autoHideDelay === 'number' ? { autoHideDelay } : {}),
-    })
-  })
-
-  // ASR 文本转发：从桌宠窗口发往聊天窗口（手动模式也会使用）。
-  onIpc('asr:reportTranscript', (_event, text: string) => {
-    const cleaned = String(text ?? '').trim()
-    if (!cleaned) return
-
-    const settings = getSettings()
-    const asr = settings.asr
-    const autoSend = Boolean(asr?.enabled && asr?.autoSend)
-
-    let chatWin = windowManager.getChatWindow()
-    if (autoSend && !chatWin) {
-      chatWin = windowManager.ensureChatWindow({ show: false, focus: false })
-    }
-
-    const chatWc = chatWin && !chatWin.isDestroyed() ? chatWin.webContents : null
-    if (chatWc?.isLoading()) {
-      asrTranscriptReadyWebContentsId = null
-    }
-
-    const canSendNow = Boolean(
-      chatWin &&
-        !chatWin.isDestroyed() &&
-        chatWc &&
-        !chatWc.isLoading() &&
-        asrTranscriptReadyWebContentsId === chatWc.id,
-    )
-    if (canSendNow) {
-      chatWin?.webContents.send('asr:transcript', cleaned)
-      return
-    }
-
-    pendingAsrTranscript.push(cleaned)
-  })
-
-  handleIpc('asr:takeTranscript', () => {
-    const text = pendingAsrTranscript.join(' ').trim()
-    pendingAsrTranscript = []
-    return text
-  })
-
-  onIpc('asr:transcriptReady', (event) => {
-    const chatWin = windowManager.getChatWindow()
-    if (!chatWin || chatWin.isDestroyed()) return
-    if (event.sender.id !== chatWin.webContents.id) return
-    asrTranscriptReadyWebContentsId = event.sender.id
-  })
-
-  // Chat -> Pet: sync current ASR compose baseline (used to keep subtitle accumulation aligned with chat input edits)
-  onIpc('asr:composePreviewSync', (_event, payload: unknown) => {
-    const petWin = windowManager.getPetWindow()
-    if (!petWin || petWin.isDestroyed()) return
-
-    const obj = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
-    const baseText = typeof obj.baseText === 'string' ? obj.baseText : ''
-    const clearFinals = obj.clearFinals === true
-    petWin.webContents.send('asr:composePreviewSync', { baseText, clearFinals })
-  })
+  new PresentationIpcService({
+    handle: handleIpc,
+    onIpc,
+    windowManager,
+    getSettings,
+    setLive2dCapabilities: setLive2dCapabilitiesFromRenderer,
+  }).register()
 
   handleIpc('window:openChat', () => {
     windowManager.ensureChatWindow()

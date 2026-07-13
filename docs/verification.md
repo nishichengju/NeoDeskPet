@@ -155,3 +155,22 @@
 | `git diff --check` | 通过 |
 
 本批未修改 renderer、preload API、IPC 权限矩阵、TTS 请求协议或设置结构。P2-1 的 `electron/main.ts` IPC 拆分下一批仅剩 Window/Live2D/ASR/Orb 等窗口协调通道的边界整理。
+
+## P2-1：大型模块拆分与领域边界（第七批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Live2D、Bubble 与 ASR Presentation IPC
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 28 个测试文件、106 个用例通过 |
+| Presentation IPC 行为测试 | 9 通道、Live2D 报告、气泡归一化、ASR 排队/就绪/auto-send 和错误 sender 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 表情、气泡、preview、ASR compose/transcript 与 capabilities 上报通过，五类窗口无运行时错误 |
+| `npm run media:smoke` | 路径拒绝、opaque URL、Range 206 与删除后 404 通过 |
+| `npm run ui:baseline` | 13 个场景通过 |
+| `git diff --check` | 通过 |
+
+本批未修改 renderer、preload API、IPC 权限矩阵、ASR 设置或 Live2D 数据契约。P2-1 下一批继续拆分 Window/Orb/Drag/Pet 菜单与点击穿透协调逻辑。
