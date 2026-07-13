@@ -12,6 +12,7 @@ import type {
   Persona,
   PersonaSummary,
 } from '../../electron/types'
+import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { getApi } from '../neoDeskPetApi'
 import { getAIService, type ChatMessage } from '../services/aiService'
 
@@ -416,17 +417,8 @@ export function MemoryConsoleWindow(props: Props) {
     void fetchConflicts()
   }, [fetchConflicts])
 
-  useEffect(() => {
-    if (!autoRefresh) return
-    const t = setInterval(() => void fetchList(offset), 1500)
-    return () => clearInterval(t)
-  }, [autoRefresh, fetchList, offset])
-
-  useEffect(() => {
-    if (!autoRefresh) return
-    const t = setInterval(() => void fetchConflicts(), 2000)
-    return () => clearInterval(t)
-  }, [autoRefresh, fetchConflicts])
+  useVisibleInterval(() => void fetchList(offset), 1500, autoRefresh)
+  useVisibleInterval(() => void fetchConflicts(), 2000, autoRefresh)
 
   const activeMemory = useMemo(() => {
     if (!activeRowid) return null

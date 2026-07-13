@@ -1105,3 +1105,26 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-default-720x620-scale100.png` 与 `artifacts/ui-baseline/orb-panel-content-560x720-scale100.png`。本批未修改 Markdown 解析规则、链接安全属性、`<think>` 折叠语义、消息 block/附件顺序、Chat/Orb 持久化结构、preload/API 契约或工具卡行为；只把重量级解析器放到浏览器动态边界之后。加载期间会短暂显示原始 Markdown 标记，但文本、换行和长词折行保持可读，chunk 完成后替换为原 `MarkdownMessage` 输出。当前尚未采集低速磁盘或冷缓存环境下 fallback 的可见时长，也未对超长会话进行虚拟化；下一批继续评估长列表与隐藏窗口运行成本。
+
+## P2-2：前端加载与运行性能（第五十三批）
+
+- 验证日期：2026-07-14
+- 优化范围：Memory Console 自动刷新与 Orb 运行工具时长在隐藏窗口中的轮询暂停和恢复同步
+
+| 检查 | 结果 |
+| --- | --- |
+| 可见性 interval 聚焦测试 | 2 个测试文件、5 个用例通过；共享调度器覆盖可见计时、隐藏暂停、恢复立即刷新、初始隐藏、卸载清理，Orb 固定时长渲染无回归 |
+| Renderer bundle | 共享 `useVisibleInterval` chunk 0.77 kB；Memory Console 30.94 kB、Orb 49.74 kB、renderer 主 chunk 146.30 kB |
+| `npm test` | 80 个测试文件、344 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，可见性 hook、Memory/Orb 动态 chunk、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Pet/Chat/Settings/Memory/Orb preload 与运行正常，五类窗口 `runtimeErrors` 全为空；聊天/任务/Memory/Agent/MCP/TTS/ASR、权限、持久化与重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 22 个场景通过；0 failure、0 console error、无横向或纵向溢出，既有路由与 Markdown 资源门禁继续通过 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png` 与 `artifacts/ui-baseline/orb-panel-content-560x720-scale100.png`。本批未修改自动刷新周期、Memory 查询参数与 loading 防重入、手动刷新、工具卡文案/状态/展开行为或完成时长计算；只改变周期任务在页面不可见时的生命周期。纯调度测试以可控时钟和可见性源证明隐藏期间没有 callback，恢复时立即调用并重新计时；浏览器和 packaged smoke 证明接入后没有渲染或运行错误。当前自动化尚未驱动真实 Windows 最小化/恢复并采集 IPC 调用计数，也未覆盖操作系统休眠后恢复的计时偏差；超长 Chat/Orb 会话列表仍未窗口化。

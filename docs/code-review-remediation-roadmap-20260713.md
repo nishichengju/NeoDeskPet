@@ -1019,6 +1019,14 @@ AI 与能力
 - 新增独立 Markdown 组件测试，覆盖 GFM 粗体、任务列表、安全外链与 `<think>` 折叠块；Chat/Orb 静态视图测试改为验证 fallback 文本、标记和内容顺序，不再把 Markdown 解析职责重复绑定到上层视图。
 - `npm test` 共 79 个测试文件、342 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过；基线为 0 failure、0 console error、无横向或纵向溢出。下一批继续评估超长消息列表虚拟化与隐藏窗口轮询暂停，优先选择可建立稳定运行时门禁的边界。
 
+第五十三批进展（2026-07-14）：
+
+- 新增 `src/hooks/useVisibleInterval.ts`，统一封装页面可见性感知的 interval 生命周期：页面隐藏时清除定时器，恢复可见时立即同步一次并重新计时，卸载时同时移除 timer 与 `visibilitychange` 订阅；回调通过 ref 更新，业务状态变化不再反复重建 interval。
+- Memory Console 的列表 1.5 秒自动刷新和冲突 2 秒自动刷新改用可见性 interval；自动刷新关闭或窗口隐藏时均不再轮询，恢复可见后立即拉取当前筛选条件下的数据。原有首次加载、手动刷新、筛选、分页、编辑焦点恢复和 loading 防重入保持不变。
+- Orb 运行中工具卡的 1 秒执行时长更新接入同一机制；隐藏窗口不再为每张运行卡持续触发 React state 更新，恢复可见时先用当前时间补齐显示，再继续按秒刷新。完成或失败的固定时长仍然不创建 interval。
+- 新增 2 个可见性调度测试，覆盖可见计时、隐藏暂停、恢复立即刷新、初始隐藏不启动、卸载清理与订阅移除；共享 hook 构建为 0.77 kB chunk，Memory Console 为 30.94 kB，Orb 为 49.74 kB，renderer 主 chunk 为 146.30 kB。
+- `npm test` 共 80 个测试文件、344 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过；基线为 0 failure、0 console error、无横向或纵向溢出。下一批继续评估超长 Chat/Orb 消息列表的渲染成本与可验证的窗口化方案。
+
 ## 15. P2-3：无障碍与交互一致性
 
 ### 实施步骤

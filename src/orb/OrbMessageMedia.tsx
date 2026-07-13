@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import {
   formatDurationMs,
   getImageFallback,
@@ -14,11 +15,7 @@ export function ToolUseDuration(props: { startedAt: number; endedAt: number | nu
   const isRunning = startedAt > 0 && endedAt == null
   const [now, setNow] = useState(() => Date.now())
 
-  useEffect(() => {
-    if (!isRunning) return
-    const id = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [isRunning])
+  useVisibleInterval(() => setNow(Date.now()), 1000, isRunning)
 
   const durationText = startedAt > 0 ? formatDurationMs(Math.max(0, (endedAt ?? now) - startedAt)) : ''
   if (!durationText) return null
