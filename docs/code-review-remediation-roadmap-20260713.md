@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第四十批：Memory 版本回滚、冲突处理与事务边界已拆分）
+- 状态：P2-1 进行中（第四十一批：Memory persona、目录管理与保留度维护已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -899,6 +899,16 @@ AI 与能力
 - 新增 6 个 Node SQLite revision 测试，覆盖非法/no-op/真实编辑、版本 limit 与回滚审计、persona/shared/status/分页过滤、ignore/accept/默认 merge、keepBoth 元数据边界，以及 conflict finalize 触发器失败后的正文/版本/状态/索引完整回滚。
 - 打包 IPC smoke 继续通过真实 `updateMemory`、versionCount=1、手工记忆 CRUD、旧库迁移、FTS/Tag/Vector/KG 索引与召回；`memoryService.ts` 从 890 行降至 605 行，renderer、preload、Memory schema、设置字段和界面均未改变。
 - `npm test` 共 67 个测试文件、302 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 persona 管理、Memory 列表/过滤/排序、批量元数据、删除和保留度维护边界，完成 `MemoryService` 领域收口。
+
+第四十一批进展（2026-07-14）：
+
+- 新增 `electron/memory/memoryPersonaStore.ts`，统一 persona 列表、读取、创建、部分更新、SQLite 布尔归一化和默认 persona 删除保护；时间与 UUID 可注入，聊天采集和召回继续通过 `MemoryService.getPersona` 使用同一 store。
+- 新增 `electron/memory/memoryCatalog.ts`，集中管理 persona/shared、role、status、pinned、source、memoryType、LIKE query 过滤，置顶/状态/字段排序，实时保留度展示，单条/批量/按过滤器元数据更新，以及单条/批量/按过滤器硬删除。
+- catalog 将所有单条与批量 rowid 规范化下界统一改为 0，并显式过滤非正值，修复旧 `updateMemoryMeta({rowid:0})`、`deleteMemory({rowid:0})` 和批量 `[0,...]` 可能误命中 rowid=1 的问题；合法 rowid 去重、deleted 行不可元数据编辑和原有过滤语义保持不变。
+- 新增 `electron/memory/memoryRetention.ts`，集中管理 idle 候选、实时保留度计算、置顶恢复 active、低保留度归档、0.02 写入阈值和整批事务更新；`MemoryService.runRetentionMaintenance` 现在只做委托。
+- 新增 4 个 persona、5 个 catalog 和 3 个 retention 测试，共 12 个 Node SQLite 用例，覆盖 CRUD/布尔值、组合过滤与排序、动态 retention、元数据边界、非法 rowid、批量/过滤删除、归档/置顶恢复、无变化跳过和批处理失败回滚。
+- 打包 IPC smoke 继续通过 persona 创建/更新/删除、Memory list/update/meta/delete、版本、旧库迁移、FTS/Tag/Vector/KG 索引与召回；`memoryService.ts` 从 605 行降至 220 行，数据库生命周期和各领域对象接线之外不再直接持有业务 SQL。
+- `npm test` 共 70 个测试文件、314 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。Memory 子系统领域收口完成；P2-1 下一批转入 `OrbApp.tsx`，先审计现有 Ball/Bar/Panel、历史、图片查看器与消息操作边界，再按风险选择下一处拆分。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -840,3 +840,26 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`、`artifacts/ui-baseline/chat-default-720x620-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、SQLite schema、冲突字段含义、版本 reason/source 格式、索引队列种类或界面样式。Node SQLite 聚焦测试验证所有 revision 数据结果，并通过故意让 conflict finalize 失败证明正文更新、版本插入和冲突状态会一起回滚；打包 smoke 使用生产 `better-sqlite3` 验证真实更新与版本记录继续闭环。打包 smoke 尚未预置真实 `memory_conflict` 行逐项调用四种 IPC 动作，事务故障注入也只在 Node SQLite 适配器中执行；高并发冲突解决、重复处理同一 conflict 和极大版本历史查询仍需后续集成/性能回归。persona 管理、列表过滤、批量元数据、删除和保留度维护仍由 `MemoryService` 直接持有，下一批继续收口。
+
+## P2-1：大型模块拆分与领域边界（第四十一批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Memory persona CRUD、目录过滤/排序/批量管理/删除与保留度维护
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 70 个测试文件、314 个用例通过 |
+| Memory Persona Store 测试 | 4 个用例通过：列表/布尔归一化、命名/默认名创建、部分更新与空名称保留、默认 persona 保护/自定义删除 |
+| Memory Catalog 测试 | 5 个用例通过：组合过滤、置顶/状态排序与动态 retention、单条元数据边界、批量/过滤更新、非法 rowid 与显式/过滤删除 |
+| Memory Retention 测试 | 3 个用例通过：弱旧记忆归档/置顶恢复/deleted 跳过、无变化跳过、批次中途失败完整回滚 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功 |
+| `npm run ipc:smoke` | 真实 persona/Memory CRUD、`update=true`、metadata updated=1、versionCount=1、deleteMemory/deletePersona、旧库 FTS、Tag/Vector/KG 索引与召回及其余主流程全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；0 failure、0 console error、无横向或纵向溢出，Memory、Settings 与 Chat 截图无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`、`artifacts/ui-baseline/chat-default-720x620-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、SQLite schema、过滤器字段含义、排序优先级、保留度公式或界面样式。Node SQLite 聚焦测试直接覆盖 persona、目录和 maintenance SQL，并通过非法 rowid 断言确认 rowid=1 不再被误更新/误删除；打包 smoke 使用生产 `better-sqlite3` 验证真实 persona 与 Memory 管理闭环。组合过滤仍使用现有 `%query%` LIKE 语义，未引入通配符转义或全文索引；极大目录的 COUNT+分页延迟、数千条批量元数据/删除以及长期 retention 批次吞吐尚未建立性能基线。`MemoryService` 已收口为数据库和领域对象生命周期/委托层，P2-1 后续转入 Orb 界面模块拆分。

@@ -1,10 +1,12 @@
-import { randomUUID } from 'node:crypto'
+import { MemoryCatalog } from './memory/memoryCatalog'
 import { openMemoryDatabase, type MemoryDatabaseHandle } from './memory/memoryDatabase'
 import { MemoryEmbeddingClient } from './memory/memoryEmbeddingClient'
 import { MemoryIndexQueue } from './memory/memoryIndexQueue'
 import { MemoryKgIndexMaintainer } from './memory/memoryKgIndex'
-import { computeMemoryRetentionScore, MemoryRetrievalEngine } from './memory/memoryRetrieval'
+import { MemoryPersonaStore, type MemoryPersonaPatch } from './memory/memoryPersonaStore'
+import { MemoryRetrievalEngine } from './memory/memoryRetrieval'
 import { MemoryRecordStore } from './memory/memoryRecordStore'
+import { MemoryRetentionMaintainer } from './memory/memoryRetention'
 import { MemoryRevisionCoordinator } from './memory/memoryRevisionCoordinator'
 import { MemoryTagIndexMaintainer } from './memory/memoryTagIndex'
 import { MemoryVectorIndexMaintainer } from './memory/memoryVectorIndex'
@@ -18,14 +20,11 @@ import type {
   MemoryDeleteArgs,
   MemoryDeleteByFilterArgs,
   MemoryDeleteManyArgs,
-  MemoryFilterArgs,
   MemoryListArgs,
   MemoryListConflictsArgs,
   MemoryListConflictsResult,
   MemoryListResult,
   MemoryListVersionsArgs,
-  MemoryMetaPatch,
-  MemoryOrderBy,
   MemoryResolveConflictArgs,
   MemoryResolveConflictResult,
   MemoryRollbackVersionArgs,
@@ -43,32 +42,17 @@ import type {
   Persona,
   PersonaSummary,
 } from './types'
-import { normalizePersonaStorageRow, type PersonaStorageRow } from './personaRecord'
-
 export type { MemoryIngestChatMessageArgs } from './memory/memoryWriteCoordinator'
-
-function now(): number {
-  return Date.now()
-}
-
-function clampInt(value: unknown, fallback: number, min: number, max: number): number {
-  const n = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(n)) return fallback
-  return Math.max(min, Math.min(max, Math.trunc(n)))
-}
-
-function clampFloat(value: unknown, fallback: number, min: number, max: number): number {
-  const n = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(n)) return fallback
-  return Math.max(min, Math.min(max, n))
-}
 
 export class MemoryService {
   private db: MemoryDatabaseHandle
+  private catalog: MemoryCatalog
   private indexQueue = new MemoryIndexQueue()
   private embeddingClient = new MemoryEmbeddingClient()
   private kgIndexMaintainer: MemoryKgIndexMaintainer
+  private personaStore: MemoryPersonaStore
   private recordStore: MemoryRecordStore
+  private retentionMaintainer: MemoryRetentionMaintainer
   private revisionCoordinator: MemoryRevisionCoordinator
   private tagIndexMaintainer: MemoryTagIndexMaintainer
   private vectorIndexMaintainer: MemoryVectorIndexMaintainer
@@ -79,8 +63,11 @@ export class MemoryService {
   constructor(userDataDir: string) {
     const opened = openMemoryDatabase(userDataDir)
     this.db = opened.db
+    this.catalog = new MemoryCatalog(opened.db)
     this.kgIndexMaintainer = new MemoryKgIndexMaintainer(opened.db, this.indexQueue)
+    this.personaStore = new MemoryPersonaStore(opened.db)
     this.recordStore = new MemoryRecordStore(opened.db)
+    this.retentionMaintainer = new MemoryRetentionMaintainer(opened.db)
     this.revisionCoordinator = new MemoryRevisionCoordinator(opened.db, this.indexQueue, this.recordStore)
     this.tagIndexMaintainer = new MemoryTagIndexMaintainer(opened.db, this.indexQueue)
     this.vectorIndexMaintainer = new MemoryVectorIndexMaintainer(opened.db, this.indexQueue, this.embeddingClient)
@@ -111,91 +98,23 @@ export class MemoryService {
   }
 
   listPersonas(): PersonaSummary[] {
-    const rows = this.db
-      .prepare('SELECT id, name, updated_at as updatedAt FROM persona ORDER BY updated_at DESC')
-      .all() as PersonaSummary[]
-    return rows
+    return this.personaStore.list()
   }
 
   getPersona(personaId: string): Persona | null {
-    const row = this.db
-      .prepare(
-        `
-        SELECT
-          id,
-          name,
-          prompt,
-          capture_enabled as captureEnabled,
-          capture_user as captureUser,
-          capture_assistant as captureAssistant,
-          retrieve_enabled as retrieveEnabled,
-          created_at as createdAt,
-          updated_at as updatedAt
-        FROM persona
-        WHERE id = ?
-        `,
-      )
-      .get(personaId) as PersonaStorageRow | undefined
-    return normalizePersonaStorageRow(row)
+    return this.personaStore.get(personaId)
   }
 
   createPersona(name: string): Persona {
-    const cleaned = name.trim() || '未命名角色'
-    const id = randomUUID()
-    const ts = now()
-    this.db
-      .prepare(
-        'INSERT INTO persona (id, name, prompt, capture_enabled, capture_user, capture_assistant, retrieve_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      )
-      .run(id, cleaned, '', 1, 1, 1, 1, ts, ts)
-    const persona = this.getPersona(id)
-    if (!persona) throw new Error('创建角色失败')
-    return persona
+    return this.personaStore.create(name)
   }
 
-  updatePersona(
-    personaId: string,
-    patch: {
-      name?: string
-      prompt?: string
-      captureEnabled?: boolean
-      captureUser?: boolean
-      captureAssistant?: boolean
-      retrieveEnabled?: boolean
-    },
-  ): Persona {
-    const current = this.getPersona(personaId)
-    if (!current) throw new Error('角色不存在')
-    const nextName = typeof patch.name === 'string' ? patch.name.trim() || current.name : current.name
-    const nextPrompt = typeof patch.prompt === 'string' ? patch.prompt : current.prompt
-    const nextCaptureEnabled = typeof patch.captureEnabled === 'boolean' ? patch.captureEnabled : current.captureEnabled
-    const nextCaptureUser = typeof patch.captureUser === 'boolean' ? patch.captureUser : current.captureUser
-    const nextCaptureAssistant =
-      typeof patch.captureAssistant === 'boolean' ? patch.captureAssistant : current.captureAssistant
-    const nextRetrieveEnabled = typeof patch.retrieveEnabled === 'boolean' ? patch.retrieveEnabled : current.retrieveEnabled
-    const ts = now()
-    this.db
-      .prepare(
-        'UPDATE persona SET name = ?, prompt = ?, capture_enabled = ?, capture_user = ?, capture_assistant = ?, retrieve_enabled = ?, updated_at = ? WHERE id = ?',
-      )
-      .run(
-        nextName,
-        nextPrompt,
-        nextCaptureEnabled ? 1 : 0,
-        nextCaptureUser ? 1 : 0,
-        nextCaptureAssistant ? 1 : 0,
-        nextRetrieveEnabled ? 1 : 0,
-        ts,
-        personaId,
-      )
-    const updated = this.getPersona(personaId)
-    if (!updated) throw new Error('更新角色失败')
-    return updated
+  updatePersona(personaId: string, patch: MemoryPersonaPatch): Persona {
+    return this.personaStore.update(personaId, patch)
   }
 
   deletePersona(personaId: string): void {
-    if (personaId === 'default') throw new Error('默认角色不可删除')
-    this.db.prepare('DELETE FROM persona WHERE id = ?').run(personaId)
+    this.personaStore.delete(personaId)
   }
 
   async ingestChatMessage(
@@ -226,202 +145,8 @@ export class MemoryService {
     return this.kgIndexMaintainer.run(memSettings, aiSettings, opts)
   }
 
-  private buildMemoryWhere(args: MemoryFilterArgs): { whereSql: string; params: Array<string | number> } {
-    const personaId = args.personaId.trim() || 'default'
-    const scope = args.scope ?? 'persona'
-    const role = args.role ?? 'all'
-    const q = (args.query ?? '').trim()
-    const status = args.status ?? 'all'
-    const pinned = args.pinned ?? 'all'
-    const sourceRaw = typeof args.source === 'string' ? args.source.trim() : ''
-    const source = args.source === 'all' ? '' : sourceRaw
-    const memoryTypeRaw = typeof args.memoryType === 'string' ? args.memoryType.trim() : ''
-    const memoryType = args.memoryType === 'all' ? '' : memoryTypeRaw
-
-    const where: string[] = []
-    const params: Array<string | number> = []
-
-    if (scope === 'persona') {
-      where.push('persona_id = ?')
-      params.push(personaId)
-    } else if (scope === 'shared') {
-      where.push('persona_id IS NULL')
-    } else {
-      where.push('(persona_id = ? OR persona_id IS NULL)')
-      params.push(personaId)
-    }
-
-    if (role !== 'all') {
-      where.push("COALESCE(role, 'note') = ?")
-      params.push(role)
-    }
-
-    if (status === 'deleted') {
-      where.push("COALESCE(status, 'active') = 'deleted'")
-    } else {
-      where.push("COALESCE(status, 'active') <> 'deleted'")
-      if (status !== 'all') {
-        where.push('status = ?')
-        params.push(status)
-      }
-    }
-
-    if (pinned === 'pinned') {
-      where.push('COALESCE(pinned, 0) <> 0')
-    } else if (pinned === 'unpinned') {
-      where.push('COALESCE(pinned, 0) = 0')
-    }
-
-    if (source) {
-      where.push("COALESCE(source, '') = ?")
-      params.push(source.slice(0, 80))
-    }
-
-    if (memoryType) {
-      where.push('memory_type = ?')
-      params.push(memoryType.slice(0, 80))
-    }
-
-    if (q) {
-      where.push('content LIKE ?')
-      params.push(`%${q.slice(0, 200)}%`)
-    }
-
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-    return { whereSql, params }
-  }
-
-  private buildMemoryOrderBy(orderBy: MemoryOrderBy | undefined, orderDir: 'asc' | 'desc' | undefined): string {
-    const dir = orderDir === 'asc' ? 'ASC' : 'DESC'
-    const pinnedSql = 'pinned DESC'
-    const statusSql = "CASE WHEN status = 'archived' THEN 1 WHEN status = 'deleted' THEN 2 ELSE 0 END ASC"
-
-    const by: MemoryOrderBy =
-      orderBy === 'updatedAt' ||
-      orderBy === 'retention' ||
-      orderBy === 'importance' ||
-      orderBy === 'strength' ||
-      orderBy === 'accessCount' ||
-      orderBy === 'lastAccessedAt' ||
-      orderBy === 'createdAt'
-        ? orderBy
-        : 'createdAt'
-
-    if (by === 'lastAccessedAt') {
-      return `${pinnedSql}, ${statusSql}, (last_accessed_at IS NULL) ASC, last_accessed_at ${dir}, rowid DESC`
-    }
-
-    const col =
-      by === 'updatedAt'
-        ? 'updated_at'
-        : by === 'retention'
-          ? 'retention'
-          : by === 'importance'
-            ? 'importance'
-            : by === 'strength'
-              ? 'strength'
-              : by === 'accessCount'
-                ? 'access_count'
-                : 'created_at'
-
-    return `${pinnedSql}, ${statusSql}, ${col} ${dir}, rowid DESC`
-  }
-
-  private buildMemoryMetaSet(patch: MemoryMetaPatch): { setSql: string; params: Array<string | number | null> } {
-    const sets: string[] = []
-    const params: Array<string | number | null> = []
-
-    if (patch.status === 'active' || patch.status === 'archived' || patch.status === 'deleted') {
-      sets.push('status = ?')
-      params.push(patch.status)
-    }
-
-    if (typeof patch.pinned === 'number' && Number.isFinite(patch.pinned)) {
-      sets.push('pinned = ?')
-      params.push(patch.pinned ? 1 : 0)
-    }
-
-    if (typeof patch.importance === 'number' && Number.isFinite(patch.importance)) {
-      sets.push('importance = ?')
-      params.push(clampFloat(patch.importance, 0.5, 0, 1))
-    }
-
-    if (typeof patch.strength === 'number' && Number.isFinite(patch.strength)) {
-      sets.push('strength = ?')
-      params.push(clampFloat(patch.strength, 0.2, 0, 1))
-    }
-
-    if (typeof patch.retention === 'number' && Number.isFinite(patch.retention)) {
-      sets.push('retention = ?')
-      params.push(clampFloat(patch.retention, 1, 0, 1))
-    }
-
-    if (typeof patch.memoryType === 'string' && patch.memoryType.trim()) {
-      sets.push('memory_type = ?')
-      params.push(patch.memoryType.trim().slice(0, 80))
-    }
-
-    if (patch.source === null) {
-      sets.push('source = NULL')
-    } else if (typeof patch.source === 'string' && patch.source.trim()) {
-      sets.push('source = ?')
-      params.push(patch.source.trim().slice(0, 80))
-    }
-
-    if (sets.length === 0) return { setSql: '', params: [] }
-
-    const ts = now()
-    sets.push('updated_at = ?')
-    params.push(ts)
-
-    return { setSql: sets.join(', '), params }
-  }
-
   listMemory(args: MemoryListArgs): MemoryListResult {
-    const limit = clampInt(args.limit, 50, 1, 200)
-    const offset = clampInt(args.offset, 0, 0, 1_000_000)
-    const { whereSql, params } = this.buildMemoryWhere(args)
-    const orderBySql = this.buildMemoryOrderBy(args.orderBy, args.orderDir)
-
-    const total = (this.db
-      .prepare(`SELECT COUNT(1) as c FROM memory ${whereSql}`)
-      .get(...params) as { c: number }).c
-
-    const items = this.db
-      .prepare(
-        `
-        SELECT
-          rowid as rowid,
-          persona_id as personaId,
-          CASE WHEN persona_id IS NULL THEN 'shared' ELSE 'persona' END as scope,
-          kind as kind,
-          role as role,
-          content as content,
-          created_at as createdAt,
-          updated_at as updatedAt,
-          importance as importance,
-          strength as strength,
-          access_count as accessCount,
-          last_accessed_at as lastAccessedAt,
-          retention as retention,
-          status as status,
-          memory_type as memoryType,
-          source as source,
-          pinned as pinned
-        FROM memory
-        ${whereSql}
-        ORDER BY ${orderBySql}
-        LIMIT ? OFFSET ?
-        `,
-      )
-      .all(...params, limit, offset) as MemoryRecord[]
-
-    const nowMs = now()
-    for (const it of items) {
-      it.retention = computeMemoryRetentionScore(nowMs, it.createdAt, it.lastAccessedAt, it.strength)
-    }
-
-    return { total, items }
+    return this.catalog.list(args)
   }
 
   async upsertManualMemory(
@@ -437,71 +162,27 @@ export class MemoryService {
   }
 
   updateMemoryMeta(args: MemoryUpdateMetaArgs): MemoryUpdateMetaResult {
-    const rowid = clampInt(args.rowid, 0, 1, 2_000_000_000)
-    if (rowid <= 0) throw new Error('rowid 不合法')
-
-    const patch = args.patch ?? ({} as MemoryMetaPatch)
-    const built = this.buildMemoryMetaSet(patch)
-    if (!built.setSql) return { updated: 0 }
-
-    const res = this.db
-      .prepare(`UPDATE memory SET ${built.setSql} WHERE rowid = ? AND COALESCE(status, 'active') <> 'deleted'`)
-      .run(...built.params, rowid)
-
-    return { updated: res.changes }
+    return this.catalog.updateMeta(args)
   }
 
   updateManyMemoryMeta(args: MemoryUpdateManyMetaArgs): MemoryUpdateMetaResult {
-    const rowids = Array.from(
-      new Set((args.rowids ?? []).map((v) => clampInt(v, 0, 1, 2_000_000_000)).filter((v) => v > 0)),
-    )
-    if (rowids.length === 0) return { updated: 0 }
-
-    const patch = args.patch ?? ({} as MemoryMetaPatch)
-    const built = this.buildMemoryMetaSet(patch)
-    if (!built.setSql) return { updated: 0 }
-
-    const placeholders = rowids.map(() => '?').join(',')
-    const res = this.db
-      .prepare(
-        `UPDATE memory SET ${built.setSql} WHERE rowid IN (${placeholders}) AND COALESCE(status, 'active') <> 'deleted'`,
-      )
-      .run(...built.params, ...rowids)
-
-    return { updated: res.changes }
+    return this.catalog.updateManyMeta(args)
   }
 
   updateMemoryByFilterMeta(args: MemoryUpdateByFilterMetaArgs): MemoryUpdateMetaResult {
-    const patch = args.patch ?? ({} as MemoryMetaPatch)
-    const built = this.buildMemoryMetaSet(patch)
-    if (!built.setSql) return { updated: 0 }
-
-    const { whereSql, params } = this.buildMemoryWhere(args)
-    const res = this.db.prepare(`UPDATE memory SET ${built.setSql} ${whereSql}`).run(...built.params, ...params)
-    return { updated: res.changes }
+    return this.catalog.updateByFilterMeta(args)
   }
 
   deleteMemory(args: MemoryDeleteArgs): { ok: true } {
-    const rowid = clampInt(args.rowid, 0, 1, 2_000_000_000)
-    this.db.prepare('DELETE FROM memory WHERE rowid = ?').run(rowid)
-    return { ok: true }
+    return this.catalog.delete(args)
   }
 
   deleteManyMemory(args: MemoryDeleteManyArgs): { deleted: number } {
-    const rowids = Array.from(
-      new Set((args.rowids ?? []).map((v) => clampInt(v, 0, 1, 2_000_000_000)).filter((v) => v > 0)),
-    )
-    if (rowids.length === 0) return { deleted: 0 }
-
-    const placeholders = rowids.map(() => '?').join(',')
-    const res = this.db.prepare(`DELETE FROM memory WHERE rowid IN (${placeholders})`).run(...rowids)
-    return { deleted: res.changes }
+    return this.catalog.deleteMany(args)
   }
 
   deleteMemoryByFilter(args: MemoryDeleteByFilterArgs): { deleted: number } {
-    const { whereSql, params } = this.buildMemoryWhere(args)
-    const res = this.db.prepare(`DELETE FROM memory ${whereSql}`).run(...params)
-    return { deleted: res.changes }
+    return this.catalog.deleteByFilter(args)
   }
 
   listMemoryVersions(args: MemoryListVersionsArgs): MemoryVersionRecord[] {
@@ -525,73 +206,7 @@ export class MemoryService {
     minIdleMs?: number
     archiveThreshold?: number
   }): { scanned: number; updated: number; archived: number } {
-    const nowMs = now()
-    const batchSize = clampInt(opts?.batchSize, 400, 50, 5000)
-    const minIdleMs = clampInt(opts?.minIdleMs, 6 * 60 * 60_000, 0, 30 * 24 * 60 * 60_000)
-    const archiveThreshold = clampFloat(opts?.archiveThreshold, 0.05, 0, 1)
-    const idleBefore = nowMs - minIdleMs
-
-    const rows = this.db
-      .prepare(
-        `
-        SELECT
-          rowid as rowid,
-          created_at as createdAt,
-          last_accessed_at as lastAccessedAt,
-          strength as strength,
-          pinned as pinned,
-          status as status,
-          retention as storedRetention
-        FROM memory
-        WHERE COALESCE(status, 'active') <> 'deleted'
-          AND (last_accessed_at IS NULL OR last_accessed_at < ?)
-        ORDER BY COALESCE(last_accessed_at, created_at) ASC, rowid ASC
-        LIMIT ?
-        `,
-      )
-      .all(idleBefore, batchSize) as Array<{
-      rowid: number
-      createdAt: number
-      lastAccessedAt: number | null
-      strength: number
-      pinned: number
-      status: string | null
-      storedRetention: number
-    }>
-
-    if (rows.length === 0) return { scanned: 0, updated: 0, archived: 0 }
-
-    const updates: Array<{ rowid: number; retention: number; status: string }> = []
-    let archived = 0
-
-    for (const r of rows) {
-      const retention = computeMemoryRetentionScore(nowMs, r.createdAt, r.lastAccessedAt, r.strength)
-      const isPinned = (r.pinned ?? 0) !== 0
-      const currentStatus = (r.status ?? 'active').trim() || 'active'
-      let nextStatus = currentStatus
-
-      if (isPinned) {
-        nextStatus = 'active'
-      } else if (retention < archiveThreshold) {
-        nextStatus = 'archived'
-      }
-
-      const prevRetention = clampFloat(r.storedRetention, retention, 0, 1)
-      const shouldUpdate = Math.abs(retention - prevRetention) >= 0.02 || nextStatus !== currentStatus
-      if (!shouldUpdate) continue
-      if (currentStatus !== 'archived' && nextStatus === 'archived') archived += 1
-      updates.push({ rowid: r.rowid, retention, status: nextStatus })
-    }
-
-    if (updates.length === 0) return { scanned: rows.length, updated: 0, archived: 0 }
-
-    const tx = this.db.transaction((items: Array<{ rowid: number; retention: number; status: string }>) => {
-      const stmt = this.db.prepare('UPDATE memory SET retention = ?, status = ? WHERE rowid = ?')
-      for (const it of items) stmt.run(it.retention, it.status, it.rowid)
-    })
-    tx(updates)
-
-    return { scanned: rows.length, updated: updates.length, archived }
+    return this.retentionMaintainer.run(opts)
   }
 
   async retrieveContext(
