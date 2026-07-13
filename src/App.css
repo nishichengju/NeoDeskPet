@@ -383,38 +383,205 @@
   -webkit-app-region: drag;
 }
 
-.ndp-chat-membar {
+.ndp-chat-header-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.78);
-  user-select: none;
+  gap: 6px;
   -webkit-app-region: no-drag;
 }
 
-.ndp-chat-membar-details {
+.ndp-chat-header-command,
+.ndp-chat-status-button,
+.ndp-chat-icon-button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  background: rgba(0, 0, 0, 0.2);
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-chat-header-command,
+.ndp-chat-status-button {
+  min-height: 32px;
+  border-radius: 7px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.ndp-chat-header-command {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ndp-chat-status-button {
+  max-width: min(250px, 34vw);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ndp-chat-status-button:hover,
+.ndp-chat-header-command:hover,
+.ndp-chat-icon-button:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.ndp-chat-status-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #8ca0b8;
+}
+
+.ndp-chat-status-button.active .ndp-chat-status-dot {
+  background: #63d6a3;
+  box-shadow: 0 0 0 3px rgba(99, 214, 163, 0.15);
+}
+
+.ndp-chat-status-secondary {
   min-width: 0;
-  flex: 1;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.58);
+  text-overflow: ellipsis;
+}
+
+.ndp-chat-icon-button {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 7px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ndp-chat-menu-anchor {
+  position: relative;
+  display: flex;
+}
+
+.ndp-chat-popover {
+  position: absolute;
+  z-index: 90;
+  min-width: 170px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(28, 28, 36, 0.98);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.44);
+  -webkit-app-region: no-drag;
+}
+
+.ndp-chat-more-menu {
+  top: calc(100% + 7px);
+  right: 0;
+}
+
+.ndp-chat-popover button {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  border: 0;
+  border-radius: 5px;
+  padding: 7px 9px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  text-align: left;
+}
+
+.ndp-chat-popover button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ndp-chat-popover button.danger {
+  color: #ffaaaa;
+}
+
+.ndp-chat-popover button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ndp-chat-menu-divider {
+  height: 1px;
+  margin: 4px 5px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ndp-chat-status-drawer {
+  position: absolute;
+  z-index: 70;
+  top: 57px;
+  right: 10px;
+  width: min(460px, calc(100% - 20px));
+  max-height: min(72vh, 520px);
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(27, 27, 35, 0.98);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-chat-status-drawer-header {
+  position: sticky;
+  z-index: 1;
+  top: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(27, 27, 35, 0.98);
 }
 
-.ndp-chat-membar-summary {
-  display: none;
+.ndp-chat-status-drawer-header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
-.ndp-chat-membar-left,
-.ndp-chat-membar-right {
+.ndp-chat-status-drawer-header strong {
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 14px;
+}
+
+.ndp-chat-status-drawer-header span {
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.ndp-chat-status-section {
+  padding: 12px;
+}
+
+.ndp-chat-status-section + .ndp-chat-status-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ndp-chat-status-section-title {
+  margin-bottom: 9px;
+  color: rgba(255, 255, 255, 0.58);
+  font-weight: 600;
+}
+
+.ndp-chat-status-controls {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -432,12 +599,47 @@
   background: rgba(0, 0, 0, 0.22);
 }
 
-.ndp-chat-membar-error {
-  color: rgba(255, 140, 140, 0.95);
-  max-width: 260px;
+.ndp-chat-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+
+.ndp-chat-status-grid > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.ndp-chat-status-grid > div.wide {
+  grid-column: 1 / -1;
+}
+
+.ndp-chat-status-grid dt {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.ndp-chat-status-grid dd {
+  min-width: 0;
+  margin: 0;
   overflow: hidden;
+  color: rgba(255, 255, 255, 0.9);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ndp-chat-status-error {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(248, 113, 113, 0.1);
+  color: rgba(255, 155, 155, 0.96);
 }
 
 .ndp-session-name {
@@ -450,11 +652,17 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 65%;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.ndp-session-name > span:first-child {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  -webkit-app-region: no-drag;
 }
 
 .ndp-session-name:hover {
@@ -515,17 +723,50 @@
 
 .ndp-chat-input-row {
   display: flex;
+  align-items: flex-end;
   gap: 8px;
 }
 
-.ndp-chat-input-row input {
+.ndp-chat-input-row textarea {
+  min-width: 0;
+  min-height: 40px;
+  max-height: 152px;
   flex: 1;
-  border-radius: 12px;
+  resize: none;
+  overflow-y: auto;
+  border-radius: 10px;
   padding: 10px 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   outline: none;
   background: rgba(0, 0, 0, 0.25);
   color: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  line-height: 19px;
+}
+
+.ndp-chat-input-row textarea:focus {
+  border-color: rgba(124, 147, 255, 0.72);
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.14);
+}
+
+.ndp-chat-composer-button {
+  width: 40px;
+  height: 40px;
+  flex-basis: 40px;
+}
+
+.ndp-chat-send-button {
+  border-color: rgba(102, 126, 234, 0.58);
+  background: rgba(102, 126, 234, 0.3);
+}
+
+.ndp-chat-send-button:hover {
+  background: rgba(102, 126, 234, 0.42);
+}
+
+.ndp-chat-attachment-menu {
+  bottom: calc(100% + 7px);
+  left: 0;
 }
 
 .ndp-btn-stop {
@@ -1670,6 +1911,7 @@
   }
 }
 
+.ndp-dialog-backdrop,
 .ndp-settings-dialog-backdrop {
   position: absolute;
   inset: 0;
@@ -1681,6 +1923,7 @@
   -webkit-app-region: no-drag;
 }
 
+.ndp-dialog,
 .ndp-settings-dialog {
   width: min(420px, 100%);
   padding: 18px;
@@ -1690,11 +1933,13 @@
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
 }
 
+.ndp-dialog h2,
 .ndp-settings-dialog h2 {
   margin: 0 0 10px;
   font-size: 17px;
 }
 
+.ndp-dialog p,
 .ndp-settings-dialog p {
   margin: 0;
   color: rgba(255, 255, 255, 0.72);
@@ -1702,6 +1947,7 @@
   white-space: pre-line;
 }
 
+.ndp-dialog-actions,
 .ndp-settings-dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -1903,75 +2149,72 @@
     padding: 10px;
   }
 
-  .ndp-chat-header .ndp-actions {
+  .ndp-chat-header-actions {
     flex: 0 0 auto;
     gap: 4px;
   }
 
-  .ndp-chat-header .ndp-btn:not(.ndp-btn-close) {
-    padding: 6px 8px;
-  }
-
   .ndp-session-name {
+    flex: 1 1 auto;
     min-width: 0;
     max-width: none;
   }
 
-  .ndp-chat-membar {
-    display: block;
-    padding: 0;
+  .ndp-chat-status-button {
+    max-width: 190px;
   }
 
-  .ndp-chat-membar-summary {
-    width: 100%;
-    min-height: 38px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 8px 12px;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    color: rgba(255, 255, 255, 0.82);
-    font-size: 12px;
-    text-align: left;
+  .ndp-chat-status-drawer,
+  .ndp-session-list {
+    top: 53px;
+  }
+}
+
+@media (max-width: 520px) {
+  .ndp-chat-header {
+    padding: 8px;
   }
 
-  .ndp-chat-membar-summary > span:first-child {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .ndp-chat-membar-summary-arrow {
-    flex: 0 0 auto;
-    transition: transform 0.15s ease;
-  }
-
-  .ndp-chat-membar-summary-arrow.open {
-    transform: rotate(180deg);
-  }
-
-  .ndp-chat-membar-details {
+  .ndp-chat-header-command-label,
+  .ndp-chat-status-secondary {
     display: none;
   }
 
-  .ndp-chat-membar-details.expanded {
-    max-height: min(42vh, 260px);
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-    padding: 8px 12px 10px;
-    overflow-y: auto;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+  .ndp-chat-header-command {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+    font-size: 17px;
   }
 
-  .ndp-chat-membar-left,
-  .ndp-chat-membar-right {
-    gap: 8px;
+  .ndp-chat-status-button {
+    max-width: none;
+    padding-inline: 7px;
+  }
+
+  .ndp-chat-status-drawer,
+  .ndp-session-list {
+    top: 49px;
+  }
+
+  .ndp-chat-status-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ndp-chat-status-grid > div.wide {
+    grid-column: auto;
+  }
+
+  .ndp-chat-messages {
+    padding: 9px;
+  }
+
+  .ndp-chat-input {
+    padding: 9px;
+  }
+
+  .ndp-chat-empty {
+    padding: 14px;
   }
 }
 
@@ -2432,11 +2675,36 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  gap: 8px;
+  padding: 24px;
+  gap: 9px;
+  text-align: center;
 }
 
-.ndp-chat-hint {
+.ndp-chat-empty-kicker {
   font-size: 12px;
+  color: rgba(151, 196, 255, 0.9);
+}
+
+.ndp-chat-empty h1 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.ndp-chat-empty p {
+  max-width: 420px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ndp-chat-empty-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .ndp-chat-error {
@@ -2487,7 +2755,7 @@
   cursor: not-allowed;
 }
 
-.ndp-chat-input-row input:disabled {
+.ndp-chat-input-row textarea:disabled {
   opacity: 0.6;
 }
 

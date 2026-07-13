@@ -10,6 +10,7 @@ export const IPC_CHANNEL_PERMISSIONS = {
   'debug:append': ['pet', 'chat'],
 
   'settings:get': ALL_WINDOWS,
+  'settings:consumeNavigation': ['settings'],
   'settings:setSecret': ['settings'],
   'settings:setAlwaysOnTop': ['settings'],
   'settings:setClickThrough': ['settings'],

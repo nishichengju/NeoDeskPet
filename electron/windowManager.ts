@@ -202,6 +202,10 @@ export class WindowManager {
     return this.chatWindow && !this.chatWindow.isDestroyed() ? this.chatWindow : null
   }
 
+  getSettingsWindow(): BrowserWindow | null {
+    return this.settingsWindow && !this.settingsWindow.isDestroyed() ? this.settingsWindow : null
+  }
+
   getOrbWindow(): BrowserWindow | null {
     return this.orbWindow && !this.orbWindow.isDestroyed() ? this.orbWindow : null
   }

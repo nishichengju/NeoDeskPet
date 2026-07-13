@@ -57,6 +57,7 @@ import type {
   LocalMediaUrlResult,
   LocalMediaDataUrlResult,
   SettingsSecretTarget,
+  SettingsNavigationTarget,
 } from '../electron/types'
 import type { TtsOptions } from '../electron/ttsOptions'
 
@@ -264,7 +265,7 @@ export type NeoDeskPetApi = {
   reportLive2dCapabilities(payload: unknown): void
   // Window operations
   openChat(): Promise<void>
-  openSettings(): Promise<void>
+  openSettings(target?: SettingsNavigationTarget): Promise<void>
   openMemory(): Promise<void>
   setDisplayMode(mode: DisplayMode): Promise<void>
   hideAll(): Promise<void>
@@ -288,6 +289,8 @@ export type NeoDeskPetApi = {
   onPetCursorProbe(listener: (payload: { x: number; y: number }) => void): () => void
   setIgnoreMouseEvents(ignore: boolean, forward: boolean): void
   onSettingsChanged(listener: SettingsChangeListener): () => void
+  onSettingsNavigate(listener: (target: SettingsNavigationTarget) => void): () => void
+  consumeSettingsNavigation(): Promise<SettingsNavigationTarget | null>
   // Bubble message
   onBubbleMessage(listener: BubbleMessageListener): () => void
   sendBubbleMessage(message: string): void

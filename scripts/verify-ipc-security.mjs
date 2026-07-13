@@ -47,7 +47,7 @@ await new Promise((resolve) => aiServer.listen(0, '127.0.0.1', resolve))
 const aiServerAddress = aiServer.address()
 const aiServerOrigin = `http://127.0.0.1:${aiServerAddress.port}`
 const expectedWindowSizes = {
-  chat: { defaultWidth: 720, defaultHeight: 620, minWidth: 520, minHeight: 500 },
+  chat: { defaultWidth: 720, defaultHeight: 620, minWidth: 420, minHeight: 500 },
   settings: { defaultWidth: 860, defaultHeight: 680, minWidth: 640, minHeight: 500 },
   memory: { defaultWidth: 900, defaultHeight: 720, minWidth: 640, minHeight: 500 },
 }
@@ -77,7 +77,7 @@ async function waitForMainWindowApi(page) {
   )
 }
 
-async function openWindow(app, sourcePage, method, route) {
+async function openWindow(app, sourcePage, method, route, argument) {
   const existing = app.windows().find((page) => page.url().endsWith(`#/${route}`))
   if (existing) {
     await waitForApi(existing, route)
@@ -85,7 +85,10 @@ async function openWindow(app, sourcePage, method, route) {
   }
 
   const windowPromise = app.waitForEvent('window', { timeout: 30_000 })
-  await sourcePage.evaluate((methodName) => window.neoDeskPet[methodName](), method)
+  await sourcePage.evaluate(
+    ({ methodName, value }) => window.neoDeskPet[methodName](value),
+    { methodName: method, value: argument },
+  )
   const page = await windowPromise
   await waitForApi(page, route)
   return page
@@ -115,7 +118,7 @@ try {
   await waitForApi(pet, 'pet')
 
   const chat = await openWindow(app, pet, 'openChat', 'chat')
-  const settings = await openWindow(app, chat, 'openSettings', 'settings')
+  const settings = await openWindow(app, chat, 'openSettings', 'settings', 'aiConnection')
   const memory = await openWindow(app, settings, 'openMemory', 'memory')
   let orb = app.windows().find((page) => page.url().endsWith('#/orb'))
   if (!orb) {
@@ -138,6 +141,14 @@ try {
       `${type} default size is ${actual.width}x${actual.height}, expected ${expected.defaultWidth}x${expected.defaultHeight}`,
     )
   }
+
+  await settings.locator('.ndp-settings-nav-item.active').filter({ hasText: 'API 连接' }).waitFor({ state: 'visible' })
+  const settingsNavigationOnCreate = await settings.locator('.ndp-settings-nav-item.active').textContent()
+  assert(settingsNavigationOnCreate?.trim() === 'API 连接', 'chat could not deep-link while creating the settings window')
+  await chat.evaluate(() => window.neoDeskPet.openSettings('persona'))
+  await settings.locator('.ndp-settings-nav-item.active').filter({ hasText: '角色与长期记忆' }).waitFor({ state: 'visible' })
+  const settingsNavigationOnReuse = await settings.locator('.ndp-settings-nav-item.active').textContent()
+  assert(settingsNavigationOnReuse?.trim() === '角色与长期记忆', 'chat could not deep-link an existing settings window')
 
   await settings.evaluate(
     async ({ origin, key }) => {
@@ -357,6 +368,10 @@ try {
     keys,
     windowSizes: {
       defaults: defaultWindowSizes,
+    },
+    settingsNavigation: {
+      onCreate: settingsNavigationOnCreate?.trim() ?? '',
+      onReuse: settingsNavigationOnReuse?.trim() ?? '',
     },
     runtimeErrors,
     aiProxy: {

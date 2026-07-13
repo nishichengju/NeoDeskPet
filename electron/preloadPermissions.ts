@@ -125,6 +125,8 @@ export const PRELOAD_API_METHODS: Record<WindowType, readonly string[]> = {
   ],
   settings: [
     ...COMMON_METHODS,
+    'consumeSettingsNavigation',
+    'onSettingsNavigate',
     'setSecret',
     'getDebugLogPath',
     'clearDebugLog',

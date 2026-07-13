@@ -1,18 +1,6 @@
-export type SettingsViewId =
-  | 'live2d'
-  | 'bubble'
-  | 'taskPanel'
-  | 'aiConnection'
-  | 'aiGeneration'
-  | 'aiVision'
-  | 'aiAgent'
-  | 'tools'
-  | 'novelai'
-  | 'persona'
-  | 'worldBook'
-  | 'tts'
-  | 'asr'
-  | 'chat'
+import type { SettingsNavigationTarget } from '../../../electron/types'
+
+export type SettingsViewId = SettingsNavigationTarget
 
 export type SettingsNavItem = {
   id: SettingsViewId

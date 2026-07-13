@@ -41,6 +41,164 @@ async function waitForPreview() {
   throw new Error(`Timed out waiting for Vite preview.\n${previewOutput}`)
 }
 
+function installChatMock(page) {
+  return page.addInitScript(() => {
+    const now = Date.now()
+    const settings = {
+      activePersonaId: 'default',
+      ai: {
+        hasApiKey: false,
+        apiMode: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-4o-mini',
+        temperature: 0.7,
+        maxTokens: 1200,
+        enableChatStreaming: false,
+      },
+      memory: {
+        enabled: true,
+        autoExtractEnabled: true,
+        autoExtractEveryEffectiveMessages: 20,
+      },
+      orchestrator: {
+        plannerEnabled: false,
+        plannerMode: 'auto',
+        toolCallingEnabled: false,
+        toolCallingMode: 'auto',
+      },
+      tts: { enabled: false, segmented: false },
+      asr: { enabled: false, autoSend: false },
+      chatUi: {},
+      chatProfile: {},
+      worldBook: { enabled: false, entries: [], activeTagIds: [], maxChars: 6000 },
+    }
+    const persona = {
+      id: 'default',
+      name: '默认桌宠',
+      prompt: '',
+      captureEnabled: true,
+      captureUser: true,
+      captureAssistant: true,
+      retrieveEnabled: true,
+      createdAt: now,
+      updatedAt: now,
+    }
+    const summary = {
+      id: 'baseline-session',
+      name: '界面基线会话',
+      personaId: 'default',
+      createdAt: now,
+      updatedAt: now,
+      messageCount: 0,
+    }
+    const session = { ...summary, nameMode: 'manual', messages: [], autoExtractCursor: 0 }
+    const calls = { settingsTargets: [], clearCount: 0, createCount: 0, cancelTaskIds: [], stopTtsCount: 0 }
+    Object.defineProperty(window, '__chatBaseline', { configurable: true, value: calls })
+    const off = () => undefined
+    let tasksListener = null
+    let activeTask = null
+    calls.activateTask = () => {
+      activeTask = {
+        id: 'baseline-task',
+        queue: 'chat',
+        title: '界面测试任务',
+        why: '验证统一停止行为',
+        status: 'running',
+        createdAt: now,
+        updatedAt: now,
+        steps: [],
+        currentStepIndex: 0,
+        toolsUsed: [],
+      }
+      session.messages.push({
+        id: 'baseline-task-message',
+        role: 'assistant',
+        content: '工具任务运行中',
+        createdAt: now,
+        taskId: activeTask.id,
+      })
+      summary.messageCount = session.messages.length
+      tasksListener?.({ items: [activeTask] })
+    }
+    const api = new Proxy(
+      {
+        getSettings: async () => settings,
+        onSettingsChanged: () => off,
+        listPersonas: async () => [{ id: persona.id, name: persona.name, updatedAt: now }],
+        getPersona: async () => persona,
+        listChatSessions: async () => ({ sessions: [summary], currentSessionId: summary.id }),
+        getChatSession: async () => session,
+        createChatSession: async () => {
+          calls.createCount += 1
+          return session
+        },
+        setCurrentChatSession: async () => summary,
+        clearChatSession: async () => {
+          calls.clearCount += 1
+          session.messages = []
+          return session
+        },
+        addChatMessage: async (_sessionId, message) => {
+          session.messages.push(message)
+          summary.messageCount = session.messages.length
+          return session
+        },
+        setChatMessages: async (_sessionId, messages) => {
+          session.messages = messages
+          summary.messageCount = messages.length
+          return session
+        },
+        listTasks: async () => ({ items: [] }),
+        onTasksChanged: (listener) => {
+          tasksListener = listener
+          return () => {
+            if (tasksListener === listener) tasksListener = null
+          }
+        },
+        cancelTask: async (taskId) => {
+          calls.cancelTaskIds.push(taskId)
+          if (activeTask?.id === taskId) {
+            activeTask = { ...activeTask, status: 'canceled', updatedAt: Date.now() }
+            tasksListener?.({ items: [activeTask] })
+          }
+          return activeTask
+        },
+        getMcpState: async () => ({ enabled: false, servers: [], updatedAt: now }),
+        onMcpChanged: () => off,
+        getContextUsage: async () => null,
+        onContextUsageChanged: () => off,
+        onAsrTranscript: () => off,
+        onTtsSegmentStarted: () => off,
+        onTtsUtteranceEnded: () => off,
+        onTtsUtteranceFailed: () => off,
+        openSettings: async (target) => {
+          calls.settingsTargets.push(target ?? null)
+        },
+        openMemory: async () => undefined,
+        closeCurrent: async () => undefined,
+        setContextUsage: () => undefined,
+        syncAsrComposePreview: () => undefined,
+        notifyAsrTranscriptReady: () => undefined,
+        takeAsrTranscript: async () => ({ text: '' }),
+        stopTtsAll: () => {
+          calls.stopTtsCount += 1
+        },
+        sendBubblePreview: () => undefined,
+        sendBubbleMessage: () => undefined,
+        appendDebugLog: () => undefined,
+      },
+      {
+        get(target, property) {
+          if (property in target) return target[property]
+          if (typeof property === 'string' && property.startsWith('on')) return () => off
+          return async () => settings
+        },
+      },
+    )
+    Object.defineProperty(window, 'neoDeskPet', { configurable: true, value: api })
+  })
+}
+
 function installOrbPanelMock(page) {
   return page.addInitScript(() => {
     const now = Date.now()
@@ -190,10 +348,22 @@ function installSettingsMock(page) {
       },
     }
     const off = () => undefined
+    let navigateListener = null
+    Object.defineProperty(window, '__navigateSettings', {
+      configurable: true,
+      value: (target) => navigateListener?.(target),
+    })
     const api = new Proxy(
       {
         getSettings: async () => settings,
         onSettingsChanged: () => off,
+        onSettingsNavigate: (listener) => {
+          navigateListener = listener
+          return () => {
+            if (navigateListener === listener) navigateListener = null
+          }
+        },
+        consumeSettingsNavigation: async () => null,
         scanModels: async () => [],
         listPersonas: async () => [],
         listMemory: async () => ({ total: 0, items: [] }),
@@ -215,17 +385,17 @@ function installSettingsMock(page) {
 }
 
 const baselines = [
-  { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, compactChat: true },
+  { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
   { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true },
   { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbPanel: true },
-  { name: 'chat-min-520x500-scale100', route: 'chat', width: 520, height: 500, scale: 1, compactChat: true, expandChat: true },
+  { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'settings-min-640x500-scale100', route: 'settings', width: 640, height: 500, scale: 1, mockSettings: true, verifySettingsNavigation: true },
   { name: 'memory-min-640x500-scale100', route: 'memory', width: 640, height: 500, scale: 1, mockMemory: true },
-  { name: 'chat-default-720x620-scale125', route: 'chat', width: 720, height: 620, scale: 1.25, compactChat: true },
+  { name: 'chat-default-720x620-scale125', route: 'chat', width: 720, height: 620, scale: 1.25, mockChat: true, compactChat: true },
   { name: 'settings-default-860x680-scale125', route: 'settings', width: 860, height: 680, scale: 1.25, mockSettings: true },
   { name: 'memory-default-900x720-scale125', route: 'memory', width: 900, height: 720, scale: 1.25, mockMemory: true },
-  { name: 'chat-default-720x620-scale150', route: 'chat', width: 720, height: 620, scale: 1.5, compactChat: true },
+  { name: 'chat-default-720x620-scale150', route: 'chat', width: 720, height: 620, scale: 1.5, mockChat: true, compactChat: true },
   { name: 'settings-default-860x680-scale150', route: 'settings', width: 860, height: 680, scale: 1.5, mockSettings: true },
   { name: 'memory-default-900x720-scale150', route: 'memory', width: 900, height: 720, scale: 1.5, mockMemory: true },
 ]
@@ -253,6 +423,7 @@ try {
       if (message.type() === 'error') consoleErrors.push(message.text())
     })
     page.on('pageerror', (error) => consoleErrors.push(error.message))
+    if (baseline.mockChat) await installChatMock(page)
     if (baseline.mockOrbPanel) await installOrbPanelMock(page)
     if (baseline.mockMemory) await installMemoryMock(page)
     if (baseline.mockSettings) await installSettingsMock(page)
@@ -266,8 +437,8 @@ try {
     const metrics = await page.evaluate(() => {
       const settingsLayout = document.querySelector('.ndp-settings-layout')
       const settingsNav = document.querySelector('.ndp-settings-nav')
-      const chatSummary = document.querySelector('.ndp-chat-membar-summary')
-      const chatDetails = document.querySelector('.ndp-chat-membar-details')
+      const chatSummary = document.querySelector('.ndp-chat-status-button')
+      const chatDetails = document.querySelector('.ndp-chat-status-drawer')
       return {
         viewport: { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight },
         body: { scrollWidth: document.body.scrollWidth, scrollHeight: document.body.scrollHeight },
@@ -285,7 +456,9 @@ try {
               summaryVisible: getComputedStyle(chatSummary).display !== 'none',
               detailsVisible: getComputedStyle(chatDetails).display !== 'none',
             }
-          : null,
+          : chatSummary
+            ? { summaryVisible: getComputedStyle(chatSummary).display !== 'none', detailsVisible: false }
+            : null,
       }
     })
 
@@ -307,13 +480,13 @@ try {
 
     let expandedChat = null
     if (baseline.expandChat) {
-      await page.locator('.ndp-chat-membar-summary').click()
+      await page.locator('.ndp-chat-status-button').click()
       await page.waitForTimeout(100)
       const expandedScreenshotPath = path.join(outputDir, `${baseline.name}-expanded.png`)
       const expandedScreenshot = path.relative(projectRoot, expandedScreenshotPath)
       await page.screenshot({ path: expandedScreenshotPath })
       expandedChat = await page.evaluate(() => {
-        const details = document.querySelector('.ndp-chat-membar-details')
+        const details = document.querySelector('.ndp-chat-status-drawer')
         const messages = document.querySelector('.ndp-chat-messages')
         if (!details || !messages) return null
         const detailsRect = details.getBoundingClientRect()
@@ -327,13 +500,107 @@ try {
       })
       if (expandedChat) expandedChat.screenshot = expandedScreenshot
       if (!expandedChat?.detailsVisible) failures.push('compact chat status details did not expand')
-      if ((expandedChat?.detailsHeight ?? Number.POSITIVE_INFINITY) > 260) {
+      if ((expandedChat?.detailsHeight ?? Number.POSITIVE_INFINITY) > 430) {
         failures.push(`compact chat status details are too tall: ${expandedChat?.detailsHeight}`)
       }
       if ((expandedChat?.messagesHeight ?? 0) < 100) {
         failures.push(`compact chat messages area is too short after expansion: ${expandedChat?.messagesHeight}`)
       }
       if (expandedChat?.horizontalOverflow) failures.push('expanded compact chat has horizontal overflow')
+    }
+
+    let chatUi = null
+    if (baseline.verifyChatUi) {
+      const statusDrawer = page.locator('.ndp-chat-status-drawer')
+      const statusVisible = await statusDrawer.isVisible().catch(() => false)
+      const quickSwitchCount = statusVisible ? await statusDrawer.locator('input[type="checkbox"]').count() : 0
+      const statusMetricCount = statusVisible ? await statusDrawer.locator('dd').count() : 0
+      if (!statusVisible) failures.push('chat runtime status drawer is not visible')
+      if (quickSwitchCount < 5) failures.push(`chat runtime status drawer has only ${quickSwitchCount} quick switches`)
+      if (statusMetricCount < 6) failures.push(`chat runtime status drawer has only ${statusMetricCount} metrics`)
+      if (statusVisible) await statusDrawer.getByRole('button', { name: '关闭运行状态' }).click()
+
+      await page.getByRole('button', { name: '配置模型', exact: true }).click()
+      await page.getByRole('button', { name: '选择角色', exact: true }).click()
+      await page.getByRole('button', { name: '导入配置', exact: true }).click()
+      const settingsTargets = await page.evaluate(() => window.__chatBaseline?.settingsTargets ?? [])
+      if (settingsTargets.join(',') !== 'aiConnection,persona,tools') {
+        failures.push(`chat empty-state settings targets are ${settingsTargets.join(',') || 'missing'}`)
+      }
+
+      await page.getByRole('button', { name: '添加附件' }).click()
+      const attachmentMenu = page.getByRole('menu', { name: '添加附件' })
+      const attachmentChoices = await attachmentMenu.getByRole('menuitem').allTextContents()
+      if (attachmentChoices.map((value) => value.trim()).join(',') !== '图片,视频,图片或视频') {
+        failures.push(`chat attachment menu choices are ${attachmentChoices.join(',') || 'missing'}`)
+      }
+      await page.keyboard.press('Escape')
+
+      const composer = page.getByRole('textbox', { name: '消息输入' })
+      await composer.fill('第一行')
+      const singleLineHeight = await composer.evaluate((element) => element.getBoundingClientRect().height)
+      await composer.press('Shift+Enter')
+      await composer.type('第二行')
+      const multilineValue = await composer.inputValue()
+      const multilineHeight = await composer.evaluate((element) => element.getBoundingClientRect().height)
+      if (multilineValue !== '第一行\n第二行') failures.push(`chat composer multiline value is ${JSON.stringify(multilineValue)}`)
+      if (multilineHeight <= singleLineHeight) failures.push(`chat composer did not grow: ${singleLineHeight} -> ${multilineHeight}`)
+
+      await composer.fill('输入法测试')
+      await composer.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true })
+      const composingValue = await composer.inputValue()
+      if (composingValue !== '输入法测试') failures.push('chat composer sent while composition was active')
+
+      await page.evaluate(() => window.__chatBaseline?.activateTask?.())
+      const stopButton = page.getByRole('button', { name: '停止当前输出' })
+      await stopButton.waitFor({ state: 'visible' })
+      await stopButton.click()
+      await page.waitForFunction(() => window.__chatBaseline?.cancelTaskIds?.length === 1)
+      await stopButton.waitFor({ state: 'hidden' })
+      const stopState = await page.evaluate(() => ({
+        canceled: window.__chatBaseline?.cancelTaskIds ?? [],
+        stopTtsCount: window.__chatBaseline?.stopTtsCount ?? 0,
+      }))
+      if (stopState.canceled.join(',') !== 'baseline-task') failures.push('chat stop did not cancel the active tool task')
+      if (stopState.stopTtsCount < 1) failures.push('chat stop did not stop TTS alongside the active task')
+
+      await composer.fill('发送测试')
+      await composer.press('Enter')
+      await page.waitForFunction(() => document.querySelector('textarea[aria-label="消息输入"]')?.value === '')
+      await page.locator('.ndp-msg-row').first().waitFor({ state: 'visible' })
+      await page.getByRole('button', { name: '发送' }).waitFor({ state: 'visible' })
+
+      await page.getByRole('button', { name: '更多' }).click()
+      await page.getByRole('menuitem', { name: '清空当前对话' }).click()
+      const clearDialog = page.getByRole('dialog', { name: '清空当前对话' })
+      await clearDialog.waitFor({ state: 'visible' })
+      const clearDialogScreenshotPath = path.join(outputDir, `${baseline.name}-clear-confirm.png`)
+      const clearDialogScreenshot = path.relative(projectRoot, clearDialogScreenshotPath)
+      await page.screenshot({ path: clearDialogScreenshotPath })
+      await page.keyboard.press('Escape')
+      if (!(await clearDialog.isHidden().catch(() => false))) failures.push('chat clear confirmation did not close with Escape')
+
+      await page.getByRole('button', { name: '更多' }).click()
+      await page.getByRole('menuitem', { name: '清空当前对话' }).click()
+      await clearDialog.getByRole('button', { name: '清空对话', exact: true }).click()
+      await page.waitForFunction(() => window.__chatBaseline?.clearCount === 1)
+      const clearCount = await page.evaluate(() => window.__chatBaseline?.clearCount ?? 0)
+      if (clearCount !== 1) failures.push(`chat clear action ran ${clearCount} times`)
+
+      chatUi = {
+        statusVisible,
+        quickSwitchCount,
+        statusMetricCount,
+        settingsTargets,
+        attachmentChoices,
+        multilineValue,
+        singleLineHeight,
+        multilineHeight,
+        composingValue,
+        stopState,
+        clearCount,
+        clearDialogScreenshot,
+      }
     }
 
     let settingsNavigation = null
@@ -367,6 +634,12 @@ try {
 
     let settingsSearch = null
     if (baseline.verifySettingsSearch) {
+      await page.evaluate(() => window.__navigateSettings?.('aiConnection'))
+      await page.waitForTimeout(80)
+      const directNavigationLabel = await page.locator('.ndp-settings-nav-item.active').textContent()
+      if (directNavigationLabel?.trim() !== 'API 连接') {
+        failures.push(`settings direct navigation opened ${directNavigationLabel?.trim() || 'nothing'}`)
+      }
       const search = page.getByRole('searchbox', { name: '搜索设置' })
       await search.fill('endpoint')
       await search.press('Enter')
@@ -385,6 +658,7 @@ try {
         contentClientHeight: document.querySelector('.ndp-settings-content')?.clientHeight ?? 0,
         contentScrollHeight: document.querySelector('.ndp-settings-content')?.scrollHeight ?? 0,
       }))
+      settingsSearch.directNavigationLabel = directNavigationLabel?.trim() ?? ''
       settingsSearch.savingVisible = savingVisible
       settingsSearch.screenshot = searchScreenshot
       if (settingsSearch.activeLabel !== 'API 连接') failures.push(`settings search opened ${settingsSearch.activeLabel || 'nothing'}`)
@@ -466,6 +740,7 @@ try {
       screenshot: path.relative(projectRoot, screenshotPath),
       metrics,
       expandedChat,
+      chatUi,
       settingsNavigation,
       settingsSearch,
       settingsConfirmDialog,

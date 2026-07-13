@@ -86,6 +86,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [showSessionList, setShowSessionList] = useState(false)
   const [showStatusDetails, setShowStatusDetails] = useState(false)
+  const [showMoreMenu, setShowMoreMenu] = useState(false)
+  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false)
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false)
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
   const [editingSessionName, setEditingSessionName] = useState('')
   const [contextMenu, setContextMenu] = useState<{ messageId: string; x: number; y: number } | null>(null)
@@ -107,6 +110,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const composerComposingRef = useRef(false)
+  const confirmClearButtonRef = useRef<HTMLButtonElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
@@ -1746,6 +1752,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     setContextMenu(null)
     setSessionContextMenu(null)
     setShowSessionList(false)
+    setShowStatusDetails(false)
+    setShowMoreMenu(false)
+    setShowAttachmentMenu(false)
   }, [])
 
   const readAvatarFile = useCallback((file: File, onLoaded: (dataUrl: string) => void) => {
@@ -2414,10 +2423,14 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     [api, sendBubblePreview],
   )
 
-  const isAssistantOutputting = isLoading || currentActiveChatTaskIds.length > 0
+  const hasActiveTts = ttsPendingUtteranceId != null || Object.keys(ttsRevealedSegments).length > 0
+  const isAssistantOutputting = isLoading || currentActiveChatTaskIds.length > 0 || hasActiveTts
 
   const stopAssistantOutput = useCallback(() => {
     interrupt()
+    setTtsPendingUtteranceId(null)
+    setTtsRevealedSegments({})
+    ttsUtteranceMetaRef.current = {}
     if (!api || currentActiveChatTaskIds.length === 0) return
 
     for (const taskId of currentActiveChatTaskIds) {
@@ -2428,13 +2441,8 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        try {
-          api?.stopTtsAll()
-        } catch (_) {
-          /* ignore */
-        }
-        if (isLoadingRef.current) {
-          interrupt()
+        if (isAssistantOutputting) {
+          stopAssistantOutput()
           return
         }
         closeOverlays()
@@ -2442,7 +2450,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [api, closeOverlays, interrupt])
+  }, [closeOverlays, isAssistantOutputting, stopAssistantOutput])
 
   useEffect(() => {
     if (!editingMessageId) return
@@ -2451,6 +2459,23 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     el.style.height = '0px'
     el.style.height = `${el.scrollHeight}px`
   }, [editingMessageId, editingMessageContent])
+
+  useEffect(() => {
+    const el = composerTextareaRef.current
+    if (!el) return
+    el.style.height = '0px'
+    el.style.height = `${Math.min(el.scrollHeight, 152)}px`
+  }, [input])
+
+  useEffect(() => {
+    if (!confirmClearOpen) return
+    confirmClearButtonRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setConfirmClearOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [confirmClearOpen])
 
   const send = useCallback(async (override?: {
     text?: string
@@ -3436,26 +3461,30 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   }, [currentSessionId, input, settings?.asr?.enabled, settings?.asr?.autoSend, syncAsrComposePreview])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !composerComposingRef.current) {
       e.preventDefault()
       if (isAssistantOutputting) stopAssistantOutput()
       else send()
     }
   }
 
-  const clearMessages = () => {
+  const clearMessages = async () => {
     if (!api) return
+    const sid =
+      currentSessionId ??
+      (await api.listChatSessions().then((r) => r.currentSessionId).catch(() => '')) ??
+      ''
+    if (!sid) return
+    await api.clearChatSession(sid)
     setMessages([])
+    setLastApiUsage(null)
     setError(null)
-    ;(async () => {
-      const sid =
-        currentSessionId ??
-        (await api.listChatSessions().then((r) => r.currentSessionId).catch(() => '')) ??
-        ''
-      if (!sid) return
-      await api.clearChatSession(sid)
-      await refreshSessions()
-    })().catch((err) => console.error(err))
+    await refreshSessions()
+  }
+
+  const requestClearMessages = () => {
+    closeOverlays()
+    setConfirmClearOpen(true)
   }
 
   const handleNewSession = useCallback(async () => {
@@ -4404,6 +4433,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       onMouseDown={(e) => {
         if ((e.target as HTMLElement).closest('.ndp-session-list')) return
         if ((e.target as HTMLElement).closest('.ndp-context-menu')) return
+        if ((e.target as HTMLElement).closest('.ndp-chat-popover')) return
+        if ((e.target as HTMLElement).closest('.ndp-chat-status-drawer')) return
+        if ((e.target as HTMLElement).closest('.ndp-dialog-backdrop')) return
         closeOverlays()
       }}
     >
@@ -4414,42 +4446,75 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         onPositionChange={(next) => api?.setChatUiSettings({ contextOrbX: next.x, contextOrbY: next.y })}
       />
       <header className="ndp-chat-header">
-        <button className="ndp-session-name" onClick={() => setShowSessionList((v) => !v)} title="对话管理">
-          对话管理：{currentSession?.name ?? '新对话'}
+        <button className="ndp-session-name" onMouseDown={(event) => event.stopPropagation()} onClick={() => setShowSessionList((v) => !v)} title="对话管理">
+          <span>{currentSession?.name ?? '新对话'}</span>
           <span className={`ndp-session-arrow ${showSessionList ? 'open' : ''}`}>▾</span>
         </button>
-        <div className="ndp-actions">
-          <button className="ndp-btn" onClick={clearMessages} title="清空对话">
-            清空
+        <div className="ndp-chat-header-actions">
+          <button className="ndp-chat-header-command" onClick={() => void handleNewSession()} title="新对话" aria-label="新对话">
+            <span aria-hidden="true">＋</span>
+            <span className="ndp-chat-header-command-label">新对话</span>
           </button>
-          <button className="ndp-btn" onClick={() => api?.openSettings()}>
-            设置
+          <button
+            type="button"
+            className={`ndp-chat-status-button ${isAssistantOutputting ? 'active' : ''}`}
+            aria-expanded={showStatusDetails}
+            aria-controls="ndp-chat-status-details"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => setShowStatusDetails((value) => !value)}
+            title="运行状态"
+          >
+            <span className="ndp-chat-status-dot" aria-hidden="true" />
+            <span>{isAssistantOutputting ? '运行中' : '空闲'}</span>
+            <span className="ndp-chat-status-secondary">记忆 {memEnabled ? '开' : '关'} · 工具 {plannerEnabled ? '开' : '关'}</span>
           </button>
-          <button className="ndp-btn" onClick={() => api?.openMemory()}>
-            记忆
-          </button>
-          <button className="ndp-btn ndp-btn-close" onClick={() => api?.closeCurrent()}>
+          <div className="ndp-chat-menu-anchor">
+            <button
+              className="ndp-chat-icon-button"
+              onClick={() => setShowMoreMenu((value) => !value)}
+              title="更多"
+              aria-label="更多"
+              aria-haspopup="menu"
+              aria-expanded={showMoreMenu}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              ⋯
+            </button>
+            {showMoreMenu ? (
+              <div className="ndp-chat-popover ndp-chat-more-menu" role="menu" aria-label="更多操作">
+                <button type="button" role="menuitem" onClick={() => void api?.openSettings()}>
+                  设置
+                </button>
+                <button type="button" role="menuitem" onClick={() => void api?.openMemory()}>
+                  记忆管理
+                </button>
+                <div className="ndp-chat-menu-divider" />
+                <button type="button" role="menuitem" className="danger" onClick={requestClearMessages} disabled={messages.length === 0}>
+                  清空当前对话
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <button className="ndp-chat-icon-button ndp-btn-close" onClick={() => api?.closeCurrent()} title="关闭" aria-label="关闭">
             ×
           </button>
         </div>
       </header>
 
-      <div className="ndp-chat-membar" onMouseDown={(e) => e.stopPropagation()}>
-        <button
-          type="button"
-          className="ndp-chat-membar-summary"
-          aria-expanded={showStatusDetails}
-          aria-controls="ndp-chat-status-details"
-          onClick={() => setShowStatusDetails((value) => !value)}
-        >
-          <span>状态 · 记忆 {memEnabled ? '开' : '关'} · 工具 {plannerEnabled ? '开' : '关'} · 视觉 {visionUi.text}</span>
-          <span className={`ndp-chat-membar-summary-arrow ${showStatusDetails ? 'open' : ''}`}>▾</span>
-        </button>
-        <div
-          id="ndp-chat-status-details"
-          className={`ndp-chat-membar-details ${showStatusDetails ? 'expanded' : ''}`}
-        >
-          <div className="ndp-chat-membar-left">
+      {showStatusDetails ? (
+        <aside id="ndp-chat-status-details" className="ndp-chat-status-drawer" aria-label="运行状态">
+          <div className="ndp-chat-status-drawer-header">
+            <div>
+              <strong>运行状态</strong>
+              <span>{isAssistantOutputting ? '正在处理当前请求' : '当前没有运行中的任务'}</span>
+            </div>
+            <button type="button" className="ndp-chat-icon-button" onClick={() => setShowStatusDetails(false)} aria-label="关闭运行状态">
+              ×
+            </button>
+          </div>
+          <div className="ndp-chat-status-section">
+            <div className="ndp-chat-status-section-title">快速开关</div>
+            <div className="ndp-chat-status-controls">
           <label className="ndp-chat-mem-toggle" title="采集：写入原文到长期记忆">
             <input type="checkbox" checked={captureEnabled} onChange={(e) => void toggleCaptureEnabled(e.target.checked)} />
             采集
@@ -4508,23 +4573,25 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             <option value="native">native</option>
             <option value="text">text</option>
           </select>
+            </div>
           </div>
-          <div className="ndp-chat-membar-right">
-          <span title="有效消息=合并连续助手消息后的条数">有效 {effectiveCountUi}</span>
-          <span>游标 {cursorUi}</span>
-          <span title={`阈值=${everyUi}`}>还差 {memEnabled && autoExtractEnabled ? remainingUi : '-'}</span>
-          <span>上次 {lastRunAtUi > 0 ? new Date(lastRunAtUi).toLocaleString() : '-'}</span>
-          <span>写入 {lastWriteCountUi}</span>
-          <span title={retrieveUi.title}>召回 {retrieveUi.text}</span>
-          <span title={visionUi.title}>视觉 {visionUi.text}</span>
-          {lastErrorUi ? (
-            <span className="ndp-chat-membar-error" title={lastErrorUi}>
-              失败 {lastErrorPreviewUi}
-            </span>
-          ) : null}
+          <div className="ndp-chat-status-section">
+            <div className="ndp-chat-status-section-title">本次会话</div>
+            <dl className="ndp-chat-status-grid">
+              <div><dt>有效消息</dt><dd>{effectiveCountUi}</dd></div>
+              <div><dt>提炼游标</dt><dd>{cursorUi}</dd></div>
+              <div title={`阈值=${everyUi}`}><dt>距离提炼</dt><dd>{memEnabled && autoExtractEnabled ? remainingUi : '-'}</dd></div>
+              <div><dt>最近写入</dt><dd>{lastWriteCountUi}</dd></div>
+              <div title={retrieveUi.title}><dt>记忆召回</dt><dd>{retrieveUi.text}</dd></div>
+              <div title={visionUi.title}><dt>视觉回执</dt><dd>{visionUi.text}</dd></div>
+              <div className="wide"><dt>上次提炼</dt><dd>{lastRunAtUi > 0 ? new Date(lastRunAtUi).toLocaleString() : '-'}</dd></div>
+            </dl>
+            {lastErrorUi ? (
+              <div className="ndp-chat-status-error" title={lastErrorUi}>最近失败：{lastErrorPreviewUi}</div>
+            ) : null}
           </div>
-        </div>
-      </div>
+        </aside>
+      ) : null}
 
       {showSessionList && (
         <div className="ndp-session-list" onMouseDown={(e) => e.stopPropagation()}>
@@ -4601,13 +4668,23 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       <main className="ndp-chat-messages">
         {messages.length === 0 ? (
           <div className="ndp-chat-empty">
-            <div className="ndp-muted">还没有消息</div>
-            <div className="ndp-muted ndp-chat-hint">
-              {settings?.ai?.hasApiKey ? (
-                <>模型: {settings.ai.model}</>
-              ) : (
-                <>请先在设置中配置 API Key</>
-              )}
+            <div className="ndp-chat-empty-kicker">{currentPersona?.name ?? '默认角色'}</div>
+            <h1>开始一段新对话</h1>
+            <p>
+              {settings?.ai?.hasApiKey
+                ? `当前模型：${settings.ai.model || '已配置模型'}`
+                : '先配置模型连接，然后就可以发送第一条消息。'}
+            </p>
+            <div className="ndp-chat-empty-actions">
+              <button className="ndp-btn ndp-btn-primary" onClick={() => void api?.openSettings('aiConnection')}>
+                {settings?.ai?.hasApiKey ? '检查模型配置' : '配置模型'}
+              </button>
+              <button className="ndp-btn" onClick={() => void api?.openSettings('persona')}>
+                选择角色
+              </button>
+              <button className="ndp-btn" onClick={() => void api?.openSettings('tools')}>
+                导入配置
+              </button>
             </div>
           </div>
         ) : null}
@@ -4678,7 +4755,35 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           </div>
         ) : null}
         <div className="ndp-chat-input-row">
-          <input
+          <div className="ndp-chat-menu-anchor ndp-chat-attachment-anchor">
+            <button
+              type="button"
+              className="ndp-chat-icon-button ndp-chat-composer-button"
+              onClick={() => setShowAttachmentMenu((value) => !value)}
+              title="添加附件"
+              aria-label="添加附件"
+              aria-haspopup="menu"
+              aria-expanded={showAttachmentMenu}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              ＋
+            </button>
+            {showAttachmentMenu ? (
+              <div className="ndp-chat-popover ndp-chat-attachment-menu" role="menu" aria-label="添加附件">
+                <button type="button" role="menuitem" onClick={() => { setShowAttachmentMenu(false); imageInputRef.current?.click() }}>
+                  图片
+                </button>
+                <button type="button" role="menuitem" onClick={() => { setShowAttachmentMenu(false); videoInputRef.current?.click() }}>
+                  视频
+                </button>
+                <button type="button" role="menuitem" onClick={() => { setShowAttachmentMenu(false); attachmentInputRef.current?.click() }}>
+                  图片或视频
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <textarea
+            ref={composerTextareaRef}
             value={input}
             onChange={(e) => {
               const next = e.target.value
@@ -4689,6 +4794,12 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               }
             }}
             onKeyDown={handleKeyDown}
+            onCompositionStart={() => {
+              composerComposingRef.current = true
+            }}
+            onCompositionEnd={() => {
+              composerComposingRef.current = false
+            }}
             onPaste={(e) => {
               const dt = e.clipboardData
               if (!dt) return
@@ -4728,30 +4839,55 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               }
             }}
             onDragOver={(e) => e.preventDefault()}
-            placeholder="输入一句话..."
+            placeholder="输入消息"
+            aria-label="消息输入"
+            rows={1}
           />
-          <button className="ndp-btn" onClick={() => imageInputRef.current?.click()} title={canUseVision ? '选择图片' : '选择图片（不会发给模型，只用于存档/检索）'}>
-            图片
-          </button>
-          <button className="ndp-btn" onClick={() => videoInputRef.current?.click()} title="选择视频（本地存档/检索用）">
-            视频
-          </button>
-          <button className="ndp-btn" onClick={() => attachmentInputRef.current?.click()} title="选择附件（可多选图片/视频）">
-            附件
-          </button>
           <button
-            className={`ndp-btn ${isAssistantOutputting ? 'ndp-btn-stop' : ''}`}
+            className={`ndp-chat-icon-button ndp-chat-composer-button ${isAssistantOutputting ? 'ndp-btn-stop' : 'ndp-chat-send-button'}`}
             onClick={() => {
               if (isAssistantOutputting) stopAssistantOutput()
               else send()
             }}
             disabled={!isAssistantOutputting && !input.trim() && pendingAttachments.length === 0}
             title={isAssistantOutputting ? '停止当前输出' : '发送'}
+            aria-label={isAssistantOutputting ? '停止当前输出' : '发送'}
           >
-            {isAssistantOutputting ? '停止' : '发送'}
+            <span aria-hidden="true">{isAssistantOutputting ? '■' : '↑'}</span>
           </button>
         </div>
       </footer>
+
+      {confirmClearOpen ? (
+        <div className="ndp-dialog-backdrop" onMouseDown={() => setConfirmClearOpen(false)}>
+          <div
+            className="ndp-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ndp-clear-chat-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <h2 id="ndp-clear-chat-dialog-title">清空当前对话</h2>
+            <p>当前会话中的全部消息将被删除，此操作无法撤销。</p>
+            <div className="ndp-dialog-actions">
+              <button type="button" className="ndp-btn" onClick={() => setConfirmClearOpen(false)}>
+                取消
+              </button>
+              <button
+                ref={confirmClearButtonRef}
+                type="button"
+                className="ndp-btn ndp-btn-danger"
+                onClick={() => {
+                  setConfirmClearOpen(false)
+                  void clearMessages().catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                }}
+              >
+                清空对话
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <input
         ref={imageInputRef}

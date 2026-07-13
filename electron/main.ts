@@ -99,6 +99,7 @@ import type {
   TaskRecord,
   TtsSettings,
   SettingsSecretTarget,
+  SettingsNavigationTarget,
   WorldBookSettings,
 } from './types'
 import { MemoryService } from './memoryService'
@@ -244,6 +245,24 @@ const windowManager = new WindowManager({
   rendererDistDir: RENDERER_DIST,
   mainDistDir: MAIN_DIST,
 })
+
+const SETTINGS_NAVIGATION_TARGETS = new Set<SettingsNavigationTarget>([
+  'live2d',
+  'bubble',
+  'taskPanel',
+  'aiConnection',
+  'aiGeneration',
+  'aiVision',
+  'aiAgent',
+  'tools',
+  'novelai',
+  'persona',
+  'worldBook',
+  'tts',
+  'asr',
+  'chat',
+])
+let pendingSettingsNavigationTarget: SettingsNavigationTarget | null = null
 const aiHttpProxy = new AIHttpProxy(getSettings)
 setWindowManagerInstance(windowManager)
 
@@ -1021,6 +1040,11 @@ function registerIpc() {
   })
 
   handleIpc('settings:get', () => getSettings())
+  handleIpc('settings:consumeNavigation', () => {
+    const target = pendingSettingsNavigationTarget
+    pendingSettingsNavigationTarget = null
+    return target
+  })
   handleIpc('settings:setSecret', (_event, target: SettingsSecretTarget, valueRaw: string) => {
     const value = String(valueRaw ?? '').trim()
     const current = getSettings()
@@ -2094,8 +2118,15 @@ function registerIpc() {
   handleIpc('window:openChat', () => {
     windowManager.ensureChatWindow()
   })
-  handleIpc('window:openSettings', () => {
-    windowManager.ensureSettingsWindow()
+  handleIpc('window:openSettings', (_event, targetRaw?: unknown) => {
+    const target = typeof targetRaw === 'string' && SETTINGS_NAVIGATION_TARGETS.has(targetRaw as SettingsNavigationTarget)
+      ? (targetRaw as SettingsNavigationTarget)
+      : null
+    if (target) pendingSettingsNavigationTarget = target
+    const existing = windowManager.getSettingsWindow()
+    const win = windowManager.ensureSettingsWindow()
+    if (!target) return
+    if (existing && !win.webContents.isLoadingMainFrame()) win.webContents.send('settings:navigate', target)
   })
   handleIpc('window:openMemory', () => {
     windowManager.ensureMemoryWindow()

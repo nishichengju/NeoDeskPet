@@ -10,7 +10,7 @@ export type WindowSizePolicy = {
 }
 
 export const MANAGED_WINDOW_SIZE_POLICIES: Readonly<Record<ManagedWindowType, WindowSizePolicy>> = Object.freeze({
-  chat: Object.freeze({ defaultWidth: 720, defaultHeight: 620, minWidth: 520, minHeight: 500 }),
+  chat: Object.freeze({ defaultWidth: 720, defaultHeight: 620, minWidth: 420, minHeight: 500 }),
   settings: Object.freeze({ defaultWidth: 860, defaultHeight: 680, minWidth: 640, minHeight: 500 }),
   memory: Object.freeze({ defaultWidth: 900, defaultHeight: 720, minWidth: 640, minHeight: 500 }),
 })

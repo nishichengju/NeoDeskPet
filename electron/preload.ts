@@ -58,6 +58,7 @@ import type {
   LocalMediaUrlResult,
   LocalMediaDataUrlResult,
   SettingsSecretTarget,
+  SettingsNavigationTarget,
 } from './types'
 import type { TtsOptions } from './ttsOptions'
 import { parsePreloadWindowType, pickPreloadApi } from './preloadPermissions'
@@ -389,7 +390,7 @@ const neoDeskPetApi = {
   },
 
   openChat: (): Promise<void> => ipcRenderer.invoke('window:openChat'),
-  openSettings: (): Promise<void> => ipcRenderer.invoke('window:openSettings'),
+  openSettings: (target?: SettingsNavigationTarget): Promise<void> => ipcRenderer.invoke('window:openSettings', target),
   openMemory: (): Promise<void> => ipcRenderer.invoke('window:openMemory'),
   setDisplayMode: (mode: DisplayMode): Promise<void> => ipcRenderer.invoke('window:setDisplayMode', mode),
   hideAll: (): Promise<void> => ipcRenderer.invoke('window:hideAll'),
@@ -434,6 +435,13 @@ const neoDeskPetApi = {
     ipcRenderer.on('settings:changed', handler)
     return () => ipcRenderer.off('settings:changed', handler)
   },
+  onSettingsNavigate: (listener: (target: SettingsNavigationTarget) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, target: SettingsNavigationTarget) => listener(target)
+    ipcRenderer.on('settings:navigate', handler)
+    return () => ipcRenderer.off('settings:navigate', handler)
+  },
+  consumeSettingsNavigation: (): Promise<SettingsNavigationTarget | null> =>
+    ipcRenderer.invoke('settings:consumeNavigation'),
 
   // Bubble message listener (for pet window to receive AI responses)
   onBubbleMessage: (listener: BubbleMessageListener): (() => void) => {

@@ -1,5 +1,21 @@
 export type WindowType = 'pet' | 'chat' | 'settings' | 'memory' | 'orb' | 'orb-menu'
 
+export type SettingsNavigationTarget =
+  | 'live2d'
+  | 'bubble'
+  | 'taskPanel'
+  | 'aiConnection'
+  | 'aiGeneration'
+  | 'aiVision'
+  | 'aiAgent'
+  | 'tools'
+  | 'novelai'
+  | 'persona'
+  | 'worldBook'
+  | 'tts'
+  | 'asr'
+  | 'chat'
+
 export type DisplayMode = 'live2d' | 'orb' | 'hidden'
 
 export type OrbUiState = 'ball' | 'bar' | 'panel'

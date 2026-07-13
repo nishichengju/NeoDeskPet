@@ -214,6 +214,22 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
     contentRef.current?.scrollTo({ top: 0 })
   }, [])
 
+  useEffect(() => {
+    if (!api) return
+    let active = true
+    const off = api.onSettingsNavigate((target) => {
+      activateView(target)
+      void api.consumeSettingsNavigation()
+    })
+    void api.consumeSettingsNavigation().then((target) => {
+      if (active && target) activateView(target)
+    })
+    return () => {
+      active = false
+      off()
+    }
+  }, [activateView, api])
+
   const selectSearchResult = useCallback((entry: SettingsSearchEntry) => {
     setActiveView(entry.view)
     if (entry.personaSubTab) setPersonaSubTab(entry.personaSubTab)
