@@ -959,6 +959,14 @@ AI 与能力
 - UI baseline 新增 `orb-image-viewer-560x720-scale100`，工具 mock 提供两张图片；基线从 18 增至 19 个场景，查看器从 `1/2` 切换到 `2/2`、缩放 `1 → 1.1 → 1`、Esc 关闭均通过，0 failure、0 console error、无横向或纵向溢出，打开态截图经人工检查无布局回归。
 - `npm test` 共 76 个测试文件、334 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 19 个 UI baseline 场景均通过。下一批继续拆分历史 popover 或消息菜单及其定位/动作边界。
 
+第四十八批进展（2026-07-14）：
+
+- 新增 `src/orb/OrbMessageMenu.tsx` 与 `orbMessageMenuUtils.ts`，抽离消息右键菜单 DOM、188×动态高度几何、助手 5 项/用户 4 项角色差异，以及相对 Orb 根容器的左右/上下边缘钳制；复制、编辑、重发、删除此条和删除本轮的业务实现继续由 `OrbApp` 持有。
+- 定位工具根据角色计算菜单高度，支持根容器与 viewport 兜底，并把 NaN/Infinity 坐标归零，避免异常事件生成被 React 丢弃的无效 `left/top`；`OrbApp.tsx` 从 2016 行降至 1992 行，未修改菜单 CSS、动作顺序、复制文案或消息持久化语义。
+- 新增 3 个菜单测试，覆盖助手/用户右下角钳制、非有限坐标、固定宽度/圆角 DOM、助手专属复制项和用户四动作委托。
+- UI baseline 新增 `orb-message-menu-560x720-scale100`，以原生 `MouseEvent('contextmenu')` 在助手消息右下角打开菜单，验证边界 `362/514/550/712` 完全位于 560×720 根容器内、5 项顺序、助手编辑初值、用户 4 项无复制和点击输入框关闭；基线从 19 增至 20 个场景，0 failure、0 console error、无横向或纵向溢出，截图经人工检查无布局回归。
+- `npm test` 共 77 个测试文件、337 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 20 个 UI baseline 场景均通过。下一批继续拆分历史 popover 及会话选择/删除/刷新边界，完成 Orb 主要弹层收口。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

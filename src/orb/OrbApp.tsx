@@ -24,8 +24,10 @@ import { OrbBarView, type OrbPendingAttachment } from './OrbBarView'
 import { OrbAssistantMessageContent } from './OrbAssistantMessageContent'
 import { OrbImageViewer, type OrbImageViewerItem } from './OrbImageViewer'
 import { OrbMessageAttachments } from './OrbMessageAttachments'
+import { OrbMessageMenu } from './OrbMessageMenu'
 import { OrbPanelView } from './OrbPanelView'
 import type { OrbImageViewerRequestItem } from './orbMessageContentUtils'
+import { getOrbMessageMenuPosition } from './orbMessageMenuUtils'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
 type PopoverKind = 'history'
@@ -47,11 +49,6 @@ const MENU_RADIUS = 16
 
 const HISTORY_WIDTH = 320
 const HISTORY_MAX_ITEMS = 8
-
-const MSG_MENU_WIDTH = 188
-const MSG_MENU_ITEM_HEIGHT = 36
-const MSG_MENU_PADDING = 8
-const MSG_MENU_RADIUS = 14
 
 function normalizeMode(state: OrbUiState): OrbMode {
   if (state === 'ball') return 'ball'
@@ -1233,19 +1230,18 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       }
 
       const target = panelMessagesRef.current.find((m) => m.id === messageId) ?? null
-      const itemCount = target?.role === 'assistant' ? 5 : 4
-      const menuHeight = MSG_MENU_PADDING * 2 + itemCount * MSG_MENU_ITEM_HEIGHT
-
       const rect = rootRef.current?.getBoundingClientRect()
-      const maxW = rect?.width ?? window.innerWidth
-      const maxH = rect?.height ?? window.innerHeight
-      const rawX = rect ? e.clientX - rect.left : e.clientX
-      const rawY = rect ? e.clientY - rect.top : e.clientY
-      const left = clamp(Math.round(rawX), 10, Math.max(10, Math.round(maxW - MSG_MENU_WIDTH - 10)))
-      const top = clamp(Math.round(rawY), 10, Math.max(10, Math.round(maxH - menuHeight - 10)))
+      const position = getOrbMessageMenuPosition({
+        clientX: e.clientX,
+        clientY: e.clientY,
+        rootBounds: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null,
+        role: target?.role,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      })
 
       closePopover()
-      setMessageMenu({ messageId, left, top })
+      setMessageMenu({ messageId, ...position })
     },
     [closeMessageMenu, closePopover, messageMenu?.messageId, mode],
   )
@@ -1870,36 +1866,16 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       ) : null}
 
       {renderMode === 'panel' && messageMenu && messageMenuTarget ? (
-        <div
-          className="ndp-orbapp-msgmenu"
-          data-orb-msgmenu="true"
-          style={
-            {
-              left: messageMenu.left,
-              top: messageMenu.top,
-              width: MSG_MENU_WIDTH,
-              borderRadius: MSG_MENU_RADIUS,
-            } as React.CSSProperties
-          }
-        >
-          {messageMenuTarget.role === 'assistant' ? (
-            <button className="ndp-orbapp-msgmenu-item" onClick={() => void handleCopyAssistantText(messageMenuTarget.id)}>
-              复制正文
-            </button>
-          ) : null}
-          <button className="ndp-orbapp-msgmenu-item" onClick={() => handleStartEdit(messageMenuTarget.id)}>
-            编辑
-          </button>
-          <button className="ndp-orbapp-msgmenu-item" onClick={() => void handleResend(messageMenuTarget.id)}>
-            重新生成
-          </button>
-          <button className="ndp-orbapp-msgmenu-item" onClick={() => void handleDeleteMessage(messageMenuTarget.id)}>
-            删除此条
-          </button>
-          <button className="ndp-orbapp-msgmenu-item" onClick={() => void handleDeleteTurn(messageMenuTarget.id)}>
-            删除本轮
-          </button>
-        </div>
+        <OrbMessageMenu
+          message={messageMenuTarget}
+          left={messageMenu.left}
+          top={messageMenu.top}
+          onCopyAssistantText={() => void handleCopyAssistantText(messageMenuTarget.id)}
+          onEdit={() => handleStartEdit(messageMenuTarget.id)}
+          onResend={() => void handleResend(messageMenuTarget.id)}
+          onDeleteMessage={() => void handleDeleteMessage(messageMenuTarget.id)}
+          onDeleteTurn={() => void handleDeleteTurn(messageMenuTarget.id)}
+        />
       ) : null}
 
       {popover?.kind === 'history' && popover.ready ? (

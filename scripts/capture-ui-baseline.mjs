@@ -497,6 +497,7 @@ const baselines = [
   { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel' },
   { name: 'orb-panel-content-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true },
   { name: 'orb-image-viewer-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true, verifyOrbImageViewer: true },
+  { name: 'orb-message-menu-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true, verifyOrbMessageMenu: true },
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
   { name: 'chat-tool-card-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyToolCard: true },
@@ -871,6 +872,93 @@ try {
       if (!(await viewer.isHidden().catch(() => false))) failures.push('orb image viewer did not close with Escape')
     }
 
+    let orbMessageMenu = null
+    if (baseline.verifyOrbMessageMenu) {
+      const assistantMessage = page.locator('.ndp-orbpanel-msg-assistant').first()
+      await assistantMessage.waitFor({ state: 'visible' })
+      await assistantMessage.evaluate((element) => {
+        const rect = element.getBoundingClientRect()
+        element.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          button: 2,
+          clientX: Math.max(1, Math.min(window.innerWidth - 2, rect.right - 2)),
+          clientY: Math.max(1, Math.min(window.innerHeight - 2, rect.bottom - 2)),
+        }))
+      })
+      const menu = page.locator('.ndp-orbapp-msgmenu')
+      await menu.waitFor({ state: 'visible' })
+      const assistantItems = (await menu.locator('.ndp-orbapp-msgmenu-item').allTextContents()).map((text) => text.trim())
+      const assistantGeometry = await page.evaluate(() => {
+        const root = document.querySelector('.ndp-orbapp-root')?.getBoundingClientRect()
+        const menuRect = document.querySelector('.ndp-orbapp-msgmenu')?.getBoundingClientRect()
+        if (!root || !menuRect) return null
+        return {
+          left: menuRect.left - root.left,
+          top: menuRect.top - root.top,
+          right: menuRect.right - root.left,
+          bottom: menuRect.bottom - root.top,
+          rootWidth: root.width,
+          rootHeight: root.height,
+          inlineStyle: document.querySelector('.ndp-orbapp-msgmenu')?.getAttribute('style') ?? '',
+        }
+      })
+      const menuScreenshotPath = path.join(outputDir, `${baseline.name}-assistant.png`)
+      await page.screenshot({ path: menuScreenshotPath })
+      await menu.getByRole('button', { name: '编辑', exact: true }).click()
+      const editor = page.locator('.ndp-orbpanel-edit-textarea')
+      await editor.waitFor({ state: 'visible' })
+      const assistantEditValue = await editor.inputValue()
+      await page.getByRole('button', { name: '取消', exact: true }).click()
+      await editor.waitFor({ state: 'hidden' })
+
+      const userMessage = page.locator('.ndp-orbpanel-msg-user').first()
+      await userMessage.evaluate((element) => {
+        const rect = element.getBoundingClientRect()
+        element.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          button: 2,
+          clientX: Math.max(1, rect.left + rect.width / 2),
+          clientY: Math.max(1, rect.top + rect.height / 2),
+        }))
+      })
+      await menu.waitFor({ state: 'visible' })
+      const userItems = (await menu.locator('.ndp-orbapp-msgmenu-item').allTextContents()).map((text) => text.trim())
+      await page.locator('.ndp-orbapp-input').click()
+      const closedOutside = await menu.isHidden().catch(() => false)
+
+      orbMessageMenu = {
+        assistantItems,
+        assistantGeometry,
+        assistantEditValue,
+        userItems,
+        closedOutside,
+        screenshot: path.relative(projectRoot, menuScreenshotPath),
+      }
+      if (assistantItems.join(',') !== '复制正文,编辑,重新生成,删除此条,删除本轮') {
+        failures.push(`orb assistant message menu items are ${assistantItems.join(',') || 'missing'}`)
+      }
+      if (!assistantGeometry) {
+        failures.push('orb assistant message menu geometry is missing')
+      } else if (
+        assistantGeometry.left < 0 ||
+        assistantGeometry.top < 0 ||
+        assistantGeometry.right > assistantGeometry.rootWidth ||
+        assistantGeometry.bottom > assistantGeometry.rootHeight
+      ) {
+        failures.push(`orb assistant message menu exceeds root bounds: ${JSON.stringify(assistantGeometry)}`)
+      }
+      if (!assistantGeometry?.inlineStyle.includes('left:') || !assistantGeometry.inlineStyle.includes('top:')) {
+        failures.push(`orb assistant message menu position style is ${assistantGeometry?.inlineStyle || 'missing'}`)
+      }
+      if (!assistantEditValue.includes('Baseline result')) failures.push('orb assistant edit did not load the message text')
+      if (userItems.join(',') !== '编辑,重新生成,删除此条,删除本轮') {
+        failures.push(`orb user message menu items are ${userItems.join(',') || 'missing'}`)
+      }
+      if (!closedOutside) failures.push('orb message menu did not close after an outside click')
+    }
+
     let toolCard = null
     if (baseline.verifyToolCard) {
       const summary = page.locator('.ndp-tooluse-summary').first()
@@ -1037,6 +1125,7 @@ try {
       chatUi,
       imageViewer,
       orbImageViewer,
+      orbMessageMenu,
       toolCard,
       settingsNavigation,
       settingsSearch,
