@@ -98,4 +98,21 @@
 | `npm run ipc:smoke` | 五类窗口、SQLite 重启往返、密钥代理和 IPC 权限通过 |
 | `npm run ui:baseline` | 13 个场景通过 |
 
-本批未修改 renderer、preload API、IPC 权限矩阵或媒体路径策略。P2-1 后续继续拆分 Task、Memory、TTS 和 Window IPC。
+本批未修改 renderer、preload API、IPC 权限矩阵或媒体路径策略。Task IPC 已在第四批完成，后续继续拆分 Memory、TTS 和 Window IPC。
+
+## P2-1：大型模块拆分与领域边界（第四批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task IPC 适配层
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 24 个测试文件、90 个用例通过 |
+| Task IPC 行为测试 | 8 通道、未就绪返回语义和全部操作委托通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | Chat/Orb/Pet 任务能力表完整，五类窗口无运行时错误 |
+| `npm run ui:baseline` | 13 个场景通过 |
+
+本批未修改 TaskService 调度、任务存储、renderer、preload API 或 IPC 权限矩阵。P2-1 后续继续拆分 Memory、TTS 和 Window IPC。

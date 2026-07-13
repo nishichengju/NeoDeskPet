@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三批：Settings、Chat 持久化与附件 IPC 已拆分）
+- 状态：P2-1 进行中（第四批：Settings、Chat 与 Task IPC 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -561,6 +561,15 @@ AI 与能力
 - `electron/main.ts` 从第二批后的 2270 行降至 2099 行；相较 P2-1 开始时累计减少 644 行。
 - 新增 5 个附件 IPC 测试，覆盖三通道注册、data URL 保存、外部选择文件复制、相对路径恢复、opaque HTTP URL、错误脱敏、类型不匹配和服务关闭失效。
 - `npm test` 共 87 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 SQLite IPC smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
+
+### P2-1 进展记录（2026-07-13，第四批）
+
+- 将 8 个 Task IPC 通道迁移到 `electron/ipc/registerTaskIpc.ts`，覆盖列表、查询、工具运行图片回写、创建、暂停、恢复、取消和移除。
+- 显式导出 `TaskIpcService` 输入契约；TaskService 的构造、持久化、调度器和 `onChanged` 广播生命周期仍由主进程负责，领域模块只注册稳定 IPC 适配层。
+- 保留服务未就绪语义：列表返回空集合，查询/状态操作返回 `null`，只有创建任务抛出 `Task service not ready`。
+- `electron/main.ts` 从第三批后的 2099 行降至 2083 行；相较 P2-1 开始时累计减少 660 行。
+- 新增 3 个 Task IPC 测试，覆盖 8 通道注册、未就绪返回差异以及所有参数/返回值委托。
+- `npm test` 共 90 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC 双启动 smoke 和 13 个 UI baseline 场景均通过。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -72,9 +72,7 @@ import type {
   MemoryVersionRecord,
   Persona,
   PersonaSummary,
-  TaskCreateArgs,
   TaskListResult,
-  TaskRecord,
   SettingsNavigationTarget,
 } from './types'
 import { MemoryService } from './memoryService'
@@ -96,6 +94,7 @@ import {
 import { registerSettingsIpc } from './ipc/registerSettingsIpc'
 import { registerChatPersistenceIpc } from './ipc/registerChatPersistenceIpc'
 import { ChatAttachmentIpcService } from './ipc/registerChatAttachmentIpc'
+import { registerTaskIpc } from './ipc/registerTaskIpc'
 
 const APP_ID = 'io.github.nishichengju.neodeskpet'
 app.setName('NeoDeskPet')
@@ -1045,22 +1044,7 @@ function registerIpc() {
 
   chatAttachmentIpc.register(handleIpc)
 
-  // Tasks / Orchestrator (M1)
-  handleIpc('task:list', (): TaskListResult => taskService?.listTasks() ?? { items: [] })
-  handleIpc('task:get', (_event, id: string): TaskRecord | null => taskService?.getTask(id) ?? null)
-  handleIpc(
-    'task:updateToolRunImages',
-    (_event, taskId: string, runId: string, imagePaths: string[]): TaskRecord | null =>
-      taskService?.updateToolRunImages(taskId, runId, imagePaths) ?? null,
-  )
-  handleIpc('task:create', (_event, args: TaskCreateArgs): TaskRecord => {
-    if (!taskService) throw new Error('Task service not ready')
-    return taskService.createTask(args)
-  })
-  handleIpc('task:pause', (_event, id: string): TaskRecord | null => taskService?.pauseTask(id) ?? null)
-  handleIpc('task:resume', (_event, id: string): TaskRecord | null => taskService?.resumeTask(id) ?? null)
-  handleIpc('task:cancel', (_event, id: string): TaskRecord | null => taskService?.cancelTask(id) ?? null)
-  handleIpc('task:dismiss', (_event, id: string): { ok: true } | null => taskService?.dismissTask(id) ?? null)
+  registerTaskIpc({ handle: handleIpc, getTaskService: () => taskService })
 
   // Long-term memory / personas
   handleIpc('memory:listPersonas', (): PersonaSummary[] => memoryService?.listPersonas() ?? [])
