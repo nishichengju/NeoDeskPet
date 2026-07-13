@@ -4,6 +4,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { DisplayMode, OrbUiState, WindowBounds, WindowType } from './types'
 import { isTrustedApplicationUrl } from './ipcPermissions'
 import { getSettings, setSettings } from './store'
+import {
+  MANAGED_WINDOW_SIZE_POLICIES,
+  normalizeManagedWindowBounds,
+  type ManagedWindowType,
+} from './windowBounds'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -94,10 +99,23 @@ function applyWindowAlwaysOnTop(win: BrowserWindow, value: boolean): void {
 function getBounds(type: WindowType): WindowBounds {
   const settings = getSettings()
   if (type === 'pet') return clampPetBounds(settings.petWindowBounds)
-  if (type === 'chat') return clampBounds(settings.chatWindowBounds)
-  if (type === 'settings') return clampBounds(settings.settingsWindowBounds)
+  if (type === 'chat') return clampBounds(normalizeManagedWindowBounds('chat', settings.chatWindowBounds))
+  if (type === 'settings') return clampBounds(normalizeManagedWindowBounds('settings', settings.settingsWindowBounds))
   if (type === 'orb') return clampBounds(settings.orbWindowBounds)
-  return clampBounds(settings.memoryWindowBounds)
+  return clampBounds(normalizeManagedWindowBounds('memory', settings.memoryWindowBounds))
+}
+
+function getEffectiveMinimumSize(type: ManagedWindowType, bounds: WindowBounds): { width: number; height: number } {
+  const policy = MANAGED_WINDOW_SIZE_POLICIES[type]
+  return {
+    width: Math.min(policy.minWidth, bounds.width),
+    height: Math.min(policy.minHeight, bounds.height),
+  }
+}
+
+function applyManagedWindowMinimumSize(win: BrowserWindow, type: ManagedWindowType, bounds: WindowBounds): void {
+  const minimum = getEffectiveMinimumSize(type, bounds)
+  win.setMinimumSize(minimum.width, minimum.height)
 }
 
 function persistBounds(type: WindowType, bounds: Electron.Rectangle): void {
@@ -110,7 +128,12 @@ function persistBounds(type: WindowType, bounds: Electron.Rectangle): void {
     width: bounds.width,
     height: bounds.height,
   }
-  const nextBounds = type === 'pet' ? clampPetBounds(rawBounds) : clampBounds(rawBounds)
+  const nextBounds =
+    type === 'pet'
+      ? clampPetBounds(rawBounds)
+      : type === 'chat' || type === 'settings' || type === 'memory'
+        ? clampBounds(normalizeManagedWindowBounds(type, rawBounds))
+        : clampBounds(rawBounds)
 
   if (type === 'pet') setSettings({ petWindowBounds: nextBounds })
   else if (type === 'chat') setSettings({ chatWindowBounds: nextBounds })
@@ -195,6 +218,36 @@ export class WindowManager {
     if (this.deps.rendererDevUrl) return devUrlWithHash(this.deps.rendererDevUrl, type)
     const rendererEntry = pathToFileURL(path.join(this.deps.rendererDistDir, 'index.html')).toString()
     return `${rendererEntry}#/${type}`
+  }
+
+  recoverWindowsToVisibleArea(): void {
+    const recover = (win: BrowserWindow | null, type: WindowType) => {
+      if (!win || win.isDestroyed()) return
+      const current = win.getBounds()
+      const next =
+        type === 'pet'
+          ? clampPetBounds(current)
+          : type === 'chat' || type === 'settings' || type === 'memory'
+            ? clampBounds(normalizeManagedWindowBounds(type, current))
+            : clampBounds(current)
+      if (type === 'chat' || type === 'settings' || type === 'memory') {
+        applyManagedWindowMinimumSize(win, type, next)
+      }
+      if (
+        current.x !== next.x ||
+        current.y !== next.y ||
+        current.width !== next.width ||
+        current.height !== next.height
+      ) {
+        win.setBounds({ x: next.x ?? current.x, y: next.y ?? current.y, width: next.width, height: next.height })
+      }
+    }
+
+    recover(this.petWindow, 'pet')
+    recover(this.chatWindow, 'chat')
+    recover(this.settingsWindow, 'settings')
+    recover(this.memoryWindow, 'memory')
+    recover(this.orbWindow, 'orb')
   }
 
   isTrustedWindowUrl(rawUrl: string, type: WindowType): boolean {
@@ -294,8 +347,11 @@ export class WindowManager {
     }
 
     const bounds = getBounds('chat')
+    const minimum = getEffectiveMinimumSize('chat', bounds)
     const win = new BrowserWindow({
       ...bounds,
+      minWidth: minimum.width,
+      minHeight: minimum.height,
       title: 'NeoDeskPet - Chat',
       show,
       frame: false,
@@ -354,8 +410,11 @@ export class WindowManager {
     }
 
     const bounds = getBounds('settings')
+    const minimum = getEffectiveMinimumSize('settings', bounds)
     const win = new BrowserWindow({
       ...bounds,
+      minWidth: minimum.width,
+      minHeight: minimum.height,
       title: 'NeoDeskPet - Settings',
       show: true,
       frame: false,
@@ -388,8 +447,11 @@ export class WindowManager {
     }
 
     const bounds = getBounds('memory')
+    const minimum = getEffectiveMinimumSize('memory', bounds)
     const win = new BrowserWindow({
       ...bounds,
+      minWidth: minimum.width,
+      minHeight: minimum.height,
       title: 'NeoDeskPet - Memory',
       show: true,
       frame: false,

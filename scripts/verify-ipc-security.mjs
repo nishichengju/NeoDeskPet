@@ -46,6 +46,11 @@ const aiServer = http.createServer(async (request, response) => {
 await new Promise((resolve) => aiServer.listen(0, '127.0.0.1', resolve))
 const aiServerAddress = aiServer.address()
 const aiServerOrigin = `http://127.0.0.1:${aiServerAddress.port}`
+const expectedWindowSizes = {
+  chat: { defaultWidth: 720, defaultHeight: 620, minWidth: 520, minHeight: 500 },
+  settings: { defaultWidth: 860, defaultHeight: 680, minWidth: 640, minHeight: 500 },
+  memory: { defaultWidth: 900, defaultHeight: 720, minWidth: 640, minHeight: 500 },
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -90,6 +95,10 @@ async function apiKeys(page) {
   return page.evaluate(() => Object.keys(window.neoDeskPet).sort())
 }
 
+async function windowSize(page) {
+  return page.evaluate(() => ({ width: window.outerWidth, height: window.outerHeight }))
+}
+
 const executablePath = packagedExe && existsSync(packagedExe) ? packagedExe : electronExe
 const args = packagedExe && existsSync(packagedExe)
   ? [`--user-data-dir=${userDataDir}`]
@@ -115,6 +124,20 @@ try {
     orb = await windowPromise
   }
   await waitForApi(orb, 'orb')
+
+  const defaultWindowSizes = {
+    chat: await windowSize(chat),
+    settings: await windowSize(settings),
+    memory: await windowSize(memory),
+  }
+  for (const type of Object.keys(defaultWindowSizes)) {
+    const actual = defaultWindowSizes[type]
+    const expected = expectedWindowSizes[type]
+    assert(
+      Math.abs(actual.width - expected.defaultWidth) <= 4 && Math.abs(actual.height - expected.defaultHeight) <= 4,
+      `${type} default size is ${actual.width}x${actual.height}, expected ${expected.defaultWidth}x${expected.defaultHeight}`,
+    )
+  }
 
   await settings.evaluate(
     async ({ origin, key }) => {
@@ -283,10 +306,30 @@ try {
     'encrypted secrets file is missing the main AI key',
   )
 
+  persistedSettings.chatWindowBounds = { ...(persistedSettings.chatWindowBounds ?? {}), width: 420, height: 360 }
+  persistedSettings.settingsWindowBounds = { ...(persistedSettings.settingsWindowBounds ?? {}), width: 420, height: 400 }
+  persistedSettings.memoryWindowBounds = { ...(persistedSettings.memoryWindowBounds ?? {}), width: 560, height: 480 }
+  writeFileSync(settingsFile, `${JSON.stringify(persistedSettings, null, 2)}\n`, 'utf8')
+
   app = await launchApp()
   const restartedPet = await app.firstWindow({ timeout: 30_000 })
   const restartMainRoute = await (await waitForMainWindowApi(restartedPet)).jsonValue()
   const restartedChat = await openWindow(app, restartedPet, 'openChat', 'chat')
+  const restartedSettings = await openWindow(app, restartedChat, 'openSettings', 'settings')
+  const restartedMemory = await openWindow(app, restartedSettings, 'openMemory', 'memory')
+  const normalizedLegacyWindowSizes = {
+    chat: await windowSize(restartedChat),
+    settings: await windowSize(restartedSettings),
+    memory: await windowSize(restartedMemory),
+  }
+  for (const type of Object.keys(normalizedLegacyWindowSizes)) {
+    const actual = normalizedLegacyWindowSizes[type]
+    const expected = expectedWindowSizes[type]
+    assert(
+      actual.width >= expected.minWidth && actual.height >= expected.minHeight,
+      `${type} legacy size was not normalized after restart: ${actual.width}x${actual.height}`,
+    )
+  }
   const restartSecretExposure = await restartedChat.evaluate(async () => {
     const current = await window.neoDeskPet.getSettings()
     return { apiKey: current.ai.apiKey, hasApiKey: current.ai.hasApiKey }
@@ -312,6 +355,9 @@ try {
     outputDir,
     urls,
     keys,
+    windowSizes: {
+      defaults: defaultWindowSizes,
+    },
     runtimeErrors,
     aiProxy: {
       request: aiProxyRequest,
@@ -326,6 +372,7 @@ try {
       },
       restart: {
         mainRoute: restartMainRoute,
+        normalizedLegacyWindowSizes,
         rendererSecretExposure: restartSecretExposure,
         request: restartProxyRequest,
       },

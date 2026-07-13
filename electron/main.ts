@@ -2669,6 +2669,19 @@ app.whenReady().then(async () => {
     console.error('[ChatStore] warmup failed:', err)
   }
 
+  let displayRecoveryTimer: NodeJS.Timeout | null = null
+  const scheduleWindowRecovery = () => {
+    if (displayRecoveryTimer) clearTimeout(displayRecoveryTimer)
+    displayRecoveryTimer = setTimeout(() => {
+      displayRecoveryTimer = null
+      windowManager.recoverWindowsToVisibleArea()
+    }, 150)
+    ;(displayRecoveryTimer as unknown as { unref?: () => void }).unref?.()
+  }
+  screen.on('display-added', scheduleWindowRecovery)
+  screen.on('display-removed', scheduleWindowRecovery)
+  screen.on('display-metrics-changed', scheduleWindowRecovery)
+
   // 启动后按 displayMode 恢复窗口形态，并在 orb 模式恢复 Orb UI 状态。
   windowManager.applyDisplayMode()
   if (getSettings().displayMode === 'orb') {

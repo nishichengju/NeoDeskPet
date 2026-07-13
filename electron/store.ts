@@ -33,6 +33,7 @@ import {
   normalizeThinkingEffortLegacy,
   resolveReasoningUiState,
 } from './reasoningConfig'
+import { createDefaultManagedWindowBounds, normalizeManagedWindowBounds } from './windowBounds'
 import { compareExactSemver, selectPendingMigrationVersions } from './settingsMigrationPlan'
 import {
   SETTINGS_FILE_NAME,
@@ -477,9 +478,9 @@ const defaultSettings: AppSettings = {
   memory: defaultMemorySettings,
   memoryConsole: defaultMemoryConsoleSettings,
   petWindowBounds: { width: 350, height: 450 },
-  chatWindowBounds: { width: 420, height: 560 },
-  settingsWindowBounds: { width: 420, height: 520 },
-  memoryWindowBounds: { width: 560, height: 720 },
+  chatWindowBounds: createDefaultManagedWindowBounds('chat'),
+  settingsWindowBounds: createDefaultManagedWindowBounds('settings'),
+  memoryWindowBounds: createDefaultManagedWindowBounds('memory'),
   // Orb window bounds for expanded state
   orbWindowBounds: { width: 560, height: 720 },
   // Live2D settings
@@ -806,6 +807,9 @@ export function normalizeSettings(value: Partial<AppSettings> | undefined): AppS
     width: expectedPetWidth,
     height: expectedPetHeight,
   }
+  merged.chatWindowBounds = normalizeManagedWindowBounds('chat', value?.chatWindowBounds)
+  merged.settingsWindowBounds = normalizeManagedWindowBounds('settings', value?.settingsWindowBounds)
+  merged.memoryWindowBounds = normalizeManagedWindowBounds('memory', value?.memoryWindowBounds)
   // 兼容历史配置：旧值 320ms 自动回写到 200ms
   if ((value?.asr as Partial<AsrSettings> | undefined)?.vadChunkMs === 320) {
     merged.asr.vadChunkMs = 200

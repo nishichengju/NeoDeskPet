@@ -85,6 +85,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [showSessionList, setShowSessionList] = useState(false)
+  const [showStatusDetails, setShowStatusDetails] = useState(false)
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
   const [editingSessionName, setEditingSessionName] = useState('')
   const [contextMenu, setContextMenu] = useState<{ messageId: string; x: number; y: number } | null>(null)
@@ -4434,7 +4435,21 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       </header>
 
       <div className="ndp-chat-membar" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="ndp-chat-membar-left">
+        <button
+          type="button"
+          className="ndp-chat-membar-summary"
+          aria-expanded={showStatusDetails}
+          aria-controls="ndp-chat-status-details"
+          onClick={() => setShowStatusDetails((value) => !value)}
+        >
+          <span>状态 · 记忆 {memEnabled ? '开' : '关'} · 工具 {plannerEnabled ? '开' : '关'} · 视觉 {visionUi.text}</span>
+          <span className={`ndp-chat-membar-summary-arrow ${showStatusDetails ? 'open' : ''}`}>▾</span>
+        </button>
+        <div
+          id="ndp-chat-status-details"
+          className={`ndp-chat-membar-details ${showStatusDetails ? 'expanded' : ''}`}
+        >
+          <div className="ndp-chat-membar-left">
           <label className="ndp-chat-mem-toggle" title="采集：写入原文到长期记忆">
             <input type="checkbox" checked={captureEnabled} onChange={(e) => void toggleCaptureEnabled(e.target.checked)} />
             采集
@@ -4493,8 +4508,8 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             <option value="native">native</option>
             <option value="text">text</option>
           </select>
-        </div>
-        <div className="ndp-chat-membar-right">
+          </div>
+          <div className="ndp-chat-membar-right">
           <span title="有效消息=合并连续助手消息后的条数">有效 {effectiveCountUi}</span>
           <span>游标 {cursorUi}</span>
           <span title={`阈值=${everyUi}`}>还差 {memEnabled && autoExtractEnabled ? remainingUi : '-'}</span>
@@ -4507,6 +4522,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
               失败 {lastErrorPreviewUi}
             </span>
           ) : null}
+          </div>
         </div>
       </div>
 
