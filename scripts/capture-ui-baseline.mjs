@@ -260,7 +260,7 @@ function installChatMock(page, options = {}) {
 }
 
 function installOrbMock(page, options) {
-  return page.addInitScript(({ initialState, seedContent }) => {
+  return page.addInitScript(({ initialState, seedContent, seedHistory }) => {
     const now = Date.now()
     const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nT8AAAAASUVORK5CYII='
     const secondImageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1/8AAAAASUVORK5CYII='
@@ -314,16 +314,57 @@ function installOrbMock(page, options) {
       messageCount: messages.length,
     }
     const session = { ...summary, nameMode: 'manual', messages }
+    const historySummary = {
+      id: 'baseline-history-session',
+      name: '较早的界面会话',
+      personaId: 'default',
+      createdAt: now - 10_000,
+      updatedAt: now - 1_000,
+      messageCount: 4,
+    }
+    const otherPersonaSummary = {
+      id: 'baseline-other-persona',
+      name: '其他角色会话',
+      personaId: 'other',
+      createdAt: now + 1_000,
+      updatedAt: now + 1_000,
+      messageCount: 99,
+    }
+    const historySession = { ...historySummary, nameMode: 'manual', messages: [] }
+    const otherPersonaSession = { ...otherPersonaSummary, nameMode: 'manual', messages: [] }
+    let summaries = seedHistory ? [otherPersonaSummary, historySummary, summary] : [summary]
+    let currentSessionId = summary.id
+    const sessionsById = new Map([
+      [session.id, session],
+      [historySession.id, historySession],
+      [otherPersonaSession.id, otherPersonaSession],
+    ])
+    const baselineState = { selectedSessionIds: [], deletedSessionIds: [], openChatCount: 0 }
+    Object.defineProperty(window, '__orbBaseline', { configurable: true, value: baselineState })
     const off = () => undefined
     const api = {
       getOrbUiState: async () => ({ state: initialState }),
       onOrbStateChanged: () => off,
       getSettings: async () => ({ activePersonaId: 'default' }),
       onSettingsChanged: () => off,
-      listChatSessions: async () => ({ sessions: [summary], currentSessionId: summary.id }),
+      listChatSessions: async () => ({ sessions: summaries, currentSessionId }),
       createChatSession: async () => session,
-      setCurrentChatSession: async () => summary,
-      getChatSession: async () => session,
+      setCurrentChatSession: async (sessionId) => {
+        currentSessionId = sessionId
+        baselineState.selectedSessionIds.push(sessionId)
+        return summaries.find((item) => item.id === sessionId) ?? summary
+      },
+      getChatSession: async (sessionId) => sessionsById.get(sessionId ?? currentSessionId) ?? session,
+      deleteChatSession: async (sessionId) => {
+        baselineState.deletedSessionIds.push(sessionId)
+        summaries = summaries.filter((item) => item.id !== sessionId)
+        sessionsById.delete(sessionId)
+        if (currentSessionId === sessionId) currentSessionId = summaries.find((item) => item.personaId === 'default')?.id ?? ''
+        return { sessions: summaries, currentSessionId }
+      },
+      openChat: async () => {
+        baselineState.openChatCount += 1
+      },
       listTasks: async () => ({ items: seedContent ? [task] : [] }),
       onTasksChanged: () => off,
       setOrbUiState: async (state) => ({ state }),
@@ -333,7 +374,11 @@ function installOrbMock(page, options) {
       readChatAttachmentDataUrl: async () => ({ ok: false, dataUrl: '' }),
     }
     Object.defineProperty(window, 'neoDeskPet', { configurable: true, value: api })
-  }, { initialState: options.state, seedContent: options.seedContent === true })
+  }, {
+    initialState: options.state,
+    seedContent: options.seedContent === true,
+    seedHistory: options.seedHistory === true,
+  })
 }
 
 function installMemoryMock(page) {
@@ -498,6 +543,7 @@ const baselines = [
   { name: 'orb-panel-content-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true },
   { name: 'orb-image-viewer-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true, verifyOrbImageViewer: true },
   { name: 'orb-message-menu-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbContent: true, verifyOrbContent: true, verifyOrbMessageMenu: true },
+  { name: 'orb-history-popover-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel', seedOrbHistory: true, verifyOrbHistory: true },
   { name: 'chat-compact-420x560-scale100', route: 'chat', width: 420, height: 560, scale: 1, mockChat: true, compactChat: true, expandChat: true, verifyChatUi: true },
   { name: 'chat-image-viewer-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyImageViewer: true },
   { name: 'chat-tool-card-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, verifyToolCard: true },
@@ -541,6 +587,7 @@ try {
     if (baseline.mockOrbState) await installOrbMock(page, {
       state: baseline.mockOrbState,
       seedContent: baseline.seedOrbContent,
+      seedHistory: baseline.seedOrbHistory,
     })
     if (baseline.mockMemory) await installMemoryMock(page)
     if (baseline.mockSettings) await installSettingsMock(page)
@@ -959,6 +1006,86 @@ try {
       if (!closedOutside) failures.push('orb message menu did not close after an outside click')
     }
 
+    let orbHistory = null
+    if (baseline.verifyOrbHistory) {
+      const historyButton = page.locator('[title="历史对话"]')
+      await historyButton.click()
+      const popover = page.locator('.ndp-orbapp-popover')
+      await popover.waitFor({ state: 'visible' })
+      const sessionButtons = popover.locator('.ndp-orbapp-popover-item-main')
+      const sessionTitles = await sessionButtons.evaluateAll((elements) => elements.map((element) => element.getAttribute('title') ?? ''))
+      const sessionCounts = (await popover.locator('.ndp-orbapp-popover-count').allTextContents()).map((text) => text.trim())
+      const geometry = await page.evaluate(() => {
+        const root = document.querySelector('.ndp-orbapp-root')?.getBoundingClientRect()
+        const popoverElement = document.querySelector('.ndp-orbapp-popover')
+        const popoverRect = popoverElement?.getBoundingClientRect()
+        if (!root || !popoverRect) return null
+        return {
+          left: popoverRect.left - root.left,
+          top: popoverRect.top - root.top,
+          right: popoverRect.right - root.left,
+          bottom: popoverRect.bottom - root.top,
+          rootWidth: root.width,
+          rootHeight: root.height,
+          inlineStyle: popoverElement?.getAttribute('style') ?? '',
+        }
+      })
+      const historyScreenshotPath = path.join(outputDir, `${baseline.name}-open.png`)
+      await page.screenshot({ path: historyScreenshotPath })
+
+      await sessionButtons.filter({ hasText: '较早的界面会话' }).click()
+      await popover.waitFor({ state: 'hidden' })
+      await page.waitForFunction(() => window.__orbBaseline?.selectedSessionIds?.includes('baseline-history-session'))
+
+      await historyButton.click()
+      await popover.waitFor({ state: 'visible' })
+      const historyRow = popover.locator('.ndp-orbapp-popover-row').filter({ hasText: '较早的界面会话' })
+      await historyRow.getByRole('button', { name: '删除该会话' }).click()
+      await page.waitForFunction(() => document.querySelectorAll('.ndp-orbapp-popover-item-main').length === 1)
+      const remainingTitles = await popover.locator('.ndp-orbapp-popover-item-main').evaluateAll(
+        (elements) => elements.map((element) => element.getAttribute('title') ?? ''),
+      )
+      await popover.getByRole('button', { name: '查看全部历史对话' }).click()
+      await page.waitForFunction(() => window.__orbBaseline?.openChatCount === 1)
+      const actionState = await page.evaluate(() => ({
+        selectedSessionIds: window.__orbBaseline?.selectedSessionIds ?? [],
+        deletedSessionIds: window.__orbBaseline?.deletedSessionIds ?? [],
+        openChatCount: window.__orbBaseline?.openChatCount ?? 0,
+      }))
+
+      orbHistory = {
+        sessionTitles,
+        sessionCounts,
+        geometry,
+        remainingTitles,
+        actionState,
+        screenshot: path.relative(projectRoot, historyScreenshotPath),
+      }
+      if (sessionTitles.join(',') !== '界面基线会话,较早的界面会话') {
+        failures.push(`orb history sessions are ${sessionTitles.join(',') || 'missing'}`)
+      }
+      if (sessionCounts.join(',') !== '空,4') failures.push(`orb history counts are ${sessionCounts.join(',') || 'missing'}`)
+      if (!geometry) {
+        failures.push('orb history popover geometry is missing')
+      } else if (
+        geometry.left < 0 ||
+        geometry.top < 0 ||
+        geometry.right > geometry.rootWidth ||
+        geometry.bottom > geometry.rootHeight
+      ) {
+        failures.push(`orb history popover exceeds root bounds: ${JSON.stringify(geometry)}`)
+      }
+      if (!geometry?.inlineStyle.includes('--ndp-orbapp-popover-arrow-x')) {
+        failures.push(`orb history arrow style is ${geometry?.inlineStyle || 'missing'}`)
+      }
+      if (remainingTitles.join(',') !== '界面基线会话') {
+        failures.push(`orb history remaining sessions are ${remainingTitles.join(',') || 'missing'}`)
+      }
+      if (!actionState.selectedSessionIds.includes('baseline-history-session')) failures.push('orb history selection was not delegated')
+      if (!actionState.deletedSessionIds.includes('baseline-history-session')) failures.push('orb history deletion was not delegated')
+      if (actionState.openChatCount !== 1) failures.push(`orb history open-all ran ${actionState.openChatCount} times`)
+    }
+
     let toolCard = null
     if (baseline.verifyToolCard) {
       const summary = page.locator('.ndp-tooluse-summary').first()
@@ -1126,6 +1253,7 @@ try {
       imageViewer,
       orbImageViewer,
       orbMessageMenu,
+      orbHistory,
       toolCard,
       settingsNavigation,
       settingsSearch,

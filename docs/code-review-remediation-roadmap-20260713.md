@@ -967,6 +967,14 @@ AI 与能力
 - UI baseline 新增 `orb-message-menu-560x720-scale100`，以原生 `MouseEvent('contextmenu')` 在助手消息右下角打开菜单，验证边界 `362/514/550/712` 完全位于 560×720 根容器内、5 项顺序、助手编辑初值、用户 4 项无复制和点击输入框关闭；基线从 19 增至 20 个场景，0 failure、0 console error、无横向或纵向溢出，截图经人工检查无布局回归。
 - `npm test` 共 77 个测试文件、337 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 20 个 UI baseline 场景均通过。下一批继续拆分历史 popover 及会话选择/删除/刷新边界，完成 Orb 主要弹层收口。
 
+第四十九批进展（2026-07-14）：
+
+- 新增 `src/orb/OrbHistoryPopover.tsx` 与 `orbHistoryUtils.ts`，抽离历史列表、加载/空状态、会话计数、删除入口和查看全部入口，并统一 320px 宽度、90px top、16px 圆角、箭头钳制、persona 过滤、更新时间降序、最多 8 项及未命名/空计数默认值。
+- `OrbApp` 继续持有 IPC、当前会话状态、窗口模式迁移、乐观删除、删除失败后的列表刷新和完整聊天打开逻辑；选择、删除和查看全部只通过组件回调委托。删除后的成功结果与失败回查均复用 `buildOrbHistoryItems()`，移除三份重复的过滤/排序/截断代码；`OrbApp.tsx` 从 1992 行降至 1938 行。
+- 新增 3 个历史 popover 测试，覆盖左右边缘与异常坐标定位、persona 过滤/更新时间排序/8 项上限/显示默认值，以及列表、加载、空状态和三项动作委托；删除按钮补充 `aria-label="删除该会话"`，使图标按钮具备稳定的可访问名称。
+- UI baseline 新增 `orb-history-popover-560x720-scale100`，预置当前 persona 的两个会话及一个更晚更新的其他 persona 干扰项，验证过滤与顺序、空/4 消息计数、`10/90/330/257` 几何、箭头 CSS 变量、选择较早会话、删除后仅保留当前会话和查看全部；基线从 20 增至 21 个场景，0 failure、0 console error、无横向或纵向溢出，打开态截图经人工检查无视觉回归。
+- `npm test` 共 78 个测试文件、340 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 21 个 UI baseline 场景均通过。Orb 图片查看器、消息菜单和历史 popover 三类主要弹层完成收口；下一批继续审计 `OrbApp` 中剩余状态与副作用边界，再决定完成 P2-1 或转入 P2-2 前端按窗口加载。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

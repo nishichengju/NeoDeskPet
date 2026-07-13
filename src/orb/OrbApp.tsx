@@ -22,10 +22,12 @@ import {
 import { OrbBallView } from './OrbBallView'
 import { OrbBarView, type OrbPendingAttachment } from './OrbBarView'
 import { OrbAssistantMessageContent } from './OrbAssistantMessageContent'
+import { OrbHistoryPopover } from './OrbHistoryPopover'
 import { OrbImageViewer, type OrbImageViewerItem } from './OrbImageViewer'
 import { OrbMessageAttachments } from './OrbMessageAttachments'
 import { OrbMessageMenu } from './OrbMessageMenu'
 import { OrbPanelView } from './OrbPanelView'
+import { buildOrbHistoryItems, getOrbHistoryPopoverPosition, type OrbHistoryItem } from './orbHistoryUtils'
 import type { OrbImageViewerRequestItem } from './orbMessageContentUtils'
 import { getOrbMessageMenuPosition } from './orbMessageMenuUtils'
 
@@ -41,14 +43,8 @@ type OrbUiTransition =
 
 const ORB_BALL_SIZE = 40
 const ORB_BAR_HEIGHT = 80
-const ORB_POPOVER_GAP = 10
 const ORB_UI_OPEN_MS = 220
 const ORB_UI_CLOSE_MS = 260
-
-const MENU_RADIUS = 16
-
-const HISTORY_WIDTH = 320
-const HISTORY_MAX_ITEMS = 8
 
 function normalizeMode(state: OrbUiState): OrbMode {
   if (state === 'ball') return 'ball'
@@ -179,7 +175,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         arrowX: number
         ready: boolean
         loading: boolean
-        sessions: Array<{ id: string; name: string; messageCount: number }>
+        sessions: OrbHistoryItem[]
       }
   >(null)
   const overlayActiveRef = useRef(false)
@@ -955,14 +951,9 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     (anchorCenterX: number) => {
       if (!api) return
 
-      const popoverTop = ORB_BAR_HEIGHT + ORB_POPOVER_GAP
-
-      const barWidth = Math.max(360, Math.round(window.innerWidth))
-      const left = clamp(Math.round(anchorCenterX - HISTORY_WIDTH / 2), 10, barWidth - HISTORY_WIDTH - 10)
-      const arrowX = clamp(anchorCenterX, left + 16, left + HISTORY_WIDTH - 16)
-      const arrowInPopover = Math.round(arrowX - left)
+      const position = getOrbHistoryPopoverPosition(anchorCenterX, window.innerWidth)
       const token = (popoverTokenRef.current += 1)
-      setPopover({ kind: 'history', left, top: popoverTop, arrowX: arrowInPopover, ready: false, loading: true, sessions: [] })
+      setPopover({ kind: 'history', ...position, ready: false, loading: true, sessions: [] })
       overlayActiveRef.current = false
       setOverlayDataset(false)
       window.requestAnimationFrame(() => {
@@ -975,11 +966,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
         .then((res) => {
           if (popoverTokenRef.current !== token) return
           const pid = activePersonaIdRef.current?.trim() || 'default'
-          const sessions = (res?.sessions ?? []).filter((s) => s.personaId === pid)
-          const recent = sessions
-            .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-            .slice(0, HISTORY_MAX_ITEMS)
-            .map((s) => ({ id: s.id, name: s.name || '未命名会话', messageCount: s.messageCount ?? 0 }))
+          const recent = buildOrbHistoryItems(res?.sessions ?? [], pid)
           setPopover((prev) => (prev?.kind === 'history' ? { ...prev, loading: false, sessions: recent } : prev))
         })
         .catch(() => {
@@ -989,6 +976,59 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     },
     [api, setOverlayDataset],
   )
+
+  const selectHistorySession = useCallback(
+    (sessionId: string) => {
+      void (async () => {
+        await api?.setCurrentChatSession(sessionId)
+        setCurrentSessionId(sessionId)
+        void refreshSessions().catch(() => undefined)
+        closePopover()
+        if (mode !== 'panel') setTimeout(() => openPanel(), 40)
+      })().catch((error) => console.error(error))
+    },
+    [api, closePopover, mode, openPanel, refreshSessions],
+  )
+
+  const deleteHistorySession = useCallback(
+    (sessionId: string) => {
+      void (async () => {
+        const token = popoverTokenRef.current
+        setPopover((prev) =>
+          prev?.kind === 'history' ? { ...prev, sessions: prev.sessions.filter((session) => session.id !== sessionId) } : prev,
+        )
+
+        try {
+          const result = await api?.deleteChatSession(sessionId)
+          await refreshSessions().catch(() => undefined)
+          if (popoverTokenRef.current !== token) return
+          const personaId = activePersonaIdRef.current?.trim() || 'default'
+          const sessions = buildOrbHistoryItems(result?.sessions ?? [], personaId)
+          setPopover((prev) => (prev?.kind === 'history' ? { ...prev, sessions } : prev))
+        } catch (error) {
+          console.error(error)
+          if (popoverTokenRef.current !== token) return
+          void api
+            ?.listChatSessions()
+            .then((result) => {
+              if (popoverTokenRef.current !== token) return
+              const personaId = activePersonaIdRef.current?.trim() || 'default'
+              const sessions = buildOrbHistoryItems(result?.sessions ?? [], personaId)
+              setPopover((prev) => (prev?.kind === 'history' ? { ...prev, sessions } : prev))
+            })
+            .catch(() => undefined)
+        }
+      })()
+    },
+    [api, refreshSessions],
+  )
+
+  const openAllHistory = useCallback(() => {
+    void api
+      ?.openChat()
+      .finally(() => openBall())
+      .finally(() => closePopover())
+  }, [api, closePopover, openBall])
 
   const onSend = useCallback(async (opts?: { text?: string; attachments?: OrbPendingAttachment[]; seedMessages?: ChatMessageRecord[] }) => {
     if (Array.isArray(opts?.seedMessages)) {
@@ -1879,110 +1919,16 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
       ) : null}
 
       {popover?.kind === 'history' && popover.ready ? (
-        <div
-          className="ndp-orbapp-popover"
-          data-orb-popover="true"
-          style={
-            {
-              left: popover.left,
-              top: popover.top,
-              width: HISTORY_WIDTH,
-              borderRadius: MENU_RADIUS,
-              ['--ndp-orbapp-popover-arrow-x' as never]: `${popover.arrowX}px`,
-            } as React.CSSProperties
-          }
-        >
-          {popover.sessions.length > 0 ? (
-            popover.sessions.map((s) => (
-              <div key={s.id} className="ndp-orbapp-popover-row">
-                <button
-                  className="ndp-orbapp-popover-item ndp-orbapp-popover-item-main"
-                  onClick={() => {
-                    void (async () => {
-                      await api?.setCurrentChatSession(s.id)
-                      setCurrentSessionId(s.id)
-                      void refreshSessions().catch(() => undefined)
-                      closePopover()
-                      if (mode !== 'panel') setTimeout(() => openPanel(), 40)
-                    })().catch((err) => console.error(err))
-                  }}
-                  title={s.name}
-                >
-                  <span className="ndp-orbapp-popover-icon">🕒</span>
-                  <span className="ndp-orbapp-popover-text">
-                    {s.name || '未命名会话'}
-                    <span className="ndp-orbapp-popover-count">{(s.messageCount ?? 0) > 0 ? String(s.messageCount) : '空'}</span>
-                  </span>
-                </button>
-
-                <button
-                  className="ndp-orbapp-popover-action"
-                  title="删除该会话"
-                  onClick={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    void (async () => {
-                      const token = popoverTokenRef.current
-                      setPopover((prev) =>
-                        prev?.kind === 'history' ? { ...prev, sessions: prev.sessions.filter((x) => x.id !== s.id) } : prev,
-                      )
-
-                      try {
-                        const res = await api?.deleteChatSession(s.id)
-                        await refreshSessions().catch(() => undefined)
-                        if (popoverTokenRef.current !== token) return
-
-                        const pid = activePersonaIdRef.current?.trim() || 'default'
-                        const sessions = (res?.sessions ?? [])
-                          .filter((x) => x.personaId === pid)
-                          .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-                          .slice(0, HISTORY_MAX_ITEMS)
-                          .map((x) => ({ id: x.id, name: x.name || '未命名会话', messageCount: x.messageCount ?? 0 }))
-
-                        setPopover((prev) => (prev?.kind === 'history' ? { ...prev, sessions } : prev))
-                      } catch (err) {
-                        console.error(err)
-                        if (popoverTokenRef.current !== token) return
-                        void api
-                          ?.listChatSessions()
-                          .then((r) => {
-                            if (popoverTokenRef.current !== token) return
-                            const pid = activePersonaIdRef.current?.trim() || 'default'
-                            const sessions = (r?.sessions ?? [])
-                              .filter((x) => x.personaId === pid)
-                              .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-                              .slice(0, HISTORY_MAX_ITEMS)
-                              .map((x) => ({ id: x.id, name: x.name || '未命名会话', messageCount: x.messageCount ?? 0 }))
-                            setPopover((prev) => (prev?.kind === 'history' ? { ...prev, sessions } : prev))
-                          })
-                          .catch(() => undefined)
-                      }
-                    })()
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            ))
-          ) : popover.loading ? (
-            <div className="ndp-orbapp-popover-empty">加载中</div>
-          ) : (
-            <div className="ndp-orbapp-popover-empty">暂无历史对话</div>
-          )}
-          <div className="ndp-orbapp-popover-divider" />
-          <button
-            className="ndp-orbapp-popover-item"
-            onClick={() => {
-              void api
-                ?.openChat()
-                .finally(() => openBall())
-                .finally(() => closePopover())
-            }}
-          >
-            <span className="ndp-orbapp-popover-icon">→</span>
-            <span className="ndp-orbapp-popover-text">查看全部历史对话</span>
-          </button>
-        </div>
+        <OrbHistoryPopover
+          left={popover.left}
+          top={popover.top}
+          arrowX={popover.arrowX}
+          loading={popover.loading}
+          sessions={popover.sessions}
+          onSelect={selectHistorySession}
+          onDelete={deleteHistorySession}
+          onOpenAll={openAllHistory}
+        />
       ) : null}
     </div>
   )

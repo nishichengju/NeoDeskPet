@@ -1016,3 +1016,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/orb-message-menu-560x720-scale100-assistant.png`、`artifacts/ui-baseline/orb-message-menu-560x720-scale100.png` 与 `artifacts/ui-baseline/orb-panel-content-560x720-scale100.png`。本批未修改菜单 CSS、宽度/行高/内边距/圆角、动作文案与顺序、复制实现、编辑/重发/删除业务、任务取消或消息持久化；只把菜单 DOM 和角色相关定位公式迁移到独立模块。聚焦测试验证纯定位边界与动作委托，浏览器基线使用原生 contextmenu 坐标验证右下角钳制、助手/用户菜单差异、编辑入口和点外关闭，打包 IPC smoke 继续验证真实 Orb/Chat 消息与任务链路。当前自动化未实际授权系统剪贴板验证“复制正文”内容，也未执行重发、删除此条和删除本轮的破坏性动作；历史 popover 仍留在 `OrbApp`，下一批继续拆分。
+
+## P2-1：大型模块拆分与领域边界（第四十九批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Orb 历史 popover 视图、定位与会话过滤/排序工具，以及选择/删除/查看全部交互基线
+
+| 检查 | 结果 |
+| --- | --- |
+| Orb 历史 popover 测试 | 3 个用例通过：左右边缘/NaN 定位、persona 过滤/更新时间排序/8 项上限/默认值、列表/加载/空状态/三项动作委托与删除按钮可访问名称 |
+| `npm test` | 78 个测试文件、340 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功；renderer 主 chunk 约 1.410 MB |
+| `npm run ipc:smoke` | Orb ball/panel/ball 状态往返、真实聊天/任务/Memory/Agent/MCP/媒体/TTS/ASR、会话删除权限和重启路径全部通过，所有窗口 runtimeErrors 为空 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 21 个场景通过；新增 `orb-history-popover-560x720-scale100`，persona 过滤、更新时间顺序、空/4 消息计数、几何/箭头、选择、删除和查看全部通过，0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/orb-history-popover-560x720-scale100-open.png` 与 `artifacts/ui-baseline/orb-history-popover-560x720-scale100.png`。本批未修改 popover CSS、宽度/圆角/行高/箭头样式、会话持久化契约、persona 归属、当前会话切换、删除后的模式迁移或打开完整聊天语义；只把视图和纯定位/列表映射迁移到独立模块，并为删除图标按钮补充可访问名称。聚焦测试覆盖纯函数、静态 DOM 与事件委托，浏览器基线验证其他 persona 干扰项被过滤、较早会话可选择和删除、删除后列表刷新、查看全部只触发一次。当前自动化未模拟删除 IPC 失败后的真实网络/主进程异常，也未验证超过 8 个会话时用户滚动或在真实 Electron 多屏/DPI 环境中的历史锚点；`OrbApp` 仍有 1938 行，下一批继续审计剩余状态与副作用边界。
