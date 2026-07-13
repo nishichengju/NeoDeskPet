@@ -6,6 +6,7 @@ import { ContextUsageOrb } from '../components/ContextUsageOrb'
 import { MarkdownMessage } from '../components/MarkdownMessage'
 import { LocalVideo, MmvectorImagePreview } from '../components/MediaPreviews'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
+import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
@@ -5351,115 +5352,14 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
           const blocks = !isUser ? normalizeMessageBlocks(m) : []
           const hasToolBlock = !isUser && blocks.some((b) => b.type === 'tool_use')
 
-          const openAttachment = async (pathOrUrl: string, resourceId?: string) => {
-            const raw = String(pathOrUrl ?? '').trim()
-            if (!raw) return
-            if (/^(https?:|data:|blob:)/i.test(raw)) {
-              window.open(raw, '_blank')
-              return
-            }
-            if (!api) return
-            try {
-              const res = await api.getChatAttachmentUrl(resourceId ? { resourceId, path: raw } : raw)
-              if (res?.ok && typeof res.url === 'string') {
-                window.open(res.url, '_blank')
-                return
-              }
-            } catch {
-              /* ignore */
-            }
-          }
-
-          const attachmentsNode = (() => {
-            if (hasToolBlock) return null
-            const normalized: Array<{
-              kind: 'image' | 'video'
-              path?: string
-              resourceId?: string
-              dataUrl?: string
-              filename?: string
-            }> = []
-
-            if (Array.isArray(m.attachments)) {
-              for (const a of m.attachments) {
-                if (!a || typeof a !== 'object') continue
-                const kind = (a as { kind?: unknown }).kind === 'video' ? 'video' : (a as { kind?: unknown }).kind === 'image' ? 'image' : ''
-                const p = typeof (a as { path?: unknown }).path === 'string' ? String((a as { path: string }).path).trim() : ''
-                const resourceId =
-                  typeof (a as { resourceId?: unknown }).resourceId === 'string'
-                    ? String((a as { resourceId: string }).resourceId).trim()
-                    : ''
-                const filename = typeof (a as { filename?: unknown }).filename === 'string' ? String((a as { filename: string }).filename).trim() : ''
-                if (!kind || !p) continue
-                normalized.push({
-                  kind,
-                  path: p,
-                  ...(resourceId ? { resourceId } : {}),
-                  ...(filename ? { filename } : {}),
-                })
-              }
-            }
-
-            if (normalized.length === 0) {
-              if (m.imagePath) normalized.push({ kind: 'image', path: String(m.imagePath) })
-              if (m.videoPath) normalized.push({ kind: 'video', path: String(m.videoPath) })
-              if (m.image && !m.imagePath) normalized.push({ kind: 'image', dataUrl: String(m.image) })
-            }
-
-            if (normalized.length === 0) return null
-
-            return (
-              <div className="ndp-msg-attachments">
-                {normalized.map((a, idx) => {
-                  const key = `${m.id}-att-${idx}-${String(a.kind)}-${String(a.path ?? a.dataUrl ?? '')}`
-                  if (a.kind === 'video') {
-                    const p = String(a.path ?? '').trim()
-                    if (!p) return null
-                    return (
-                      <div key={key} className="ndp-msg-attachment">
-                        <LocalVideo
-                          api={api}
-                          className="ndp-msg-video"
-                          videoPath={p}
-                          resourceId={a.resourceId}
-                          controls
-                          preload="metadata"
-                          playsInline
-                        />
-                        <button className="ndp-attachment-open" onClick={() => void openAttachment(p, a.resourceId)} title="打开">
-                          打开
-                        </button>
-                      </div>
-                    )
-                  }
-
-                  const dataUrl = String(a.dataUrl ?? '').trim()
-                  const p = String(a.path ?? '').trim()
-                  const src = dataUrl || p
-                  if (!src) return null
-                  const imageSources = normalized
-                    .filter((item) => item.kind === 'image')
-                    .map((item) => String(item.dataUrl ?? item.path ?? '').trim())
-                    .filter(Boolean)
-                  const imageIndex = Math.max(0, imageSources.findIndex((item) => item === src))
-                  return (
-                    <div key={key} className="ndp-msg-attachment">
-                      {dataUrl ? (
-                        <img className="ndp-msg-image" src={dataUrl} alt="attachment" onClick={() => void openImageViewer(imageSources, imageIndex)} />
-                      ) : (
-                        <div className="ndp-msg-image-hit" onClick={() => void openImageViewer(imageSources, imageIndex)}>
-                          <MmvectorImagePreview api={api} imagePath={p} resourceId={a.resourceId} alt="attachment" />
-                        </div>
-                      )}
-                      <button className="ndp-attachment-open" onClick={() => void openImageViewer(imageSources, imageIndex)} title="查看">
-                        查看
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            )
-          })()
+          const attachmentsNode = (
+            <ChatMessageAttachments
+              message={m}
+              api={api}
+              hidden={hasToolBlock}
+              onOpenImageViewer={openImageViewer}
+            />
+          )
 
           const imageViewerNode = imageViewer ? (
             <ImageViewer

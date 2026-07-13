@@ -212,3 +212,22 @@
 | `git diff --check` | 通过 |
 
 本批未修改消息渲染契约、附件 URL 解析、样式 class 或 preload API。`ChatWindow.tsx` 后续继续拆分 `ChatMessageItem`、会话列表、composer 和 AI/TTS/ASR hooks。
+
+## P2-1：大型模块拆分与领域边界（第十批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 消息附件归一化与渲染组件
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 31 个测试文件、116 个用例通过 |
+| 消息附件测试 | attachments 清洗、resourceId/filename、legacy 回退、data URL、隐藏态通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 通过，Chat 与五类窗口无运行时错误 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 14 个场景通过；消息图片经新附件组件打开 ImageViewer 并可 Esc 关闭 |
+| `git diff --check` | 通过 |
+
+本批未修改附件持久化结构、LocalMediaRegistry、安全权限、样式 class 或 preload API。`ChatWindow.tsx` 后续继续拆分工具运行卡、消息主体、会话列表与 composer。
