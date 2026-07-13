@@ -11,19 +11,11 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron'
 import { fileURLToPath } from 'node:url'
-import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { getSettings, initializeSettingsStore, installSettingsSecretAdapter, setSettings } from './store'
 import { createUserDataBackup, SettingsMigrationProtectionError } from './settingsMigrationSafety'
-import {
-  LocalMediaError,
-  LocalMediaRegistry,
-  localMediaTypeFromPath,
-  type LocalMediaReference,
-} from './localMediaRegistry'
-import { LocalMediaServer } from './localMediaServer'
 import { createTray } from './tray'
 import { WindowManager } from './windowManager'
 import { setWindowManagerInstance } from './runtimeRefs'
@@ -103,6 +95,7 @@ import {
 } from './ipcPermissions'
 import { registerSettingsIpc } from './ipc/registerSettingsIpc'
 import { registerChatPersistenceIpc } from './ipc/registerChatPersistenceIpc'
+import { ChatAttachmentIpcService } from './ipc/registerChatAttachmentIpc'
 
 const APP_ID = 'io.github.nishichengju.neodeskpet'
 app.setName('NeoDeskPet')
@@ -127,37 +120,6 @@ export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron')
 export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
-
-function pickChatAttachmentExt(mimeType: string): string {
-  const mime = (mimeType ?? '').trim().toLowerCase()
-  if (mime === 'image/png') return '.png'
-  if (mime === 'image/jpeg') return '.jpg'
-  if (mime === 'image/webp') return '.webp'
-  if (mime === 'image/gif') return '.gif'
-  if (mime === 'image/bmp') return '.bmp'
-  if (mime === 'video/mp4') return '.mp4'
-  if (mime === 'video/webm') return '.webm'
-  if (mime === 'video/quicktime') return '.mov'
-  if (mime === 'video/x-msvideo') return '.avi'
-  if (mime === 'video/x-matroska') return '.mkv'
-  return ''
-}
-
-function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } | null {
-  const raw = (dataUrl ?? '').trim()
-  if (!raw.startsWith('data:')) return null
-  const idx = raw.indexOf(',')
-  if (idx < 0) return null
-  const meta = raw.slice(5, idx) // after "data:"
-  const payload = raw.slice(idx + 1)
-  const parts = meta.split(';').map((s) => s.trim())
-  const mimeType = parts[0] ?? ''
-  const isBase64 = parts.includes('base64')
-  if (!isBase64) return null
-  if (!mimeType) return null
-  if (!payload) return null
-  return { mimeType, base64: payload }
-}
 
 function normalizeOpenAiBaseUrl(raw: string): string {
   const value = String(raw ?? '').trim()
@@ -249,6 +211,7 @@ const SETTINGS_NAVIGATION_TARGETS = new Set<SettingsNavigationTarget>([
 ])
 let pendingSettingsNavigationTarget: SettingsNavigationTarget | null = null
 const aiHttpProxy = new AIHttpProxy(getSettings)
+const chatAttachmentIpc = new ChatAttachmentIpcService(app.getPath('userData'))
 setWindowManagerInstance(windowManager)
 
 type SettingsSecretInitializationResult = {
@@ -462,56 +425,6 @@ function startLive2dMouseTrackingPump(): void {
   }, LIVE2D_MOUSE_POLL_MS)
 
   ;(live2dMouseTrackingTimer as unknown as { unref?: () => void }).unref?.()
-}
-
-let localMediaRegistry: LocalMediaRegistry | null = null
-let localMediaServer: LocalMediaServer | null = null
-
-function getLocalMediaRegistry(): LocalMediaRegistry {
-  if (localMediaRegistry) return localMediaRegistry
-  const userDataDir = app.getPath('userData')
-  const managedDirectories = [
-    'chat-attachments',
-    'task-output',
-    'screenshots',
-    'browser-screenshots',
-    'mcp-tool-images',
-    'generated-images',
-    'video-qa',
-    'video-qa-cache',
-  ]
-  localMediaRegistry = new LocalMediaRegistry({
-    allowedRoots: managedDirectories.map((directory) => path.join(userDataDir, directory)),
-  })
-  return localMediaRegistry
-}
-
-function getLocalMediaServer(): LocalMediaServer {
-  if (!localMediaServer) localMediaServer = new LocalMediaServer(getLocalMediaRegistry())
-  return localMediaServer
-}
-
-function parseLocalMediaReference(payload: unknown): LocalMediaReference {
-  const normalizePathReference = (value: string): string => {
-    const raw = value.trim()
-    if (!raw || path.isAbsolute(raw) || /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)) return raw
-    return path.resolve(app.getPath('userData'), raw)
-  }
-  if (typeof payload === 'string') return normalizePathReference(payload)
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ''
-  const value = payload as Record<string, unknown>
-  return {
-    resourceId: typeof value.resourceId === 'string' ? value.resourceId.trim() : '',
-    path: typeof value.path === 'string' ? normalizePathReference(value.path) : '',
-  }
-}
-
-function toPublicLocalMediaError(error: unknown): Error {
-  if (!(error instanceof LocalMediaError)) return new Error('Local media request failed')
-  if (error.code === 'forbidden_path') return new Error('Local media path is not allowed')
-  if (error.code === 'file_too_large') return new Error('Local media file is too large')
-  if (error.code === 'unsupported_type') return new Error('Local media type is not supported')
-  return new Error('Local media resource is unavailable')
 }
 
 let registeredAsrHotkey: string | null = null
@@ -1130,89 +1043,7 @@ function registerIpc() {
     getMemoryService: () => memoryService,
   })
 
-  // Chat attachments: persist dropped/pasted media into userData for stable paths.
-  handleIpc('chat:saveAttachment', async (_event, payload: unknown) => {
-    const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
-    const kind = p.kind === 'image' || p.kind === 'video' ? (p.kind as 'image' | 'video') : ''
-    if (!kind) throw new Error('invalid kind')
-
-    const sourcePath = typeof p.sourcePath === 'string' ? p.sourcePath.trim() : ''
-    const dataUrl = typeof p.dataUrl === 'string' ? p.dataUrl.trim() : ''
-    const filename = typeof p.filename === 'string' ? p.filename.trim() : ''
-
-    if (!sourcePath && !dataUrl) throw new Error('missing sourcePath/dataUrl')
-
-    const baseDir = path.join(app.getPath('userData'), 'chat-attachments')
-    await fs.mkdir(baseDir, { recursive: true })
-
-    let ext = ''
-    let detectedMime = ''
-    let contentBytes = 0
-    if (sourcePath) {
-      if (process.platform === 'win32' && /^\\\\/.test(sourcePath)) throw new Error('UNC attachments are not supported')
-      const sourceType = localMediaTypeFromPath(sourcePath)
-      if (!sourceType || sourceType.kind !== kind) throw new Error('unsupported attachment type')
-      const sourceStat = await fs.stat(sourcePath)
-      if (!sourceStat.isFile()) throw new Error('attachment source is not a file')
-      contentBytes = sourceStat.size
-      detectedMime = sourceType.mimeType
-      ext = path.extname(sourcePath).toLowerCase()
-    } else {
-      const parsed = parseDataUrl(dataUrl)
-      if (!parsed) throw new Error('invalid dataUrl')
-      detectedMime = parsed.mimeType
-      ext = pickChatAttachmentExt(detectedMime)
-      const expectedKind = detectedMime.startsWith('image/') ? 'image' : detectedMime.startsWith('video/') ? 'video' : ''
-      if (!ext || expectedKind !== kind) throw new Error('unsupported attachment type')
-      contentBytes = Buffer.byteLength(parsed.base64, 'base64')
-    }
-
-    const maxBytes = kind === 'image' ? 32 * 1024 * 1024 : 4 * 1024 * 1024 * 1024
-    if (contentBytes <= 0 || contentBytes > maxBytes) throw new Error('attachment file is too large')
-
-    const storedName = `${randomUUID()}${ext}`
-    const storedPath = path.join(baseDir, storedName)
-
-    if (sourcePath) {
-      await fs.copyFile(sourcePath, storedPath)
-    } else {
-      const parsed = parseDataUrl(dataUrl)
-      if (!parsed) throw new Error('invalid dataUrl')
-      const buf = Buffer.from(parsed.base64, 'base64')
-      await fs.writeFile(storedPath, buf)
-      detectedMime = parsed.mimeType
-    }
-
-    const resource = await getLocalMediaRegistry().registerFile(storedPath)
-
-    return {
-      ok: true as const,
-      kind,
-      path: storedPath,
-      resourceId: resource.id,
-      filename: filename || storedName,
-      ...(detectedMime ? { mimeType: detectedMime } : {}),
-    }
-  })
-
-  // Chat attachments: resolve managed images through the main-process media registry.
-  handleIpc('chat:readAttachmentDataUrl', async (_event, payload: unknown) => {
-    try {
-      const result = await getLocalMediaServer().readDataUrl(parseLocalMediaReference(payload))
-      return { ok: true as const, ...result }
-    } catch (error) {
-      throw toPublicLocalMediaError(error)
-    }
-  })
-
-  handleIpc('chat:getAttachmentUrl', async (_event, payload: unknown) => {
-    try {
-      const result = await getLocalMediaServer().getUrl(parseLocalMediaReference(payload))
-      return { ok: true as const, ...result }
-    } catch (error) {
-      throw toPublicLocalMediaError(error)
-    }
-  })
+  chatAttachmentIpc.register(handleIpc)
 
   // Tasks / Orchestrator (M1)
   handleIpc('task:list', (): TaskListResult => taskService?.listTasks() ?? { items: [] })
@@ -1955,9 +1786,7 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
   aiHttpProxy.close()
-  void localMediaServer?.close()
-  localMediaServer = null
-  localMediaRegistry = null
+  void chatAttachmentIpc.close()
   if (live2dMouseTrackingTimer) {
     clearInterval(live2dMouseTrackingTimer)
     live2dMouseTrackingTimer = null

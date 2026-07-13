@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二批：Settings 与 Chat 持久化 IPC 已拆分）
+- 状态：P2-1 进行中（第三批：Settings、Chat 持久化与附件 IPC 已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -548,10 +548,19 @@ AI 与能力
 
 - 将 14 个 Chat 会话持久化通道迁移到 `electron/ipc/registerChatPersistenceIpc.ts`，覆盖会话列表、创建/切换/重命名/删除、消息增删改、全量消息替换和自动提炼元数据。
 - 三处重复的“助手消息写入长期记忆”流程收敛为单一内部函数，继续按 persona 的 `captureUser` 决定是否拼接上一条用户消息；MemoryService 未初始化或异步摄取失败时不会影响聊天 SQLite 写入。
-- `electron/main.ts` 从第一批后的 2436 行降至 2270 行；相较 P2-1 开始时累计减少 473 行。附件持久化和本地媒体解析仍保留在主进程，作为后续独立拆分单元。
+- `electron/main.ts` 从第一批后的 2436 行降至 2270 行；相较 P2-1 开始时累计减少 473 行。当时仍在主进程的附件与本地媒体单元已在第三批完成迁移。
 - 新增 5 个 Chat 持久化 IPC 测试，覆盖 14 通道注册、会话操作委托、添加/普通编辑/结构化编辑后的记忆 turn、persona 用户采集策略、记忆关闭和故障隔离。
 - 打包 IPC smoke 新增真实 SQLite 往返：创建会话、写入与编辑消息、设置提炼元数据、关闭应用、重启读取、删除消息、清空并删除会话；同时确认 Chat 写入触发的 Memory embedding 请求使用主进程密钥代理。
 - `npm test` 共 82 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC 双启动 smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
+
+### P2-1 进展记录（2026-07-13，第三批）
+
+- 新增 `ChatAttachmentIpcService`，将 `chat:saveAttachment`、`chat:readAttachmentDataUrl`、`chat:getAttachmentUrl` 三个通道及 MIME/扩展名解析、相对路径恢复和公开错误映射迁出 `main.ts`。
+- 本地媒体允许目录、opaque token 注册表和 HTTP Server 生命周期由同一服务对象持有；应用 `will-quit` 时统一关闭端口并清理资源/token，避免主进程保留分散的可空全局状态。
+- 路径边界继续由现有 `LocalMediaRegistry` 执行，没有放宽任意系统路径、UNC、软链接、文件类型或大小限制；真实选择文件仍先复制到 `userData/chat-attachments` 后才登记。
+- `electron/main.ts` 从第二批后的 2270 行降至 2099 行；相较 P2-1 开始时累计减少 644 行。
+- 新增 5 个附件 IPC 测试，覆盖三通道注册、data URL 保存、外部选择文件复制、相对路径恢复、opaque HTTP URL、错误脱敏、类型不匹配和服务关闭失效。
+- `npm test` 共 87 个用例通过；TypeScript、lint、Windows unpacked 打包、真实 SQLite IPC smoke、本地媒体 smoke 和 13 个 UI baseline 场景均通过。
 
 ## 14. P2-2：前端加载与运行性能
 

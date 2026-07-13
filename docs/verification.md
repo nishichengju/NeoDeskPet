@@ -80,4 +80,22 @@
 | `npm run media:smoke` | 通过 |
 | `npm run ui:baseline` | 13 个场景通过 |
 
-本批未修改 Chat renderer、preload API、IPC 权限矩阵或 SQLite schema。Chat 附件与本地媒体 IPC 尚未迁移，将作为后续独立单元处理。
+本批未修改 Chat renderer、preload API、IPC 权限矩阵或 SQLite schema。当时尚未迁移的 Chat 附件与本地媒体 IPC 已在第三批完成。
+
+## P2-1：大型模块拆分与领域边界（第三批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 附件保存、本地媒体读取与 URL 托管 IPC
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 23 个测试文件、87 个用例通过 |
+| 附件 IPC 行为测试 | 三通道、data URL、选择文件复制、相对路径、opaque URL、错误脱敏和关闭失效通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run media:smoke` | 真实文件选择、伪造路径拒绝、Range 206、删除后 404 通过 |
+| `npm run ipc:smoke` | 五类窗口、SQLite 重启往返、密钥代理和 IPC 权限通过 |
+| `npm run ui:baseline` | 13 个场景通过 |
+
+本批未修改 renderer、preload API、IPC 权限矩阵或媒体路径策略。P2-1 后续继续拆分 Task、Memory、TTS 和 Window IPC。
