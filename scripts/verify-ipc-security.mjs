@@ -19,11 +19,18 @@ const packagedExe = packagedExeName ? path.join(packagedDir, packagedExeName) : 
 const electronExe = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe')
 
 mkdirSync(userDataDir, { recursive: true })
+const taskMediaDir = path.join(userDataDir, 'task-output')
+const taskMediaImage = path.join(taskMediaDir, 'ipc-task-tool-media.png')
+const taskMediaManifest = path.join(taskMediaDir, 'ipc-task-tool-media.txt')
 const visionSmokeImage = path.join(outputDir, 'agent-vision-smoke.png')
-writeFileSync(
-  visionSmokeImage,
-  Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+const smokePng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
 )
+mkdirSync(taskMediaDir, { recursive: true })
+writeFileSync(taskMediaImage, smokePng)
+writeFileSync(taskMediaManifest, `${taskMediaImage}\n`, 'utf8')
+writeFileSync(visionSmokeImage, smokePng)
 
 const aiSmokeKey = 'ipc-smoke-main-key'
 const aiRequests = []
@@ -638,7 +645,7 @@ try {
     'created task was not listed before restart',
   )
 
-  const taskLifecycle = await chat.evaluate(async () => {
+  const taskLifecycle = await chat.evaluate(async (mediaManifestPath) => {
     const waitForStatus = async (taskId, expectedStatuses, timeoutMs = 10_000) => {
       const deadline = Date.now() + timeoutMs
       while (Date.now() < deadline) {
@@ -692,6 +699,19 @@ try {
     })
     const directCompleted = await waitForStatus(direct.id, ['done', 'failed', 'canceled'])
 
+    const media = await window.neoDeskPet.createTask({
+      queue: 'chat',
+      title: 'IPC Direct Tool Media Task',
+      steps: [
+        {
+          title: 'Read image manifest',
+          tool: 'file.read',
+          input: JSON.stringify({ path: mediaManifestPath }),
+        },
+      ],
+    })
+    const mediaCompleted = await waitForStatus(media.id, ['done', 'failed', 'canceled'])
+
     const failing = await window.neoDeskPet.createTask({
       queue: 'chat',
       title: 'IPC Direct Tool Failure Task',
@@ -701,6 +721,7 @@ try {
     const pauseDismissed = await window.neoDeskPet.dismissTask(pausable.id)
     const cancelDismissed = await window.neoDeskPet.dismissTask(cancelable.id)
     const directDismissed = await window.neoDeskPet.dismissTask(direct.id)
+    const mediaDismissed = await window.neoDeskPet.dismissTask(media.id)
     const failedDismissed = await window.neoDeskPet.dismissTask(failing.id)
 
     return {
@@ -714,13 +735,15 @@ try {
       canceled,
       afterCancel,
       directCompleted,
+      mediaCompleted,
       failed,
       pauseDismissed,
       cancelDismissed,
       directDismissed,
+      mediaDismissed,
       failedDismissed,
     }
-  })
+  }, taskMediaManifest)
   assert(taskLifecycle.runningBeforePause.status === 'running', 'pause/resume task never entered running state')
   assert(taskLifecycle.paused?.status === 'paused', 'task pause did not persist paused state')
   assert(taskLifecycle.whilePaused?.status === 'paused', 'task left paused state without resume')
@@ -741,6 +764,21 @@ try {
     taskLifecycle.directCompleted?.toolRuns?.some((run) => run.toolName === 'delay.sleep' && run.status === 'done'),
     'direct tool task did not persist its done toolRun',
   )
+  assert(
+    taskLifecycle.mediaCompleted?.status === 'done',
+    `direct media task failed: ${taskLifecycle.mediaCompleted?.lastError ?? 'missing'}`,
+  )
+  assert(taskLifecycle.mediaCompleted?.steps?.[0]?.status === 'done', 'direct media step was not marked done')
+  assert(
+    taskLifecycle.mediaCompleted?.toolRuns?.some(
+      (run) =>
+        run.toolName === 'file.read' &&
+        run.status === 'done' &&
+        Array.isArray(run.imagePaths) &&
+        run.imagePaths.includes(taskMediaImage),
+    ),
+    'direct media toolRun did not persist the referenced local image',
+  )
   assert(taskLifecycle.failed?.status === 'failed', 'unknown direct tool task was not marked failed')
   assert(taskLifecycle.failed?.steps?.[0]?.status === 'failed', 'unknown direct tool step was not marked failed')
   assert(
@@ -751,6 +789,7 @@ try {
     taskLifecycle.pauseDismissed?.ok &&
       taskLifecycle.cancelDismissed?.ok &&
       taskLifecycle.directDismissed?.ok &&
+      taskLifecycle.mediaDismissed?.ok &&
       taskLifecycle.failedDismissed?.ok,
     'task lifecycle cleanup failed',
   )
@@ -1241,12 +1280,19 @@ try {
       canceledStepStatus: taskLifecycle.afterCancel?.steps?.[taskLifecycle.afterCancel.currentStepIndex]?.status,
       directStatus: taskLifecycle.directCompleted?.status,
       directToolRun: taskLifecycle.directCompleted?.toolRuns?.[0]?.status,
+      mediaStatus: taskLifecycle.mediaCompleted?.status,
+      mediaStep: taskLifecycle.mediaCompleted?.steps?.[0]?.status,
+      mediaToolRun: taskLifecycle.mediaCompleted?.toolRuns?.find((run) => run.toolName === 'file.read')?.status,
+      mediaImage: taskLifecycle.mediaCompleted?.toolRuns
+        ?.find((run) => run.toolName === 'file.read')
+        ?.imagePaths?.includes(taskMediaImage),
       failedStatus: taskLifecycle.failed?.status,
       failedToolRun: taskLifecycle.failed?.toolRuns?.[0]?.status,
       cleanup: Boolean(
         taskLifecycle.pauseDismissed?.ok &&
           taskLifecycle.cancelDismissed?.ok &&
           taskLifecycle.directDismissed?.ok &&
+          taskLifecycle.mediaDismissed?.ok &&
           taskLifecycle.failedDismissed?.ok,
       ),
     },

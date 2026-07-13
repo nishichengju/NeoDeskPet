@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二十八批：Task step 执行与状态收尾已拆分）
+- 状态：P2-1 进行中（第二十九批：Task 工具媒体解析与受限落盘已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -791,6 +791,15 @@ AI 与能力
 - 新增 6 个 runner 测试，覆盖多 step 顺序与 agent.run 壳卡排除、空任务单次清理、暂停恢复、取消终态、执行失败和门禁期间任务删除；`taskService.ts` 从第二十七批后的 1651 行降至 1542 行。
 - 打包 IPC smoke 扩展真实状态机路径：等待活跃 step 后取消并断言 `skipped`，直接 `delay.sleep` task 必须生成 done step/toolRun，未知 `missing.tool` 必须同步生成 failed task/step 和 error toolRun，四类任务均完成清理。
 - `npm test` 共 49 个测试文件、220 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task 工具执行适配、图片落盘和专用工作流边界，完成 `taskService.ts` 领域收口。
+
+### P2-1 进展记录（2026-07-13，第二十九批）
+
+- 新增 `electron/task/taskToolMedia.ts`，集中管理工具结构化图片的受限落盘、文本图片引用提取和模型视觉 parts 构建。结构化图片限制为最多 8 张、单张默认不超过 10 MiB，只接受 PNG/JPEG/WebP/GIF/BMP，严格校验 Base64，并按 SHA-256 内容去重后使用安全任务前缀和 MIME 对应扩展名写入附件目录。
+- 工具文本解析优先读取显式 `path/paths/images[].path`，兼容 JSON、Markdown、Windows/UNC/POSIX 本地路径和 localhost 媒体 URL，同时过滤普通远程缩略图；模型输入兼容本地绝对路径、`file://`、受支持的 data URL 与 HTTP(S) URL，缺失、超限、SVG、无效 Base64 和不支持格式会被跳过。
+- `TaskService` 的 MCP、Agent 和直接 step 工具图片统一经 `TaskToolMediaStore.resolveImagePaths` 处理，视觉会话统一经 `imageUrlPartsFromPaths` 构造模型输入，删除原有图片引用解析、Base64 落盘和本地 data URL 重复实现；`taskService.ts` 从第二十八批后的 1542 行降至 1356 行。
+- 新增 6 个媒体模块测试，覆盖显式字段顺序、远程缩略图过滤、本地/localhost 自由文本提取、数量/大小/MIME/Base64/内容去重、安全文件名、结构化图片优先与文本回退，以及本地路径、file URL、data URL、HTTP URL 和无效模型图片输入。
+- 打包 IPC smoke 新增真实 `file.read` 图片清单任务：从隔离 `userData/task-output` 读取包含本地 PNG 路径的文本，断言 task、step、toolRun 均为 done，toolRun `imagePaths` 保留该 PNG，并在 dismiss 后完成清理；既有 auto fallback 三次视觉请求与单次工具副作用验证继续通过。
+- `npm test` 共 50 个测试文件、226 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分直接工具执行适配与 `workflow.mmvector_video_qa` 专用工作流，进一步收窄 `TaskService`。
 
 ## 14. P2-2：前端加载与运行性能
 

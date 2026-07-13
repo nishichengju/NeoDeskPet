@@ -583,3 +583,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义、Agent 消息协议、模型配置或界面样式。runner 单测和打包 smoke 共同覆盖暂停、取消、成功、失败、空任务和资源清理；取消中的 Agent 内部外部工具是否都能立即响应仍取决于各执行器的 Abort/stop 实现，真实 CLI/MCP/浏览器长任务中断和三个并发槽位的长时间交错仍是后续集成风险。
+
+## P2-1：大型模块拆分与领域边界（第二十九批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Task 工具结构化图片落盘、文本图片引用提取与模型视觉 parts
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 50 个测试文件、226 个用例通过 |
+| Task tool media 测试 | 6 个用例通过：显式 JSON 字段与顺序、远程缩略图过滤、本地/localhost 提取、数量/大小/MIME/Base64/内容去重与安全文件名、结构化图片优先/文本回退、本地/file/data/HTTP 模型 parts、超限/缺失/SVG/无效输入跳过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | 新增真实 `file.read` 图片清单任务，task/step/toolRun 均为 done、`imagePaths` 命中本地 PNG、dismiss 清理成功；既有 Agent text/native/auto/Claude 与三次视觉重放全部通过 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义、Agent 消息协议、模型配置或界面样式。媒体模块单测覆盖受限落盘和模型输入边界，打包 smoke 直接证明普通工具文本中的本地图片能进入持久化 toolRun，并继续证明图片可跨 native continuation 与 text fallback 重放。尚未连接真实 MCP 多图片工具、浏览器截图、生图服务或真实外挂视觉 Profile 覆盖供应商特有 MIME/URL 与多图片故障组合，这些外部差异继续作为后续集成风险保留。

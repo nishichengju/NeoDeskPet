@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { getSettings } from './store'
@@ -36,12 +36,12 @@ import {
 } from './task/taskAgentToolSession'
 import {
   TaskAgentVisionSession,
-  canonicalizeImageRef,
   normalizeImagePathList,
   normalizeVisualArtifacts,
   type TaskAgentVisualContext,
 } from './task/taskAgentVisionSession'
 import { TaskExecutionRunner } from './task/taskExecutionRunner'
+import { TaskToolMediaStore, imageUrlPartsFromPaths } from './task/taskToolMedia'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord } from './types'
@@ -302,139 +302,6 @@ function clampStepOutput(text: string): string {
   return clampText(text, MAX_STEP_OUTPUT_CHARS)
 }
 
-function pickImageExtByMime(mimeType: string): string {
-  const m = String(mimeType ?? '').trim().toLowerCase()
-  if (m === 'image/jpeg') return '.jpg'
-  if (m === 'image/webp') return '.webp'
-  if (m === 'image/gif') return '.gif'
-  if (m === 'image/bmp') return '.bmp'
-  return '.png'
-}
-
-const IMAGE_REF_RE = /\.(?:png|jpe?g|webp|gif|bmp|svg)(?:[?#][^\s"')\]]*)?$/i
-
-function isLikelyImageRef(raw: string): boolean {
-  const s = String(raw ?? '').trim()
-  if (!s) return false
-  if (/^data:image\//i.test(s)) return true
-  if (/^blob:/i.test(s)) return true
-  if (/^file:\/\//i.test(s)) return IMAGE_REF_RE.test(s)
-
-  // 聊天窗口 ToolUse 图片预览只展示“本地/内联图片”：
-  // - 避免把搜索结果 JSON 里的一堆远程缩略图 URL 误识别成“工具输出图片”
-  // - 避免热链/防盗链导致的大量破图占位
-  // 允许 localhost 的内部附件服务 URL（用于预览本地附件）。
-  if (/^https?:\/\//i.test(s)) {
-    if (/^https?:\/\/(127\.0\.0\.1|localhost)(?::\d+)?\//i.test(s)) return IMAGE_REF_RE.test(s)
-    return false
-  }
-
-  // 过滤掉“无协议远程 URL”（例如 //host/path 或 host.tld/path），它们不是本地文件路径。
-  if (/^\/\//.test(s)) return false
-  if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\//.test(s)) return false
-
-  // 绝对路径（Windows / UNC / POSIX）或相对路径（如 task-output/foo.png）
-  return IMAGE_REF_RE.test(s)
-}
-
-function extractImageRefsFromToolText(text: string): string[] {
-  const raw = String(text ?? '')
-  if (!raw.trim()) return []
-
-  const out = new Set<string>()
-  const add = (value: unknown) => {
-    const s = canonicalizeImageRef(value)
-    if (!s) return
-    if (!isLikelyImageRef(s)) return
-    out.add(s)
-  }
-
-  const walk = (v: unknown) => {
-    if (typeof v === 'string') {
-      add(v)
-      return
-    }
-    if (Array.isArray(v)) {
-      for (const x of v) walk(x)
-      return
-    }
-    if (!v || typeof v !== 'object') return
-    for (const x of Object.values(v as Record<string, unknown>)) walk(x)
-  }
-
-  const collectPreferredRefs = (v: unknown): string[] => {
-    const preferred = new Set<string>()
-    const addPreferred = (value: unknown) => {
-      const s = canonicalizeImageRef(value)
-      if (!s || !isLikelyImageRef(s)) return
-      preferred.add(s)
-    }
-    const obj = v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
-    if (!obj) return []
-    addPreferred(obj.path)
-    if (Array.isArray(obj.paths)) {
-      for (const p of obj.paths) addPreferred(p)
-    }
-    if (Array.isArray(obj.images)) {
-      for (const item of obj.images) {
-        const imageObj = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : null
-        addPreferred(imageObj?.path)
-      }
-    }
-    return Array.from(preferred).slice(0, 8)
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    const preferred = collectPreferredRefs(parsed)
-    if (preferred.length > 0) return preferred
-    walk(parsed)
-  } catch {
-    // ignore
-  }
-
-  for (const m of raw.matchAll(/!\[[^\]]*]\(([^)\s]+)\)/g)) add(m[1])
-  for (const m of raw.matchAll(/https?:\/\/[^\s<>()"'`]+/g)) add(m[0])
-  for (const m of raw.matchAll(/(?:[a-zA-Z]:\\|\\\\|\/)[^\r\n"'`<>|?*]+?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:\?[^\s"'`<>]*)?/g)) add(m[0])
-
-  return Array.from(out).slice(0, 8)
-}
-
-function imageMimeFromPath(filePath: string): string {
-  const ext = path.extname(String(filePath ?? '')).toLowerCase()
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-  if (ext === '.webp') return 'image/webp'
-  if (ext === '.gif') return 'image/gif'
-  if (ext === '.bmp') return 'image/bmp'
-  return 'image/png'
-}
-
-async function localImagePathToDataUrl(filePath: string): Promise<string | null> {
-  const raw = String(filePath ?? '').trim()
-  if (!raw || /^data:image\//i.test(raw) || /^https?:\/\//i.test(raw)) return raw || null
-  if (!path.isAbsolute(raw)) return null
-  try {
-    const st = await fs.promises.stat(raw)
-    if (!st.isFile() || st.size > 10 * 1024 * 1024) return null
-    const buf = await fs.promises.readFile(raw)
-    if (!buf.length) return null
-    return `data:${imageMimeFromPath(raw)};base64,${buf.toString('base64')}`
-  } catch {
-    return null
-  }
-}
-
-async function imageUrlPartsFromLocalPaths(paths: string[], limit = 4): Promise<Array<Record<string, unknown>>> {
-  const parts: Array<Record<string, unknown>> = []
-  for (const p of normalizeImagePathList(paths, limit)) {
-    const url = await localImagePathToDataUrl(p)
-    if (!url) continue
-    parts.push({ type: 'image_url', image_url: { url } })
-    if (parts.length >= limit) break
-  }
-  return parts
-}
-
 export class TaskService {
   private readonly taskStore: TaskStore
   private readonly runtime = new TaskRuntimeRegistry()
@@ -444,12 +311,14 @@ export class TaskService {
   private readonly userDataDir: string
   private readonly mcpManager: McpManager | null
   private readonly skillManager: SkillManager
+  private readonly toolMediaStore: TaskToolMediaStore
 
   constructor(opts: { onChanged: () => void; userDataDir: string; mcpManager?: McpManager | null }) {
     this.taskStore = new TaskStore({ onChanged: opts.onChanged })
     this.userDataDir = opts.userDataDir
     this.mcpManager = opts.mcpManager ?? null
     this.skillManager = new SkillManager({ workspaceDir: process.cwd() })
+    this.toolMediaStore = new TaskToolMediaStore({ userDataDir: this.userDataDir })
     this.scheduler = new TaskScheduler({
       readTasks: () => this.taskStore.readState().tasks,
       startTask: (id) => this.startTask(id),
@@ -656,61 +525,6 @@ export class TaskService {
       },
       { maxStepOutputChars: MAX_STEP_OUTPUT_CHARS },
     )
-  }
-
-  private async persistToolImages(taskId: string, images: Array<{ mimeType: string; data: string }>): Promise<string[]> {
-    if (!Array.isArray(images) || images.length === 0) return []
-
-    const baseDir = path.join(this.userDataDir, 'chat-attachments')
-    await fs.promises.mkdir(baseDir, { recursive: true })
-
-    const out: string[] = []
-    const seenImageHashes = new Set<string>()
-    const safeTaskId = String(taskId ?? '').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 24) || 'task'
-    for (const it of images.slice(0, 8)) {
-      const rawData = typeof it?.data === 'string' ? it.data.trim() : ''
-      if (!rawData) continue
-
-      let mimeType = typeof it?.mimeType === 'string' && it.mimeType.trim() ? it.mimeType.trim() : 'image/png'
-      let base64 = rawData
-      const dataUrlMatch = rawData.match(/^data:([^;,]+);base64,(.+)$/i)
-      if (dataUrlMatch) {
-        mimeType = dataUrlMatch[1] || mimeType
-        base64 = dataUrlMatch[2] || ''
-      }
-
-      if (!base64) continue
-
-      let buf: Buffer
-      try {
-        buf = Buffer.from(base64, 'base64')
-      } catch {
-        continue
-      }
-      if (!buf.length) continue
-      const hash = createHash('sha1').update(buf).digest('hex')
-      const imageKey = `${mimeType}:${hash}`
-      if (seenImageHashes.has(imageKey)) continue
-      seenImageHashes.add(imageKey)
-
-      const ext = pickImageExtByMime(mimeType)
-      const filename = `${safeTaskId}-${randomUUID()}${ext}`
-      const filePath = path.join(baseDir, filename)
-      await fs.promises.writeFile(filePath, buf)
-      out.push(filePath)
-    }
-
-    return out
-  }
-
-  private async resolveToolImagePaths(
-    taskId: string,
-    toolText: string,
-    images: Array<{ mimeType: string; data: string }>,
-  ): Promise<string[]> {
-    const persisted = await this.persistToolImages(taskId, images)
-    if (persisted.length > 0) return normalizeImagePathList(persisted, 8)
-    return normalizeImagePathList(extractImageRefsFromToolText(toolText), 8)
   }
 
   private async runTool(tool: string | undefined, input: ToolInput, task: TaskRecord, rt: TaskRuntime): Promise<string> {
@@ -1113,7 +927,7 @@ export class TaskService {
       mainAvailable: Boolean(String(settings.ai.baseUrl ?? '').trim() && String(settings.ai.model ?? '').trim()),
       fallbackAvailable: Boolean(fallbackProfile),
       fallbackOnTransient: settings.ai.visionFallbackOnTransient,
-      loadImageParts: imageUrlPartsFromLocalPaths,
+      loadImageParts: imageUrlPartsFromPaths,
       inspectFallbackArtifact: async (artifact, question) => {
         if (!fallbackProfile) throw new Error('未配置可用的外挂视觉 Profile')
         return this.executeToolByName(
@@ -1373,11 +1187,11 @@ export class TaskService {
         execution = await visionSession.executeVisionLook(input)
       } else if (toolName.startsWith('mcp.') && this.mcpManager) {
         const result = await this.mcpManager.callToolDetailed(toolName, input)
-        const imagePaths = await this.resolveToolImagePaths(task.id, result.text, result.images)
+        const imagePaths = await this.toolMediaStore.resolveImagePaths(task.id, result.text, result.images)
         execution = { output: result.text, imagePaths }
       } else {
         const output = await this.executeToolByName(toolName, input, task, rt)
-        const imagePaths = await this.resolveToolImagePaths(task.id, output, [])
+        const imagePaths = await this.toolMediaStore.resolveImagePaths(task.id, output, [])
         execution = { output, imagePaths }
       }
 
@@ -1523,7 +1337,7 @@ export class TaskService {
       executeStep: async (task, step) => {
         const toolInput = parseToolInput(step.input)
         const output = await this.runTool(step.tool, toolInput, task, rt)
-        const imagePaths = step.tool ? await this.resolveToolImagePaths(id, output, []) : []
+        const imagePaths = step.tool ? await this.toolMediaStore.resolveImagePaths(id, output, []) : []
         return { output, imagePaths }
       },
       normalizeImagePaths: normalizeImagePathList,
