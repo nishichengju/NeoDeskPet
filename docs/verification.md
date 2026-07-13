@@ -1038,3 +1038,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/orb-history-popover-560x720-scale100-open.png` 与 `artifacts/ui-baseline/orb-history-popover-560x720-scale100.png`。本批未修改 popover CSS、宽度/圆角/行高/箭头样式、会话持久化契约、persona 归属、当前会话切换、删除后的模式迁移或打开完整聊天语义；只把视图和纯定位/列表映射迁移到独立模块，并为删除图标按钮补充可访问名称。聚焦测试覆盖纯函数、静态 DOM 与事件委托，浏览器基线验证其他 persona 干扰项被过滤、较早会话可选择和删除、删除后列表刷新、查看全部只触发一次。当前自动化未模拟删除 IPC 失败后的真实网络/主进程异常，也未验证超过 8 个会话时用户滚动或在真实 Electron 多屏/DPI 环境中的历史锚点；`OrbApp` 仍有 1938 行，下一批继续审计剩余状态与副作用边界。
+
+## P2-2：前端加载与运行性能（第五十批）
+
+- 验证日期：2026-07-14
+- 优化范围：六类 renderer 窗口按路由加载、Pet/Pixi/Live2D 运行时隔离、共享设置订阅收窄和资源加载 UI 门禁
+
+| 检查 | 结果 |
+| --- | --- |
+| Vite renderer bundle | 主 JS `1410.00 kB → 146.22 kB`，约下降 89.6%；主 CSS `87.49 kB → 41.90 kB`；生成 Chat 125.94 kB、Settings 126.23 kB、Memory 31.04 kB、Orb 49.77 kB、Pet/Pixi 710.28 kB、Markdown 160.49 kB 等按需 chunk |
+| `npm test` | 78 个测试文件、340 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，动态 chunk、Live2D 公共运行时、`better-sqlite3` native 依赖、独立 vector worker、品牌图标和版本元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged `file://` 下 Pet 动态运行时与五类受检窗口 preload 正常；Pet/Chat/Settings/Memory/Orb runtimeErrors 全为空，聊天/任务/Memory/Agent/MCP/TTS/ASR、权限和重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 22 个场景通过；新增 `pet-shell-300x500-scale100` 并实际渲染默认 Live2D 模型，资源门禁确认主 chunk 为 146216 bytes、各路由只加载目标 chunk、非 Pet 路由不加载 Pet/Pixi 或两份 Live2D 运行时；0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/pet-shell-300x500-scale100.png`，以及本轮重新生成的 Chat、Settings、Memory 与 Orb 默认尺寸截图。窗口 DOM、现有 CSS、preload/API 契约、路由 hash、Live2D 模型选择与 Pixi CSP 安装逻辑未改变；Pet 仍加载两套本地 Live2D 运行时，但只在 Pet 路由并行加载，随后才导入 Pet/Pixi chunk。资源基线直接读取浏览器 `performance` 条目，验证运行时实际请求而非只依赖构建文件名；打包 IPC smoke 进一步验证 `document.baseURI` 在 `app.asar/dist/index.html` 的 `file://` 路径下可正确定位 `dist/lib`。当前未建立精确的窗口首帧耗时统计，首次 Pet 打开仍需加载约 710 kB Pet/Pixi chunk 和约 336 kB Live2D 运行时；Settings 首包仍包含全部大页组件，下一批继续拆分。

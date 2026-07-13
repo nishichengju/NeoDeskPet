@@ -994,6 +994,15 @@ AI 与能力
 - 超长会话滚动和流式输出没有明显掉帧。
 - 隐藏窗口不会继续进行不必要的高频轮询。
 
+第五十批进展（2026-07-14）：
+
+- 完成 `OrbApp` 剩余状态/副作用审计：当前大块主要是窗口状态机、发送/任务回流和会话持久化编排，继续只为缩短文件而拆分会增加跨 hook 协调成本；P2-1 在主要视图、媒体和弹层边界完成后收口，本批正式进入 P2-2。
+- `App.tsx` 将 Pet、Chat、Settings、Memory、Orb 与 Orb Menu 六类窗口改为 `React.lazy` 路由级动态加载，保留原 props 与路由选择语义；共享 settings 读取/订阅只在 Settings 与 Memory 窗口启用，不再由 Chat、Orb、Orb Menu 和 Pet 重复触发。
+- `main.tsx` 不再静态导入 Pixi 与 `@pixi/unsafe-eval`；新增 `PetWindowEntry.tsx`，只在 Pet chunk 内安装 Pixi CSP 适配器。`index.html` 移除全窗口同步加载的 Live2D 2/Cubism 运行时，Pet 路由改为并行加载两份本地脚本，全部就绪后再导入 Pet/Pixi chunk；`document.baseURI` 同时兼容开发服务器与 packaged `file://` 路径。
+- Vite renderer 主 JS 从约 1410.00 kB 降至 146.22 kB，下降约 89.6%；主 CSS 从 87.49 kB 降至 41.90 kB，并生成 Chat 125.94 kB、Settings 126.23 kB、Memory 31.04 kB、Orb 49.77 kB、Pet/Pixi 710.28 kB 和共享 Markdown 160.49 kB 等按需 chunk。非 Pet 窗口同时不再加载约 336 kB 的两份 Live2D 运行时。
+- UI baseline 新增 `pet-shell-300x500-scale100`，默认 Live2D 模型实际渲染；22 个场景记录 `performance` 资源条目并强制主 chunk 不超过 250 kB、目标路由 chunk 必须加载、Pet/Live2D 资源只能出现在 Pet 路由。全部场景 0 failure、0 console error、无横向或纵向溢出；unpacked IPC smoke 中 Pet/Chat/Settings/Memory/Orb 的 runtimeErrors 均为空。
+- `npm test` 共 78 个测试文件、340 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 22 个 UI baseline 场景均通过。下一批继续让 Settings 大页按需加载，降低进入设置窗口时的首屏解析与执行成本。
+
 ## 15. P2-3：无障碍与交互一致性
 
 ### 实施步骤

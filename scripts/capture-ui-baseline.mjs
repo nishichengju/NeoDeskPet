@@ -534,6 +534,7 @@ function installSettingsMock(page) {
 }
 
 const baselines = [
+  { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
   { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true },
@@ -603,11 +604,22 @@ try {
       const settingsNav = document.querySelector('.ndp-settings-nav')
       const chatSummary = document.querySelector('.ndp-chat-status-button')
       const chatDetails = document.querySelector('.ndp-chat-status-drawer')
+      const rendererAssets = performance
+        .getEntriesByType('resource')
+        .map((entry) => {
+          const url = new URL(entry.name)
+          return {
+            name: url.pathname.split('/').at(-1) ?? '',
+            decodedBodySize: 'decodedBodySize' in entry ? entry.decodedBodySize : 0,
+          }
+        })
+        .filter((entry) => /\.(?:css|js)$/.test(entry.name))
       return {
         viewport: { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight },
         body: { scrollWidth: document.body.scrollWidth, scrollHeight: document.body.scrollHeight },
         horizontalOverflow: document.body.scrollWidth > document.documentElement.clientWidth,
         verticalOverflow: document.body.scrollHeight > document.documentElement.clientHeight,
+        rendererAssets,
         orbContent: {
           messages: document.querySelectorAll('.ndp-orbpanel-msg').length,
           toolCards: document.querySelectorAll('.ndp-tooluse').length,
@@ -633,6 +645,31 @@ try {
 
     const failures = []
     if (metrics.horizontalOverflow) failures.push('body has horizontal overflow')
+    const expectedRouteChunk = {
+      pet: 'PetWindowEntry-',
+      chat: 'ChatWindow-',
+      settings: 'SettingsWindow-',
+      memory: 'MemoryConsoleWindow-',
+      orb: 'OrbApp-',
+    }[baseline.route]
+    const loadedAssetNames = metrics.rendererAssets.map((entry) => entry.name)
+    if (expectedRouteChunk && !loadedAssetNames.some((name) => name.startsWith(expectedRouteChunk))) {
+      failures.push(`${baseline.route} route chunk is missing from ${loadedAssetNames.join(',') || 'loaded assets'}`)
+    }
+    const live2dRuntimeNames = ['live2d.min.js', 'live2dcubismcore.min.js']
+    if (baseline.route === 'pet') {
+      const missingRuntimes = live2dRuntimeNames.filter((name) => !loadedAssetNames.includes(name))
+      if (missingRuntimes.length > 0) failures.push(`pet route is missing ${missingRuntimes.join(',')}`)
+    } else if (
+      loadedAssetNames.some((name) => name.startsWith('PetWindowEntry-') || live2dRuntimeNames.includes(name))
+    ) {
+      failures.push(`${baseline.route} route loaded Pet/Live2D assets`)
+    }
+    const mainScript = metrics.rendererAssets.find((entry) => /^main-.+\.js$/.test(entry.name))
+    if (!mainScript) failures.push('renderer main chunk metric is missing')
+    else if (mainScript.decodedBodySize > 250_000) {
+      failures.push(`renderer main chunk is ${mainScript.decodedBodySize} bytes`)
+    }
     if (baseline.compactChat && !metrics.chatStatus?.summaryVisible) {
       failures.push('compact chat status summary is not visible')
     }
