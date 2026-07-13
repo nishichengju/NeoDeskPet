@@ -647,3 +647,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义/schema、模型参数含义、Agent 消息协议或界面样式。纯配置测试覆盖主/专用 provider 与覆盖优先级，状态测试覆盖节流、toolRun、presentation 和 usage；打包 smoke 进一步证明这些适配器在 text/native/auto/Claude 与真实 MCP 组合下没有改变持久化结果。真实云端 provider 的私有错误、长轮次 usage 差异和 Skills 大目录性能仍需后续人工集成回归。
+
+## P2-1：大型模块拆分与领域边界（第三十二批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Task Agent Skills 准备、Live2D/system/history 消息装配与 text fallback 工具结果回放
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 56 个测试文件、256 个用例通过 |
+| Task agent Skills 准备测试 | 5 个用例通过：模型提示、verbose/disabled 诊断、冲突前 5 条与候选前 3 条、显式命令、24000 字符技能正文、读取失败、160 字符异常隔离 |
+| Task agent 消息会话测试 | 4 个用例通过：persona/Live2D/工具事实/视觉/Skills/history 顺序、历史尾部去重、带图请求强制追加、fallback 原位重建与多工具结果顺序/截断 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建成功，品牌图标与版本信息写入成功 |
+| `npm run ipc:smoke` | text 503 重试、真实 MCP 图片、Agent MMVector workflow、native role=tool、带本地 PNG 的 auto fallback、Claude Messages 与 3/4/7 usage 全部通过；fallback 后视觉和 TOOL_RESULT 均重放且工具只执行一次 |
+| `npm run media:smoke` | 图片/视频/Task 媒体托管、resourceId、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；无 console error、无横向溢出，任务工具卡、默认/紧凑 Chat 和状态面板无布局回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查截图：`artifacts/ui-baseline/chat-tool-card-720x620-scale100-open.png`。本批未修改 renderer、preload API、Task IPC、任务 store/schema、工具定义/schema、模型配置字段、视觉路由决策或 provider 传输协议。Skills 和消息会话的聚焦测试锁定了提示顺序、显式技能改写、异常降级和 fallback 回放；打包 smoke 进一步证明这些新边界在 text/native/auto/Claude、真实 MCP 与本地图片组合下不改变行为。尚未用真实超大 Skills 目录测量扫描性能，也未连接真实云端 provider 与外挂视觉 Profile 组合验证供应商私有错误；这些外部差异继续作为人工集成风险保留。

@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第三十一批：Task Agent 运行配置与任务状态持久化已拆分）
+- 状态：P2-1 进行中（第三十二批：Task Agent Skills 与消息会话装配已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -818,6 +818,15 @@ AI 与能力
 - 新增 5 个 Agent 配置测试和 5 个任务状态测试，覆盖主/专用 AI、嵌套覆盖、Claude、history/视觉/Skills 边界、空请求/缺失配置、重置、进度节流、toolRun 合并、取消、工具去重、Live2D 与 3/4/7 usage 持久化。
 - 打包 IPC smoke 继续通过 text 首次 503 后重试、真实 MCP 图片、Agent MMVector workflow、native role=tool、带本地 PNG 的 auto native→text fallback 及 Claude `/v1/messages`；done/error toolRun、最终输出、Live2D/usage 相关任务状态没有回归。
 - `npm test` 共 54 个测试文件、247 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续抽离 Skills 准备与 Agent system/history 消息装配，完成 `runAgentRunTool` 剩余领域收口。
+
+### P2-1 进展记录（2026-07-14，第三十二批）
+
+- 新增 `electron/task/taskAgentSkillPreparation.ts`，集中处理 Skills 诊断、模型可见提示、显式 slash-command 匹配、技能文件读取和有效请求改写；保留冲突前 5 条、匹配候选前 3 条、技能正文 24000 字符与异常日志 160 字符上限，Skills 初始化失败仍只降级为日志，不中断 Agent。
+- 新增 `electron/task/taskAgentMessageSession.ts`，统一装配 persona/context、Live2D 标签与参数提示、工具事实规则、视觉目录/初始观察、Skills、history 和当前用户请求；text fallback 会原位重建同一消息数组，保留视觉上下文并按执行顺序回放已完成 `TOOL_RESULT`，历史尾部同请求去重和带图请求强制追加规则保持不变。
+- Live2D Agent 提示生成随消息会话迁出 `TaskService`；`runAgentRunTool` 现在只负责工具目录、视觉/LLM/工具会话和循环 runner 的依赖接线，`taskService.ts` 从第三十一批后的 940 行降至 620 行，Task IPC、store/schema、工具定义和 provider 协议未改变。
+- 新增 5 个 Skills 准备测试和 4 个消息会话测试，覆盖 verbose/disabled/冲突截断、显式匹配、读取失败、异常隔离、系统消息顺序、历史尾部去重、带图请求、fallback 原位重建、空结果和 4000 字符工具结果回放。
+- 打包 IPC smoke 继续通过 text 503 重试、真实 MCP 结构化图片、Agent MMVector workflow、native role=tool、带本地 PNG 的 auto native→text fallback 及 Claude `/v1/messages` 3/4/7 usage；消息重建后工具只执行一次、视觉与结果回放均命中。
+- `npm test` 共 56 个测试文件、256 个用例通过；TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批进入 `memoryService.ts`，先拆数据库生命周期与检索边界。
 
 ## 14. P2-2：前端加载与运行性能
 

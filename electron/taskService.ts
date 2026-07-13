@@ -7,18 +7,18 @@ import {
   toOpenAITools,
   type OpenAIFunctionToolSpec,
 } from './toolRegistry'
-import { getLive2dCapabilities } from './live2dToolState'
-import { readLive2dModelMetadata } from './live2dModelMetadata'
 import { SkillManager } from './skillRegistry'
 import type { McpManager } from './mcpManager'
-import {
-  buildToolResultBlock,
-  TaskAgentToolCatalog,
-} from './task/taskAgentTools'
+import { TaskAgentToolCatalog } from './task/taskAgentTools'
 import { TaskAgentConversation } from './task/taskAgentConversation'
 import { TaskAgentLoopRunner } from './task/taskAgentLoopRunner'
 import { TaskAgentLlmClient } from './task/taskAgentLlmClient'
+import {
+  buildTaskAgentLive2dSystemMessages,
+  TaskAgentMessageSession,
+} from './task/taskAgentMessageSession'
 import { resolveTaskAgentRunConfig } from './task/taskAgentRunConfig'
+import { prepareTaskAgentSkills } from './task/taskAgentSkillPreparation'
 import { TaskAgentTaskState } from './task/taskAgentTaskState'
 import {
   TaskAgentToolSession,
@@ -43,177 +43,6 @@ import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/tas
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
 import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord } from './types'
 import { resolveVisionFallbackProfile } from './visionRouter'
-
-const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
-
-type Live2dModelTagHints = { expressions: string[]; motions: string[] }
-
-function readLive2dTagHintsFromModelFile(modelFileUrl: string): Live2dModelTagHints {
-  const meta = readLive2dModelMetadata(modelFileUrl)
-  return {
-    expressions: (meta?.expressions ?? []).map((e) => e.name).filter(Boolean).slice(0, 200),
-    motions: (meta?.motions ?? []).slice(0, 200),
-  }
-}
-
-function buildLive2dTagSystemAddon(hints: Live2dModelTagHints): string {
-  const exps = (hints.expressions ?? []).slice(0, LIVE2D_TAG_MAX_LIST.expressions)
-  const motions = (hints.motions ?? []).slice(0, LIVE2D_TAG_MAX_LIST.motions)
-  if (exps.length === 0 && motions.length === 0) return ''
-
-  const lines: string[] = []
-  if (exps.length) {
-    lines.push(
-      `【表情系统】可用表情：${exps.join('、')}\n` +
-        `说明：这是“可选标签”，用于在不调用 live2d.applyParamScript 时快速触发表情。` +
-        `当你已经用 live2d.applyParamScript 完成表情/动作时，不要再额外追加标签，避免覆盖脚本效果。` +
-        `格式：[表情:表情名]（只放在自然语言文本末尾，不要放进工具参数/JSON）。`,
-    )
-  }
-  if (motions.length) {
-    lines.push(
-      `【动作系统】可用动作组：${motions.join('、')}\n` +
-        `说明：这是“可选标签”，用于在不调用 live2d.applyParamScript 时快速触发动作。` +
-        `当你已经用 live2d.applyParamScript 完成表情/动作时，不要再额外追加标签，避免覆盖脚本效果。` +
-        `格式：[动作:动作组名]（只放在自然语言文本末尾，不要放进工具参数/JSON）。`,
-    )
-  }
-  return lines.join('\n\n')
-}
-
-function buildLive2dParamSystemAddon(modelJsonUrlFallback?: string): string {
-  const caps = getLive2dCapabilities()
-  const modelJsonUrl = String(caps?.modelJsonUrl ?? modelJsonUrlFallback ?? '').trim()
-  if (!modelJsonUrl) return ''
-
-  const meta = readLive2dModelMetadata(modelJsonUrl)
-  const nameMap = meta?.parameterDisplayNames ?? {}
-
-  const maxList = 80
-  const items = (() => {
-    const fromCaps = Array.isArray(caps?.parameters) ? caps.parameters : []
-    const mapped = fromCaps
-      .filter((p) => p && typeof (p as { id?: unknown }).id === 'string')
-      .slice(0, 800)
-      .map((p) => ({
-        id: String((p as { id: string }).id).trim(),
-        min: typeof (p as { min?: unknown }).min === 'number' ? (p as { min: number }).min : undefined,
-        max: typeof (p as { max?: unknown }).max === 'number' ? (p as { max: number }).max : undefined,
-        def: typeof (p as { def?: unknown }).def === 'number' ? (p as { def: number }).def : undefined,
-      }))
-      .filter((p) => p.id.length > 0)
-      .sort((a, b) => a.id.localeCompare(b.id))
-
-    const idPool = (() => {
-      if (mapped.length > 0) return mapped.map((x) => x.id)
-      return Object.keys(nameMap).filter((k) => k.trim().length > 0)
-    })()
-
-    const exprIds = (() => {
-      const exps = meta?.expressions ?? []
-      const ids: string[] = []
-      for (const e of exps) {
-        for (const p of e.params ?? []) {
-          const id = String(p.id ?? '').trim()
-          if (id) ids.push(id)
-          if (ids.length >= 120) break
-        }
-        if (ids.length >= 120) break
-      }
-      return ids
-    })()
-
-    const commonIds = [
-      'ParamEyeLOpen',
-      'ParamEyeROpen',
-      'ParamEyeLSmile',
-      'ParamEyeRSmile',
-      'ParamBrowLAngle',
-      'ParamBrowRAngle',
-      'ParamCheek',
-      'ParamMouthForm',
-      'ParamAngleX',
-      'ParamAngleY',
-      'ParamAngleZ',
-      'ParamBodyAngleX',
-      'ParamBodyAngleY',
-      'ParamBodyAngleZ',
-      'Param13',
-    ]
-
-    const pick = (ids: string[]) => ids.map((s) => s.trim()).filter(Boolean)
-    const uniq = (xs: string[]) => Array.from(new Set(xs))
-    const prioritized = uniq([...pick(commonIds), ...pick(exprIds)])
-    const rest = uniq([...pick(idPool)]).filter((id) => !prioritized.includes(id)).sort((a, b) => a.localeCompare(b))
-    const finalIds = [...prioritized, ...rest].slice(0, maxList)
-
-    const byId = new Map<string, { min?: number; max?: number; def?: number }>()
-    for (const p of mapped) byId.set(p.id, { min: p.min, max: p.max, def: p.def })
-
-    return finalIds.map((id) => {
-      const mm = byId.get(id) ?? {}
-      return { id, min: mm.min, max: mm.max, def: mm.def }
-    })
-  })()
-
-  const fmt = (v: number | undefined) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : '')
-  const hasParam = (id: string): boolean => Boolean(items.some((p) => p.id === id) || typeof nameMap[id] === 'string')
-
-  const lines: string[] = []
-  lines.push('【Live2D 参数系统】')
-  lines.push('你可以通过工具 live2d.applyParamScript 控制模型参数。')
-  lines.push('当前系统提示已包含“当前模型参数清单”，通常不需要每次再调用 live2d.getCapabilities。仅当参数清单为空/明显不匹配当前模型时，再调用 live2d.getCapabilities。')
-  lines.push('硬规则：当用户明确要求“眨眼/wink/单眼眨眼”时，你的参数脚本必须包含 ParamEyeLOpen 或 ParamEyeROpen 的变化（否则视为没完成 wink）。')
-  lines.push('常见意图提示（优先改这些“语义参数”，不要用 ArtMesh 旋转类参数去硬凑表情）：')
-  if (hasParam('ParamEyeLOpen') || hasParam('ParamEyeROpen')) {
-    lines.push('- 眨眼/单眼 wink：用 ParamEyeLOpen / ParamEyeROpen 把其中一只眼睛从 1 → 0 → 1（另一只保持 1）')
-  }
-  if (hasParam('ParamEyeLSmile') || hasParam('ParamEyeRSmile')) {
-    lines.push('- 眯眼/笑眼：用 ParamEyeLSmile / ParamEyeRSmile（可与 EyeOpen 联动）')
-  }
-  if (hasParam('Param13') && (nameMap.Param13?.includes('脸红') ?? false)) {
-    lines.push('- 脸红：Param13（脸红）')
-  }
-  if (hasParam('ParamBodyAngleX') || hasParam('ParamBodyAngleZ')) {
-    lines.push('- 扭扭捏捏/身体摆动：ParamBodyAngleX / ParamBodyAngleZ / ParamAngleX / ParamAngleZ')
-  }
-  lines.push('脚本格式（推荐）：')
-  lines.push('- tween: {op:"tween", to:{ParamId: number}, durationMs:number, ease:"linear|in|out|inOut", holdMs?:number}')
-  lines.push('- patch: {op:"patch", to:{ParamId: number}, holdMs?:number}')
-  lines.push('- wait: {op:"wait", durationMs:number}')
-  lines.push('- sequence: {op:"sequence", steps:[...] }')
-  lines.push('- pulse(宏): {op:"pulse", id:"ParamId", down:0, up:1, downMs:100, holdMs:150, upMs:100}（等价于 tween+wait+tween）')
-  lines.push('注意：口型/呼吸/鼠标追踪等桌宠内置效果可能会覆盖同名参数，避免被 LLM 控制。')
-  lines.push('例如：若用户开启了“鼠标追踪”，可能会持续写入 ParamAngleX/Y、ParamBodyAngleX/Y、ParamEyeBallX/Y 等；此时尽量避免用这些参数做动作，或提示用户先关闭鼠标追踪。')
-  const totalCount = Array.isArray(caps?.parameters) ? caps.parameters.length : 0
-  lines.push(`当前模型参数（展示前 ${items.length}/${totalCount || items.length} 个，model=${modelJsonUrl}）：`)
-  for (const p of items) {
-    const display = nameMap[p.id]
-    const nameSuffix = display ? ` (${display})` : ''
-    const suffix = [fmt(p.min) && `min=${fmt(p.min)}`, fmt(p.max) && `max=${fmt(p.max)}`, fmt(p.def) && `def=${fmt(p.def)}`]
-      .filter(Boolean)
-      .join(' ')
-    lines.push(`- ${p.id}${nameSuffix}${suffix ? ` ${suffix}` : ''}`)
-  }
-
-  const expressions = meta?.expressions ?? []
-  if (expressions.length > 0) {
-    lines.push('')
-    lines.push('【Live2D 表情速查（来自模型 Expressions/*.exp3.json）】')
-    lines.push('说明：表情本质上也是一组参数变化；你可以直接用 applyParamScript 复现，不必盲猜 ParamXX。')
-    for (const e of expressions.slice(0, 16)) {
-      const ps = (e.params ?? []).slice(0, 5).map((x) => {
-        const dn = nameMap[x.id]
-        const dnSuffix = dn ? `(${dn})` : ''
-        const blend = x.blend ? x.blend : 'Set'
-        return `${x.id}${dnSuffix} ${blend} ${x.value}`
-      })
-      lines.push(`- ${e.name}${ps.length ? `: ${ps.join(', ')}` : ''}`)
-    }
-  }
-
-  return lines.join('\n')
-}
 
 function now(): number {
   return Date.now()
@@ -563,106 +392,16 @@ export class TaskService {
     const tools: OpenAIFunctionToolSpec[] = toOpenAITools(toolDefs)
     const toolCatalog = new TaskAgentToolCatalog(toolDefs)
 
-    const skillSystemMessages: Array<Record<string, unknown>> = []
-    let effectiveAgentRequest = request
-    const deferredSkillLogs: string[] = []
-
-    try {
-      const skillDiagnostics = await this.skillManager.getDiagnostics(skillRuntimeOptions)
-      if (skillVerboseLogging) {
-        if (!skillDiagnostics.enabled) {
-          deferredSkillLogs.push('[Skill] disabled by settings')
-        } else {
-          deferredSkillLogs.push(
-            `[Skill] loaded: total=${skillDiagnostics.totalSkills}, visible=${skillDiagnostics.modelVisibleSkills}, commands=${skillDiagnostics.totalCommands}, source(managed/workspace)=${skillDiagnostics.sourceCounts.managed}/${skillDiagnostics.sourceCounts.workspace}`,
-          )
-          deferredSkillLogs.push(`[Skill] managedDir: ${skillDiagnostics.managedDir}`)
-          if (!skillAllowModelInvocation) deferredSkillLogs.push('[Skill] model auto invocation disabled (skip available_skills prompt)')
-          if (skillDiagnostics.conflicts.length > 0) {
-            deferredSkillLogs.push(`[Skill] conflicts: ${skillDiagnostics.conflicts.length}`)
-            for (const c of skillDiagnostics.conflicts.slice(0, 5)) {
-              deferredSkillLogs.push(
-                `[Skill] conflict/${c.type}: key=${c.key}, kept=${c.kept}${c.replaced ? `, replaced=${c.replaced}` : ''}${c.note ? `, note=${c.note}` : ''}`,
-              )
-            }
-            if (skillDiagnostics.conflicts.length > 5) {
-              deferredSkillLogs.push(`[Skill] conflicts truncated: +${skillDiagnostics.conflicts.length - 5}`)
-            }
-          }
-        }
-      }
-
-      const skillsPrompt = await this.skillManager.buildSkillsPrompt(skillRuntimeOptions)
-      if (skillsPrompt) {
-        skillSystemMessages.push({
-          role: 'system',
-          content:
-            '## Skills（技能）\n' +
-            '在回答前先浏览 <available_skills> 的描述；如果某个技能与任务高度匹配，优先使用该技能。\n' +
-            '可用辅助工具：skill.list（查看已加载技能）、skill.install（从 Git 仓库安装到托管目录）、skill.refresh（刷新缓存）。\n' +
-            '若用户点名某个技能/搜索渠道（例如“用 grok 搜索”），必须先用 skill.read 读取对应技能并按技能步骤执行，不要先改用 browser.fetch/mcp.fetch.fetch 等通用网页抓取。\n' +
-            '若需要技能详细步骤，优先使用 skill.read 按技能名读取（更稳、更省上下文）；示例：skill.read {name:"技能名"}。\n' +
-            '运行本地命令一律优先使用 cli.exec_stream（start/poll/stop）；对会先输出提示/二维码路径再长时间等待的脚本，必须用流式方式，不要长时间阻塞等待。Windows 运行 .py 脚本必须写 python "脚本.py"，不要用 & "脚本.py" 直接执行。\n' +
-            '一次最多先读取 1 个技能，避免无关技能占用上下文。\n' +
-            skillsPrompt,
-        })
-      }
-
-      const reqTrim = request.trim()
-      if (reqTrim) {
-        const matchResult = await this.skillManager.matchWithTrace(reqTrim, skillRuntimeOptions)
-        const match = matchResult.match
-        if (skillVerboseLogging && reqTrim.startsWith('/')) {
-          const trace = matchResult.trace
-          const selectedText = trace.selected
-            ? `${trace.selected.skillName} (/${trace.selected.commandName}, score=${trace.selected.score})`
-            : 'none'
-          deferredSkillLogs.push(
-            `[Skill] match trace: mode=${trace.mode}, reason=${trace.reason ?? 'n/a'}, query=${trace.query ?? '-'}, selected=${selectedText}`,
-          )
-          if (trace.candidates.length > 1) {
-            const top = trace.candidates
-              .slice(0, 3)
-              .map((c) => `${c.skillName}/${c.commandName}@${c.score}`)
-              .join(', ')
-            deferredSkillLogs.push(`[Skill] match candidates: ${top}${trace.candidates.length > 3 ? ' ...' : ''}`)
-          }
-        }
-        if (match) {
-          const skillName = match.command.skillName
-          deferredSkillLogs.push(`[Skill] matched: ${skillName} (/${match.command.name})`)
-
-          const loaded = await this.skillManager.readSkillContent(skillName, skillRuntimeOptions)
-          if (loaded) {
-            const skillBody = clampText(loaded.content, 24000)
-            skillSystemMessages.push({
-              role: 'system',
-              content:
-                `本轮请求已显式指定技能：${loaded.skill.name}。\n` +
-                `请严格优先遵循该技能步骤；若技能与系统安全/工具事实冲突，以系统规则与工具输出为准。`,
-            })
-            skillSystemMessages.push({
-              role: 'system',
-              content: `【SKILL: ${loaded.skill.name}】\n来源：${loaded.skill.filePath}\n\n${skillBody}`,
-            })
-          } else {
-            deferredSkillLogs.push(`[Skill] read failed: ${skillName}`)
-            skillSystemMessages.push({
-              role: 'system',
-              content:
-                `本轮请求已显式指定技能：${skillName}，但系统读取技能文件失败。` +
-                `请根据用户请求继续执行；如需要可尝试用 skill.read 读取技能文件。`,
-            })
-          }
-
-          const argsText = (match.args ?? '').trim()
-          effectiveAgentRequest = argsText || `请按已指定技能「${skillName}」完成本次请求。`
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      deferredSkillLogs.push(`[Skill] setup skipped: ${clampText(msg, 160)}`)
-    }
+    const skillPreparation = await prepareTaskAgentSkills({
+      manager: this.skillManager,
+      request,
+      runtimeOptions: skillRuntimeOptions,
+      allowModelInvocation: skillAllowModelInvocation,
+      verboseLogging: skillVerboseLogging,
+    })
+    const effectiveAgentRequest = skillPreparation.effectiveRequest
+    const skillSystemMessages = skillPreparation.systemMessages
+    const deferredSkillLogs = skillPreparation.logs
 
     const visionAttachLogs: string[] = []
     let visionLogSink: (line: string, force?: boolean) => void = (line) => {
@@ -706,43 +445,17 @@ export class TaskService {
     })
     await visionSession.prepareInitial(effectiveAgentRequest)
 
-    const messages: Array<Record<string, unknown>> = []
-    if (system) messages.push({ role: 'system', content: system })
-    if (extraContext) messages.push({ role: 'system', content: extraContext })
-
-    // Live2D：让 agent.run 的输出也能像普通对话一样，通过 [表情:...] / [动作:...] 标签驱动模型表现
-    // - 标签不会显示在对话正文（后续会被清洗掉）
-    // - 表情/动作列表从当前 Live2D 模型文件解析，避免硬编码
-    const live2dHints = readLive2dTagHintsFromModelFile(String(settings.live2dModelFile ?? ''))
-    const live2dAddon = buildLive2dTagSystemAddon(live2dHints)
-    if (live2dAddon) messages.push({ role: 'system', content: live2dAddon })
-    const live2dParamAddon = buildLive2dParamSystemAddon(String(settings.live2dModelFile ?? ''))
-    if (live2dParamAddon) messages.push({ role: 'system', content: live2dParamAddon })
-    messages.push({
-      role: 'system',
-      content:
-        '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
+    const messageSession = new TaskAgentMessageSession({
+      system,
+      extraContext,
+      effectiveRequest: effectiveAgentRequest,
+      historyMessages,
+      skillSystemMessages,
+      visionSession,
+      getLive2dSystemMessages: () =>
+        buildTaskAgentLive2dSystemMessages(String(settings.live2dModelFile ?? '')),
     })
-    const visualCatalogMessage = visionSession.buildCatalogMessage()
-    if (visualCatalogMessage) messages.push(visualCatalogMessage)
-    visionSession.appendInitialSystemMessages(messages)
-    if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
-
-    // 注入历史对话（history），让 agent 能够理解对话上下文，避免答非所问
-    messages.push(...historyMessages)
-    const requestText = effectiveAgentRequest.trim()
-    const lastHistoryMessage = [...messages].reverse().find((m) => m.role === 'user' || m.role === 'assistant')
-    const lastHistoryUserText =
-      lastHistoryMessage?.role === 'user' && typeof lastHistoryMessage.content === 'string'
-        ? String(lastHistoryMessage.content).trim()
-        : ''
-    const hasSameTailUserRequest = Boolean(requestText) && lastHistoryUserText === requestText
-
-    if (visionSession.hasInitialImageParts()) {
-      messages.push({ role: 'user', content: visionSession.buildInitialUserContent(effectiveAgentRequest) })
-    } else {
-      if (!hasSameTailUserRequest) messages.push({ role: 'user', content: effectiveAgentRequest })
-    }
+    const messages = messageSession.buildInitialMessages()
 
     const conversation = new TaskAgentConversation(maxTurns)
     const taskState = new TaskAgentTaskState({
@@ -846,42 +559,8 @@ export class TaskService {
       return { done: true, text: finalize(decision.text) }
     }
 
-    const prepareTextFallback = async () => {
-      messages.splice(0, messages.length)
-      messages.push({ role: 'system', content: system })
-      if (extraContext) messages.push({ role: 'system', content: extraContext })
-
-      // 回退到 text 协议时也要保留 Live2D 的系统注入，否则模型会丢失“参数语义/可用表情动作”上下文，容易乱调参数
-      const live2dHints = readLive2dTagHintsFromModelFile(String(settings.live2dModelFile ?? ''))
-      const live2dAddon = buildLive2dTagSystemAddon(live2dHints)
-      if (live2dAddon) messages.push({ role: 'system', content: live2dAddon })
-      const live2dParamAddon = buildLive2dParamSystemAddon(String(settings.live2dModelFile ?? ''))
-      if (live2dParamAddon) messages.push({ role: 'system', content: live2dParamAddon })
-      messages.push({
-        role: 'system',
-        content:
-          '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
-      })
-      visionSession.appendTextFallbackSystemMessages(messages)
-      if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
-
-      messages.push({
-        role: 'user',
-        content: await visionSession.buildTextFallbackUserContent(effectiveAgentRequest),
-      })
-
-      const executedCallOrder = toolSession.listExecutedCallOrder()
-      if (executedCallOrder.length > 0) {
-        messages.push({
-          role: 'system',
-          content: `注意：以下工具已执行完成（或已得到错误结果）。除非需要不同参数，否则不要重复调用同名同参工具；请基于 TOOL_RESULT 直接给出最终答复。`,
-        })
-        for (const r of executedCallOrder) {
-          const toolMsg = clampText(r.output, 4000) || '(空)'
-          messages.push({ role: 'user', content: buildToolResultBlock(r.toolName, toolMsg) })
-        }
-      }
-    }
+    const prepareTextFallback = () =>
+      messageSession.rebuildTextFallback(toolSession.listExecutedCallOrder())
 
     const loopRunner = new TaskAgentLoopRunner({
       apiMode,
