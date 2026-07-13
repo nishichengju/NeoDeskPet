@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { AppSettings, WorldBookEntry, WorldBookSettings } from '../../../electron/types'
 import { getApi } from '../../neoDeskPetApi'
+import type { SettingsConfirmAction } from './settingsConfirm'
 
 function nowId(): string {
   if ('crypto' in globalThis && typeof globalThis.crypto.randomUUID === 'function') {
@@ -48,8 +49,12 @@ function updateEntryTimestamp(entry: WorldBookEntry): WorldBookEntry {
   return { ...entry, updatedAt: Date.now() }
 }
 
-export function WorldBookSettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
-  const { api, settings } = props
+export function WorldBookSettingsTab(props: {
+  api: ReturnType<typeof getApi>
+  settings: AppSettings | null
+  confirmAction?: SettingsConfirmAction
+}) {
+  const { api, settings, confirmAction } = props
   const worldBook = settings?.worldBook
   const activePersonaId = settings?.activePersonaId ?? 'default'
   const entriesRaw = worldBook?.entries
@@ -108,9 +113,16 @@ export function WorldBookSettingsTab(props: { api: ReturnType<typeof getApi>; se
     void setEntries([copy, ...entries])
   }
 
-  const deleteEntry = () => {
+  const deleteEntry = async () => {
     if (!selected) return
-    const ok = window.confirm(`确定删除设定「${selected.title || selected.id}」？`)
+    const ok = confirmAction
+      ? await confirmAction({
+          title: '删除设定',
+          message: `确定删除设定「${selected.title || selected.id}」？`,
+          confirmLabel: '删除设定',
+          danger: true,
+        })
+      : false
     if (!ok) return
     const next = entries.filter((entry) => entry.id !== selected.id)
     setSelectedId(next[0]?.id ?? '')

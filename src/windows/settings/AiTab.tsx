@@ -23,8 +23,13 @@ export function AISettingsTab(props: {
   orchestrator: AppSettings['orchestrator'] | undefined
   aiProfiles: AppSettings['aiProfiles'] | undefined
   activeAiProfileId: string | undefined
+  view?: 'all' | 'connection' | 'generation' | 'vision' | 'agent'
 }) {
-  const { api, aiSettings, orchestrator, aiProfiles, activeAiProfileId } = props
+  const { api, aiSettings, orchestrator, aiProfiles, activeAiProfileId, view = 'all' } = props
+  const showConnection = view === 'all' || view === 'connection'
+  const showGeneration = view === 'all' || view === 'generation'
+  const showVision = view === 'all' || view === 'vision'
+  const showAgent = view === 'all' || view === 'agent'
 
   const apiMode = aiSettings?.apiMode ?? 'openai-compatible'
   const hasApiKey = aiSettings?.hasApiKey ?? false
@@ -242,7 +247,9 @@ export function AISettingsTab(props: {
 
   return (
     <div className="ndp-settings-section">
-      <h3>API 设置</h3>
+      {showConnection ? (
+        <>
+          <h3>API 连接</h3>
 
       <div className="ndp-setting-item">
         <label>已保存的 API 配置</label>
@@ -346,7 +353,12 @@ export function AISettingsTab(props: {
         <p className="ndp-setting-hint">可手动输入模型 ID，也可以先拉取后选择。</p>
       </div>
 
-      <h3>视觉路由</h3>
+        </>
+      ) : null}
+
+      {showVision ? (
+        <>
+          <h3>视觉路由</h3>
 
       <div className="ndp-setting-item">
         <label>视觉处理方式</label>
@@ -447,6 +459,11 @@ export function AISettingsTab(props: {
         <p className="ndp-setting-hint">限制一次“查看/比较图片”实际发送的数量，避免多图任务产生过高延迟和消耗。</p>
       </div>
 
+        </>
+      ) : null}
+
+      {showGeneration ? (
+        <>
       <div className="ndp-setting-item">
         <label className="ndp-checkbox-label">
           <input
@@ -459,7 +476,7 @@ export function AISettingsTab(props: {
         <p className="ndp-setting-hint">开启后会以 SSE 方式逐步生成文本；若同时开启 TTS 分句同步，会按句子分段出现</p>
       </div>
 
-      <h3>生成设置</h3>
+      <h3>模型与生成</h3>
 
       <div className="ndp-setting-item">
         <label>思考提供商</label>
@@ -585,6 +602,9 @@ export function AISettingsTab(props: {
         <p className="ndp-setting-hint">对话历史的最大 token 数量</p>
       </div>
 
+      <details className="ndp-settings-advanced">
+        <summary>高级：上下文压缩</summary>
+        <div className="ndp-settings-advanced-content">
       <div className="ndp-setting-item">
         <label className="ndp-checkbox-label">
           <input
@@ -709,8 +729,15 @@ export function AISettingsTab(props: {
         ) : null}
         <p className="ndp-setting-hint">这是压缩器的“尽量目标”，并非严格保证；如果历史太长仍可能再做一次普通截断。</p>
       </div>
+        </div>
+      </details>
 
-      <h3>工具(Agent) 设置</h3>
+        </>
+      ) : null}
+
+      {showAgent ? (
+        <>
+      <h3>Agent 设置</h3>
 
       <div className="ndp-setting-item">
         <label>工具执行模式</label>
@@ -904,6 +931,8 @@ export function AISettingsTab(props: {
         />
         <p className="ndp-setting-hint">定义 AI 的角色和行为</p>
       </div>
+        </>
+      ) : null}
     </div>
   )
 }

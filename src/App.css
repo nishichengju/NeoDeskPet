@@ -1450,6 +1450,265 @@
     0 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
+.ndp-settings-layout {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.ndp-settings-sidebar {
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 10px 18px;
+  background: rgba(0, 0, 0, 0.18);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  -webkit-app-region: no-drag;
+}
+
+.ndp-settings-search-wrap {
+  position: relative;
+  margin-bottom: 14px;
+}
+
+.ndp-settings-search {
+  width: 100%;
+  height: 36px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  color: rgba(255, 255, 255, 0.94);
+  font: inherit;
+  outline: none;
+}
+
+.ndp-settings-search:focus {
+  border-color: rgba(102, 126, 234, 0.9);
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.18);
+}
+
+.ndp-settings-search-results {
+  margin-top: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(18, 18, 28, 0.98);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+.ndp-settings-search-result {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+  text-align: left;
+}
+
+.ndp-settings-search-result + .ndp-settings-search-result {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ndp-settings-search-result.active,
+.ndp-settings-search-result:hover {
+  background: rgba(102, 126, 234, 0.2);
+}
+
+.ndp-settings-search-result small {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+}
+
+.ndp-settings-search-empty {
+  padding: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+
+.ndp-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ndp-settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ndp-settings-nav-label {
+  padding: 0 8px 5px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ndp-settings-nav-item {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 13px;
+  text-align: left;
+}
+
+.ndp-settings-nav-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.ndp-settings-nav-item.active {
+  border-left-color: #7c93ff;
+  background: rgba(102, 126, 234, 0.18);
+  color: #fff;
+}
+
+.ndp-settings-page-heading {
+  margin: 0 0 18px;
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.ndp-settings-advanced {
+  margin: 18px 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.ndp-settings-advanced > summary {
+  padding: 11px 12px;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ndp-settings-advanced[open] > summary {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ndp-settings-advanced-content {
+  padding: 14px 12px 1px;
+}
+
+.ndp-settings-save-state {
+  min-width: 48px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.ndp-settings-save-state.saving {
+  color: rgba(250, 204, 21, 0.92);
+}
+
+.ndp-settings-save-state.saved {
+  color: rgba(74, 222, 128, 0.92);
+}
+
+.ndp-settings-save-state.error {
+  max-width: 260px;
+  overflow: hidden;
+  color: rgba(248, 113, 113, 0.95);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ndp-settings-root[data-save-state='saving'] .ndp-setting-item:focus-within::after,
+.ndp-settings-root[data-save-state='saved'] .ndp-setting-item:focus-within::after,
+.ndp-settings-root[data-save-state='error'] .ndp-setting-item:focus-within::after {
+  position: absolute;
+  top: -2px;
+  right: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(10, 10, 16, 0.88);
+  font-size: 11px;
+}
+
+.ndp-settings-root[data-save-state='saving'] .ndp-setting-item:focus-within::after {
+  content: '保存中';
+  color: rgba(250, 204, 21, 0.92);
+}
+
+.ndp-settings-root[data-save-state='saved'] .ndp-setting-item:focus-within::after {
+  content: '已保存';
+  color: rgba(74, 222, 128, 0.92);
+}
+
+.ndp-settings-root[data-save-state='error'] .ndp-setting-item:focus-within::after {
+  content: '保存失败';
+  color: rgba(248, 113, 113, 0.95);
+}
+
+.ndp-setting-search-hit {
+  animation: ndp-setting-search-hit 1.8s ease-out;
+}
+
+@keyframes ndp-setting-search-hit {
+  0%, 35% {
+    outline: 2px solid rgba(124, 147, 255, 0.85);
+    outline-offset: 5px;
+    background: rgba(102, 126, 234, 0.12);
+  }
+  100% {
+    outline-color: transparent;
+    background: transparent;
+  }
+}
+
+.ndp-settings-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 500;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.62);
+  -webkit-app-region: no-drag;
+}
+
+.ndp-settings-dialog {
+  width: min(420px, 100%);
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: #20202e;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.ndp-settings-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 17px;
+}
+
+.ndp-settings-dialog p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.ndp-settings-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
 /* Settings Header */
 .ndp-settings-header {
   display: flex;
@@ -1591,7 +1850,30 @@
 }
 
 .ndp-setting-item {
+  position: relative;
   margin-bottom: 18px;
+}
+
+@media (max-width: 700px) {
+  .ndp-settings-layout {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+
+  .ndp-settings-sidebar {
+    padding-inline: 8px;
+  }
+
+  .ndp-settings-content {
+    padding: 16px;
+  }
+
+  .ndp-settings-header {
+    padding-inline: 12px;
+  }
+
+  .ndp-settings-header .ndp-btn:not(.ndp-btn-close) {
+    padding-inline: 8px;
+  }
 }
 
 .ndp-setting-item > label {

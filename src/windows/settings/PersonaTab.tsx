@@ -2,9 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AppSettings, Persona, PersonaSummary } from '../../../electron/types'
 import { getApi } from '../../neoDeskPetApi'
 import { SecretSettingInput } from './SecretSettingInput'
+import type { SettingsConfirmAction } from './settingsConfirm'
 
-export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
-  const { api, settings } = props
+export function PersonaSettingsTab(props: {
+  api: ReturnType<typeof getApi>
+  settings: AppSettings | null
+  confirmAction?: SettingsConfirmAction
+  requestedSubTab?: 'persona' | 'memory' | 'recall' | 'textVector' | 'mmVector' | 'manage'
+}) {
+  const { api, settings, confirmAction, requestedSubTab } = props
   const activePersonaId = settings?.activePersonaId ?? 'default'
   const memoryEnabled = settings?.memory?.enabled ?? true
   const includeSharedOnRetrieve = settings?.memory?.includeSharedOnRetrieve ?? true
@@ -58,6 +64,10 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
   const [memQuery, setMemQuery] = useState('')
   const [memItems, setMemItems] = useState<Array<{ rowid: number; createdAt: number; role: string | null; kind: string; scope: string; content: string }>>([])
   const [memTotal, setMemTotal] = useState(0)
+
+  useEffect(() => {
+    if (requestedSubTab) setSubTab(requestedSubTab)
+  }, [requestedSubTab])
   const [memOffset, setMemOffset] = useState(0)
   const [memNewText, setMemNewText] = useState('')
   const [memNewScope, setMemNewScope] = useState<'persona' | 'shared'>('persona')
@@ -190,12 +200,19 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
     if (!api) return
     if (!currentPersona) return
     if (currentPersona.id === 'default') return
-    const ok = window.confirm(`确定删除角色「${currentPersona.name}」？\n该操作会删除人设配置；聊天会话仍会保留在本地。`)
+    const ok = confirmAction
+      ? await confirmAction({
+          title: '删除角色',
+          message: `确定删除角色「${currentPersona.name}」？\n该操作会删除人设配置；聊天会话仍会保留在本地。`,
+          confirmLabel: '删除角色',
+          danger: true,
+        })
+      : false
     if (!ok) return
     await api.deletePersona(currentPersona.id)
     await refresh()
     await api.setActivePersonaId('default')
-  }, [api, currentPersona, refresh])
+  }, [api, confirmAction, currentPersona, refresh])
 
   const onAddManualMemory = useCallback(async () => {
     if (!api) return
@@ -210,12 +227,19 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
   const onDeleteMemory = useCallback(
     async (rowid: number) => {
       if (!api) return
-      const ok = window.confirm('确定删除这条记忆？')
+      const ok = confirmAction
+        ? await confirmAction({
+            title: '删除记忆',
+            message: '确定删除这条记忆？删除后无法从当前列表恢复。',
+            confirmLabel: '删除记忆',
+            danger: true,
+          })
+        : false
       if (!ok) return
       await api.deleteMemory({ rowid })
       await refreshMemoryList()
     },
-    [api, refreshMemoryList],
+    [api, confirmAction, refreshMemoryList],
   )
 
   if (!api) {
