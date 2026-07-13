@@ -2,6 +2,11 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { BrowserContext, Page } from 'playwright-core'
 import { isPathWithinRoot } from './localMediaPolicy'
+import {
+  configureManagedBrowsersPath,
+  installManagedPlaywrightBrowser,
+  isMissingPlaywrightBrowserError,
+} from './playwrightRuntime'
 
 export type BrowserTargetKind = 'playwright'
 
@@ -148,10 +153,6 @@ const HARD_SCAN_MAX_CHARS = 20_000
 const DEFAULT_EXEC_MAX_CHARS = 8_000
 const ACTION_SETTLE_TIMEOUT_MS = 3_000
 const CONTEXT_IDLE_TIMEOUT_MS = 5 * 60_000
-const MANAGED_BROWSERS_DIR = 'playwright-browsers'
-
-let managedBrowsersPathConfigured = false
-
 function clampText(value: unknown, maxChars: number): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
   const s = String(text ?? '').trim()
@@ -193,39 +194,6 @@ function resolveLaunchOptions(options: BrowserCommonOptions): { headless: boolea
 function buildContextKey(profile: string, options: BrowserCommonOptions): string {
   const { headless, channel } = resolveLaunchOptions(options)
   return `${profile}\u0000${headless ? 'headless' : 'headed'}\u0000${channel || 'playwright-chromium'}`
-}
-
-async function configureManagedBrowsersPath(): Promise<string> {
-  const configured = String(process.env.PLAYWRIGHT_BROWSERS_PATH ?? '').trim()
-  if (managedBrowsersPathConfigured && configured) return configured
-  if (configured) {
-    managedBrowsersPathConfigured = true
-    return configured
-  }
-
-  const resourcesPath = String((process as NodeJS.Process & { resourcesPath?: string }).resourcesPath ?? '').trim()
-  const candidates = [
-    resourcesPath ? path.join(resourcesPath, MANAGED_BROWSERS_DIR) : '',
-    path.resolve(process.cwd(), MANAGED_BROWSERS_DIR),
-  ].filter(Boolean)
-
-  let selected = candidates[0] || path.resolve(process.cwd(), MANAGED_BROWSERS_DIR)
-  for (const candidate of candidates) {
-    try {
-      const stat = await fs.stat(candidate)
-      if (stat.isDirectory()) {
-        selected = candidate
-        break
-      }
-    } catch {
-      // The install script will create this directory. Keep the deterministic
-      // path so a missing browser produces an actionable launch error.
-    }
-  }
-
-  process.env.PLAYWRIGHT_BROWSERS_PATH = selected
-  managedBrowsersPathConfigured = true
-  return selected
 }
 
 function isHttpUrl(url: string): boolean {
@@ -703,25 +671,33 @@ export class BrowserControlService {
   }
 
   private async createContext(key: string, profile: string, options: BrowserCommonOptions): Promise<ManagedContext> {
-    const browsersPath = await configureManagedBrowsersPath()
+    const browsersPath = await configureManagedBrowsersPath(this.userDataDir)
     const pw = await import('playwright-core')
     const profileDir = path.join(this.userDataDir, 'playwright', profile)
     await fs.mkdir(profileDir, { recursive: true })
     const { headless, channel } = resolveLaunchOptions(options)
-    let context: BrowserContext
+    let context: BrowserContext | null = null
+    const launch = () => pw.chromium.launchPersistentContext(profileDir, {
+      headless,
+      channel,
+      viewport: { width: 1280, height: 720 },
+      ignoreHTTPSErrors: true,
+    })
     try {
-      context = await pw.chromium.launchPersistentContext(profileDir, {
-        headless,
-        channel,
-        viewport: { width: 1280, height: 720 },
-        ignoreHTTPSErrors: true,
-      })
-    } catch (error) {
-      if (!channel) {
-        const reason = error instanceof Error ? error.message : String(error)
-        throw new Error(`Playwright 配套 Chromium 启动失败；请运行 npm run playwright:install。浏览器目录：${browsersPath}。${reason}`)
+      try {
+        context = await launch()
+      } catch (error) {
+        if (!channel && isMissingPlaywrightBrowserError(error)) {
+          await installManagedPlaywrightBrowser(browsersPath)
+          context = await launch()
+        } else {
+          throw error
+        }
       }
-      throw error
+      if (!context) throw new Error('Playwright browser context was not created')
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(`Playwright 配套 Chromium 启动失败。浏览器目录：${browsersPath}。${reason}`)
     }
     const managed: ManagedContext = {
       key,

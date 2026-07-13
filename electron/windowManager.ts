@@ -11,6 +11,7 @@ import {
 } from './windowBounds'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const APP_ICON_PATH = path.resolve(__dirname, '..', 'build', 'icon.png')
 
 type CreateWindowDeps = {
   rendererDevUrl?: string
@@ -266,6 +267,7 @@ export class WindowManager {
 
     const win = new BrowserWindow({
       ...bounds,
+      icon: APP_ICON_PATH,
       frame: false,
       transparent: true,
       backgroundColor: '#00000000',
@@ -357,6 +359,7 @@ export class WindowManager {
       minWidth: minimum.width,
       minHeight: minimum.height,
       title: 'NeoDeskPet - Chat',
+      icon: APP_ICON_PATH,
       show,
       frame: false,
       autoHideMenuBar: true,
@@ -420,6 +423,7 @@ export class WindowManager {
       minWidth: minimum.width,
       minHeight: minimum.height,
       title: 'NeoDeskPet - Settings',
+      icon: APP_ICON_PATH,
       show: true,
       frame: false,
       autoHideMenuBar: true,
@@ -457,6 +461,7 @@ export class WindowManager {
       minWidth: minimum.width,
       minHeight: minimum.height,
       title: 'NeoDeskPet - Memory',
+      icon: APP_ICON_PATH,
       show: true,
       frame: false,
       autoHideMenuBar: true,
@@ -509,6 +514,7 @@ export class WindowManager {
     const win = new BrowserWindow({
       ...bounds,
       title: 'NeoDeskPet - Orb',
+      icon: APP_ICON_PATH,
       show: false,
       frame: false,
       transparent: true,
@@ -574,6 +580,7 @@ export class WindowManager {
     const win = new BrowserWindow({
       width: 280,
       height: 260,
+      icon: APP_ICON_PATH,
       show: false,
       frame: false,
       transparent: true,

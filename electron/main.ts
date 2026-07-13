@@ -119,6 +119,10 @@ import {
   type IpcChannel,
 } from './ipcPermissions'
 
+const APP_ID = 'io.github.nishichengju.neodeskpet'
+app.setName('NeoDeskPet')
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID)
+
 // Keep renderer active when windows are occluded to avoid audio/link throttling.
 // These switches must be applied before app is ready.
 try {

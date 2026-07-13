@@ -17,6 +17,9 @@ release
 /artifacts/
 docs/*
 !docs/vision-routing-design.md
+!docs/code-review-remediation-roadmap-20260713.md
+!docs/release-size-report-20260713.md
+!docs/verification.md
 
 # Env files (never commit secrets)
 .env
@@ -82,7 +85,7 @@ public/models/maid/
 public/models/
 
 # Local verification notes (dev only)
-verification.md
+/verification.md
 
 # Project-local planning notes (dev only)
 记忆系统plan.md

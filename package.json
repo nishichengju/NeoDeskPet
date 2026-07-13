@@ -1,13 +1,24 @@
 {
   "name": "neodeskpet-electron",
+  "productName": "NeoDeskPet",
   "private": true,
   "version": "0.21.0",
+  "description": "AI-powered Live2D desktop companion with chat, memory, tools, and MCP integrations.",
+  "author": "nishichengju",
+  "homepage": "https://github.com/nishichengju/NeoDeskPet",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nishichengju/NeoDeskPet.git"
+  },
   "license": "AGPL-3.0-only",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "set ELECTRON_RUN_AS_NODE=&& vite",
     "dev:reset": "powershell -ExecutionPolicy Bypass -File scripts/dev-reset.ps1",
-    "build": "tsc && vite build && electron-builder",
+    "brand:assets": "node scripts/generate-brand-assets.mjs",
+    "build": "npm run brand:assets && tsc && vite build && node scripts/build-release.mjs",
+    "build:unpacked": "npm run brand:assets && tsc && vite build && node scripts/build-release.mjs --win --dir",
+    "build:full": "npm run brand:assets && tsc && vite build && node scripts/build-release.mjs --full",
     "postinstall": "electron-builder install-app-deps && node scripts/install-playwright-browser.mjs",
     "rebuild:native": "electron-builder install-app-deps",
     "playwright:install": "node scripts/install-playwright-browser.mjs",
@@ -16,6 +27,9 @@
     "ui:baseline": "vite build && node scripts/capture-ui-baseline.mjs",
     "media:smoke": "node scripts/verify-local-media.mjs",
     "ipc:smoke": "node scripts/verify-ipc-security.mjs",
+    "installer:smoke": "node scripts/verify-windows-installer.mjs",
+    "installer:smoke:full": "node scripts/verify-windows-installer.mjs --full",
+    "release:report": "node scripts/report-release-size.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
@@ -45,6 +59,7 @@
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
+    "resedit": "^2.0.3",
     "typescript": "^5.2.2",
     "vite": "^5.1.6",
     "vite-plugin-electron": "^0.28.6",

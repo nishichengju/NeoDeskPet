@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P1-3 已完成，下一阶段为 P1-4
+- 状态：P1-4 已完成，下一阶段为 P2-1
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -490,6 +490,17 @@ AI 与能力
 - 安装包体积有可解释的组成报告。
 - 精简策略不会破坏 `better-sqlite3`、Playwright、Live2D 和 MCP。
 - 干净 Windows 环境可完成安装、启动、升级和卸载。
+
+### P1-4 完成记录（2026-07-13）
+
+- 正式品牌统一为 `NeoDeskPet`，`appId` 为 `io.github.nishichengju.neodeskpet`，作者/公司为 `nishichengju`；网页标题、窗口标题、任务栏、安装器、卸载项和版本资源均不再使用 Electron/Vite 模板占位内容。
+- 新增统一品牌 SVG，并在构建时生成 16 至 1024 像素 PNG 与多尺寸 ICO；Windows EXE 通过 `resedit` after-pack 钩子写入图标和版本资源，绕开 `winCodeSign` 归档中无关 macOS 符号链接导致的 Windows 权限失败。
+- 默认精简版不携带浏览器，首次使用无头浏览器能力时将匹配版本的 Chromium Headless Shell 下载到用户数据目录；`npm run build:full` 生成包含浏览器资源的离线完整版。
+- 打包内容改为白名单：只保留运行时代码、七个仓库内 Live2D 示例模型、`better-sqlite3`、`bindings`、`file-uri-to-path` 和 `playwright-core`；本地私有模型、模板资源及已由 Vite 打包的重复前端依赖不会进入发行包。
+- `better-sqlite3` 与 `playwright-core` 显式放入 `app.asar.unpacked`。精简版首次下载、完整版离线 Chromium 启动、SQLite/IPC、MCP/API 代理和本地媒体链路均通过实际打包产物验证。
+- 精简安装器由约 263.6 MiB 降至 95.31 MiB，`app.asar` 由 343.88 MiB 降至 22.97 MiB；完整版安装器为 176.98 MiB。详细组成见 `docs/release-size-report-20260713.md`。
+- 精简版与完整版安装器均完成静默安装、启动、同版本升级和卸载验证；EXE 品牌字段、多尺寸图标及应用标题均通过自动检查。
+- 新增 Windows GitHub Actions 发布构建工作流，固定 Node 22，执行测试、lint、类型检查、精简版/完整版构建并上传安装器产物。
 
 ## 13. P2-1：大型模块拆分与领域边界
 
