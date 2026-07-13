@@ -34,10 +34,17 @@ import {
   type TaskAgentToolExecutionContext,
   type TaskAgentToolRunPatch,
 } from './task/taskAgentToolSession'
+import {
+  TaskAgentVisionSession,
+  canonicalizeImageRef,
+  normalizeImagePathList,
+  normalizeVisualArtifacts,
+  type TaskAgentVisualContext,
+} from './task/taskAgentVisionSession'
 import { TaskRuntimeRegistry, TaskScheduler, type TaskRuntime } from './task/taskRuntime'
 import { MAX_TASK_RECORDS, MAX_TASK_STEP_INPUT_CHARS, TaskStore, type TaskStoreState } from './task/taskStore'
-import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord, VisualArtifactRef } from './types'
-import { classifyVisionError, decideVisionRoute, resolveVisionFallbackProfile } from './visionRouter'
+import type { TaskCreateArgs, TaskListResult, TaskRecord, TaskStepRecord } from './types'
+import { resolveVisionFallbackProfile } from './visionRouter'
 
 const MAX_STEP_OUTPUT_CHARS = 5000
 const LIVE2D_TAG_MAX_LIST = { expressions: 20, motions: 10 }
@@ -392,82 +399,6 @@ function extractImageRefsFromToolText(text: string): string[] {
   return Array.from(out).slice(0, 8)
 }
 
-// 工具输出常见“JSON 转义残留”路径（C:\\Users\\...）：与正常形态（C:\Users\...）指向同一文件，
-// 必须折叠成同一字符串，否则字符串级去重会把同一张图当成两张（重复注入 vision、挤占数量上限）。
-function canonicalizeImageRef(value: unknown): string {
-  const s = String(value ?? '').trim()
-  if (!s) return ''
-  if (/^[a-zA-Z]:[\\/]/.test(s)) return s.replace(/\\{2,}/g, '\\')
-  if (s.startsWith('\\\\')) return `\\${s.replace(/\\{2,}/g, '\\')}` // UNC：保留头部双反斜杠
-  return s
-}
-
-function normalizeImagePathList(values: unknown[], limit = 8): string[] {
-  const max = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 8
-  if (!Array.isArray(values) || max <= 0) return []
-  const out: string[] = []
-  const seen = new Set<string>()
-  for (const value of values) {
-    const s = canonicalizeImageRef(value)
-    if (!s || seen.has(s)) continue
-    seen.add(s)
-    out.push(s)
-    if (out.length >= max) break
-  }
-  return out
-}
-
-const VISION_RESULT_TOOL_NAMES = new Set(['image.generate', 'screen.capture', 'browser.screenshot'])
-
-type TaskVisualContext = {
-  artifacts: Map<string, VisualArtifactRef>
-  initialVisionIds: string[]
-}
-
-function normalizeVisualArtifacts(values: unknown, limit = 24): VisualArtifactRef[] {
-  if (!Array.isArray(values)) return []
-  const out: VisualArtifactRef[] = []
-  const seen = new Set<string>()
-  for (const raw of values) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
-    const value = raw as Record<string, unknown>
-    const id = String(value.id ?? '').trim()
-    const imagePath = canonicalizeImageRef(value.path)
-    if (!id || !imagePath || seen.has(id)) continue
-    const sourceRaw = String(value.source ?? '').trim()
-    const source: VisualArtifactRef['source'] =
-      sourceRaw === 'upload' ||
-      sourceRaw === 'image.generate' ||
-      sourceRaw === 'screen.capture' ||
-      sourceRaw === 'browser.screenshot'
-        ? sourceRaw
-        : 'legacy'
-    const optionalString = (key: string): string | undefined => {
-      const text = String(value[key] ?? '').trim()
-      return text || undefined
-    }
-    const optionalInt = (key: string): number | undefined => {
-      const n = Number(value[key])
-      return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : undefined
-    }
-    seen.add(id)
-    out.push({
-      id,
-      path: imagePath,
-      source,
-      groupId: optionalString('groupId'),
-      messageId: optionalString('messageId'),
-      taskId: optionalString('taskId'),
-      runId: optionalString('runId'),
-      index: optionalInt('index'),
-      total: optionalInt('total'),
-      createdAt: optionalInt('createdAt'),
-    })
-    if (out.length >= limit) break
-  }
-  return out
-}
-
 // agent.run 是“对话代理”的编排壳：真实工具调用由其内部 upsertToolRun 逐条记录。
 // 壳 step 自身不能再记入 toolRuns，否则纯聊天也会在气泡/聊天里渲染一张 agent.run 工具卡。
 function shouldRecordStepToolRun(tool: unknown): tool is string {
@@ -514,7 +445,7 @@ export class TaskService {
   private readonly taskStore: TaskStore
   private readonly runtime = new TaskRuntimeRegistry()
   private readonly scheduler: TaskScheduler
-  private readonly visualContextByTask = new Map<string, TaskVisualContext>()
+  private readonly visualContextByTask = new Map<string, TaskAgentVisualContext>()
   private readonly visionCapabilityCache = new Map<string, 'supported' | 'unsupported'>()
   private readonly userDataDir: string
   private readonly mcpManager: McpManager | null
@@ -1031,43 +962,11 @@ export class TaskService {
     const extraContext = typeof obj?.context === 'string' ? obj.context.trim() : ''
 
     const maxVisionImages = clampInt(settings.ai.visionMaxImagesPerLook, 4, 1, 8)
-    const visualContext = this.visualContextByTask.get(task.id) ?? { artifacts: new Map<string, VisualArtifactRef>(), initialVisionIds: [] }
-    const legacyVisionImagePaths = normalizeImagePathList(
-      Array.isArray(obj?.imagePaths) ? (obj.imagePaths as unknown[]) : [],
-      maxVisionImages,
-    )
-    for (let index = 0; index < legacyVisionImagePaths.length; index += 1) {
-      const id = `legacy_${task.id}_${index + 1}`
-      if (!visualContext.artifacts.has(id)) {
-        visualContext.artifacts.set(id, {
-          id,
-          path: legacyVisionImagePaths[index],
-          source: 'legacy',
-          groupId: `legacy:${task.id}`,
-          index: index + 1,
-          total: legacyVisionImagePaths.length,
-          taskId: task.id,
-          createdAt: task.createdAt,
-        })
-      }
-      if (!visualContext.initialVisionIds.includes(id)) visualContext.initialVisionIds.push(id)
+    const visualContext: TaskAgentVisualContext = this.visualContextByTask.get(task.id) ?? {
+      artifacts: new Map(),
+      initialVisionIds: [],
     }
-    const listVisualArtifacts = (): VisualArtifactRef[] => Array.from(visualContext.artifacts.values()).slice(-24)
-    const resolveVisualArtifacts = (ids: unknown): VisualArtifactRef[] => {
-      if (!Array.isArray(ids)) return []
-      const out: VisualArtifactRef[] = []
-      const seen = new Set<string>()
-      for (const raw of ids) {
-        const id = String(raw ?? '').trim()
-        const artifact = visualContext.artifacts.get(id)
-        if (!artifact || seen.has(id)) continue
-        seen.add(id)
-        out.push(artifact)
-        if (out.length >= maxVisionImages) break
-      }
-      return out
-    }
-    const initialVisionArtifacts = resolveVisualArtifacts(visualContext.initialVisionIds)
+    const legacyVisionImagePaths = Array.isArray(obj?.imagePaths) ? (obj.imagePaths as unknown[]) : []
     const fallbackProfile = resolveVisionFallbackProfile(settings)
     const mainVisionCapabilityKey = [settings.ai.apiMode, settings.ai.baseUrl, settings.ai.model]
       .map((value) => String(value ?? '').trim().toLowerCase())
@@ -1206,25 +1105,24 @@ export class TaskService {
     }
 
     const visionAttachLogs: string[] = []
-    const readInspectAnswer = (raw: string): string => {
-      const text = String(raw ?? '').trim()
-      const first = text.indexOf('{')
-      const last = text.lastIndexOf('}')
-      if (first >= 0 && last > first) {
-        try {
-          const parsed = JSON.parse(text.slice(first, last + 1)) as { answer?: unknown }
-          if (typeof parsed.answer === 'string' && parsed.answer.trim()) return parsed.answer.trim()
-        } catch {
-          // Fall through to the raw text. The fallback model output is still useful evidence.
-        }
-      }
-      return text || '(外挂视觉未返回观察结果)'
+    let visionLogSink: (line: string, force?: boolean) => void = (line) => {
+      visionAttachLogs.push(line)
     }
-    const inspectArtifactsWithFallback = async (artifacts: VisualArtifactRef[], question: string): Promise<string> => {
-      if (!fallbackProfile) throw new Error('未配置可用的外挂视觉 Profile')
-      const observations: string[] = []
-      for (const artifact of artifacts.slice(0, maxVisionImages)) {
-        const raw = await this.executeToolByName(
+    const visionSession = new TaskAgentVisionSession({
+      taskId: task.id,
+      taskCreatedAt: task.createdAt,
+      visualContext,
+      legacyImagePaths: legacyVisionImagePaths,
+      maxImages: maxVisionImages,
+      routingMode: settings.ai.visionRoutingMode,
+      mainCapability: effectiveMainVisionCapability,
+      mainAvailable: Boolean(String(settings.ai.baseUrl ?? '').trim() && String(settings.ai.model ?? '').trim()),
+      fallbackAvailable: Boolean(fallbackProfile),
+      fallbackOnTransient: settings.ai.visionFallbackOnTransient,
+      loadImageParts: imageUrlPartsFromLocalPaths,
+      inspectFallbackArtifact: async (artifact, question) => {
+        if (!fallbackProfile) throw new Error('未配置可用的外挂视觉 Profile')
+        return this.executeToolByName(
           'image.inspect',
           {
             path: artifact.path,
@@ -1240,49 +1138,12 @@ export class TaskService {
           task,
           rt,
         )
-        observations.push(`- ${artifact.id}：${readInspectAnswer(raw)}`)
-      }
-      return observations.join('\n')
-    }
-    const formatVisualCatalog = (): string => {
-      const artifacts = listVisualArtifacts()
-      if (artifacts.length === 0) return ''
-      const lines = artifacts.map((artifact) => {
-        const position = artifact.index && artifact.total ? `，组内 ${artifact.index}/${artifact.total}` : ''
-        return `- ${artifact.id}（来源 ${artifact.source}${position}）`
-      })
-      return [
-        '【近期视觉目录】以下只是可选图片的安全 ID 和来源，图片内容尚未注入，你现在看不到它们。',
-        ...lines,
-        '只有当回答确实需要图片内容时才调用 vision.look；用户只是称赞、闲聊、说“继续”或明确说不要看图时不要调用。',
-        '需要查看第几张或比较多张时，只选择对应 artifactIds，并保持用户指定顺序。禁止猜测 ID、文件路径或图片内容。',
-      ].join('\n')
-    }
-
-    const initialRoute =
-      initialVisionArtifacts.length > 0
-        ? decideVisionRoute({
-            routingMode: settings.ai.visionRoutingMode,
-            capability: effectiveMainVisionCapability,
-            hasFallback: Boolean(fallbackProfile),
-            mainAvailable: Boolean(String(settings.ai.baseUrl ?? '').trim() && String(settings.ai.model ?? '').trim()),
-          })
-        : 'off'
-    let mainVisionArtifacts = initialRoute === 'main' ? initialVisionArtifacts : []
-    let initialFallbackObservation = ''
-    if (initialRoute === 'fallback') {
-      try {
-        initialFallbackObservation = await inspectArtifactsWithFallback(initialVisionArtifacts, effectiveAgentRequest)
-        visionAttachLogs.push(`[Vision] 外挂 ${initialVisionArtifacts.length}`)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        visionAttachLogs.push(`[Vision] 外挂失败：${clampText(msg, 160)}`)
-      }
-    } else if (initialRoute === 'main') {
-      visionAttachLogs.push(`[Vision] 主模型 ${initialVisionArtifacts.length}`)
-    } else if (initialVisionArtifacts.length > 0) {
-      visionAttachLogs.push('[Vision] 不支持或未配置可用视觉路由')
-    }
+      },
+      rememberMainCapability: rememberMainVisionCapability,
+      pushLog: (line, force) => visionLogSink(line, force),
+      isCanceled: () => rt.canceled,
+    })
+    await visionSession.prepareInitial(effectiveAgentRequest)
 
     const messages: Array<Record<string, unknown>> = []
     if (system) messages.push({ role: 'system', content: system })
@@ -1301,37 +1162,9 @@ export class TaskService {
       content:
         '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
     })
-    const visualCatalog = formatVisualCatalog()
-    if (visualCatalog) messages.push({ role: 'system', content: visualCatalog })
-    const visionImageParts =
-      mainVisionArtifacts.length > 0
-        ? await imageUrlPartsFromLocalPaths(
-            mainVisionArtifacts.map((artifact) => artifact.path),
-            maxVisionImages,
-          )
-        : []
-    let visionSystemMsg: Record<string, unknown> | null = null
-    if (visionImageParts.length > 0) {
-      visionSystemMsg = {
-        role: 'system',
-        content:
-          `本轮用户直接上传的图片已通过主模型视觉注入，对应 ID：${mainVisionArtifacts.map((artifact) => artifact.id).join('、')}。` +
-          '可以直接依据这些图片回答，不要再对同一批图片调用 vision.look。其他目录图片仍未注入。',
-      }
-      messages.push(visionSystemMsg)
-    } else if (mainVisionArtifacts.length > 0) {
-      visionAttachLogs.push('[Vision] 图片失效或读取失败')
-      mainVisionArtifacts = []
-    }
-    if (initialFallbackObservation) {
-      messages.push({
-        role: 'system',
-        content:
-          '用户本轮直接上传了图片。主助手当前没有直接读取原图；以下是外挂视觉模型返回的客观观察。' +
-          '请由你继续按桌宠人设理解用户意图并组织最终回复，不要冒充外挂模型，也不要声称自己直接看到了未注入的原图。\n' +
-          initialFallbackObservation,
-      })
-    }
+    const visualCatalogMessage = visionSession.buildCatalogMessage()
+    if (visualCatalogMessage) messages.push(visualCatalogMessage)
+    visionSession.appendInitialSystemMessages(messages)
     if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
     // 注入历史对话（history），让 agent 能够理解对话上下文，避免答非所问
@@ -1353,41 +1186,10 @@ export class TaskService {
         : ''
     const hasSameTailUserRequest = Boolean(requestText) && lastHistoryUserText === requestText
 
-    if (visionImageParts.length > 0) {
-      const parts: Array<Record<string, unknown>> = []
-      if (effectiveAgentRequest.trim()) parts.push({ type: 'text', text: effectiveAgentRequest })
-      parts.push(...visionImageParts)
-      messages.push({ role: 'user', content: parts })
+    if (visionSession.hasInitialImageParts()) {
+      messages.push({ role: 'user', content: visionSession.buildInitialUserContent(effectiveAgentRequest) })
     } else {
       if (!hasSameTailUserRequest) messages.push({ role: 'user', content: effectiveAgentRequest })
-    }
-
-    let visionStripped = false
-    const stripVisionFromUserMessage = (): boolean => {
-      if (visionStripped) return false
-      let changed = false
-      for (const m of messages) {
-        const rec = m as Record<string, unknown>
-        if (rec.role !== 'user' || !Array.isArray(rec.content)) continue
-        const text = rec.content
-          .map((part) => {
-            if (!part || typeof part !== 'object' || Array.isArray(part)) return ''
-            const value = (part as { text?: unknown }).text
-            return typeof value === 'string' ? value : ''
-          })
-          .filter(Boolean)
-          .join('\n')
-          .trim()
-        rec.content = text || '[image omitted: model rejected vision input]'
-        changed = true
-      }
-      if (changed && visionSystemMsg) {
-        // 同步撤销“已附带图片”的系统提示，否则剥离图片重试后模型仍会被诱导编造图片内容
-        visionSystemMsg.content =
-          '注意：本轮原图输入已被移除。除非下方另有外挂视觉观察，否则你现在看不到图片，禁止描述或编造图片内容。'
-      }
-      visionStripped = changed
-      return changed
     }
 
     const logs: string[] = []
@@ -1433,53 +1235,9 @@ export class TaskService {
       if (logs.length > 120) logs.splice(0, logs.length - 120)
       updateProgress(force)
     }
+    visionLogSink = pushLog
     for (const line of deferredSkillLogs) pushLog(line, true)
     for (const line of visionAttachLogs) pushLog(line, true)
-
-    let mainVisionFallbackApplied = false
-    const recoverFromMainVisionError = async (err: unknown, status?: number): Promise<boolean> => {
-      if (visionImageParts.length === 0 || visionStripped) return false
-      const failureKind = classifyVisionError(err, status)
-      const fallbackRoute = decideVisionRoute({
-        routingMode: settings.ai.visionRoutingMode,
-        capability: effectiveMainVisionCapability,
-        hasFallback: Boolean(fallbackProfile),
-        mainFailedKind: failureKind,
-        fallbackOnTransient: settings.ai.visionFallbackOnTransient,
-      })
-
-      if (fallbackRoute === 'fallback' && !mainVisionFallbackApplied) {
-        try {
-          const observation = await inspectArtifactsWithFallback(mainVisionArtifacts, effectiveAgentRequest)
-          if (!stripVisionFromUserMessage()) return false
-          mainVisionFallbackApplied = true
-          if (failureKind === 'unsupported') rememberMainVisionCapability('unsupported')
-          if (visionSystemMsg) {
-            visionSystemMsg.content =
-              `主模型视觉请求失败，已改用外挂视觉（${failureKind === 'transient' ? '主网络失败→外挂' : '主模型不支持→外挂'}）。` +
-              '以下是外挂模型的客观观察；请由你按桌宠人设组织回复，不要声称自己直接读取了原图。\n' +
-              observation
-          }
-          pushLog(
-            failureKind === 'transient'
-              ? `[Vision] 主网络失败→外挂 ${mainVisionArtifacts.length}`
-              : `[Vision] 主模型不支持→外挂 ${mainVisionArtifacts.length}`,
-            true,
-          )
-          return true
-        } catch (fallbackErr) {
-          const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
-          pushLog(`[Vision] 外挂失败：${clampText(fallbackMsg, 160)}`, true)
-        }
-      }
-
-      if (failureKind === 'unsupported' && stripVisionFromUserMessage()) {
-        rememberMainVisionCapability('unsupported')
-        pushLog('[Vision] 主模型明确不支持图片输入，已移除原图后重试', true)
-        return true
-      }
-      return false
-    }
 
     const toolPreview = (v: unknown, max: number) => clampText(typeof v === 'string' ? v : JSON.stringify(v ?? ''), max)
     const toolInputPreview = (toolName: string, v: unknown) => toolPreview(v, toolName === 'image.generate' ? 6000 : 500)
@@ -1597,10 +1355,8 @@ export class TaskService {
       setCancelCurrent: (cancel) => {
         rt.cancelCurrent = cancel
       },
-      recoverFromVisionError: recoverFromMainVisionError,
-      onRequestSucceeded: () => {
-        if (mainVisionArtifacts.length > 0 && !visionStripped) rememberMainVisionCapability('supported')
-      },
+      recoverFromVisionError: (error, status) => visionSession.recoverFromMainVisionError(messages, error, status),
+      onRequestSucceeded: () => visionSession.markMainRequestSucceeded(),
       onRetry: ({ delayMs, errorMessage, nextAttempt, totalAttempts }) => {
         pushLog(
           `[Agent] LLM 请求失败，${delayMs}ms 后重试 (${nextAttempt}/${totalAttempts})：${clampText(errorMessage, 120)}`,
@@ -1613,95 +1369,6 @@ export class TaskService {
 
     const hasAnyFinishedToolRun = (): boolean => Array.isArray(toolRuns) && toolRuns.some((r) => r.status === 'done' || r.status === 'error')
 
-    const registerToolVisualArtifacts = (toolName: string, runId: string, imagePaths: string[]): VisualArtifactRef[] => {
-      if (!VISION_RESULT_TOOL_NAMES.has(toolName)) return []
-      const paths = normalizeImagePathList(imagePaths, 8)
-      const total = paths.length
-      const groupId = `${task.id}:${runId}`
-      return paths.map((imagePath, index) => {
-        const artifact: VisualArtifactRef = {
-          id: `vis_${task.id}_${runId}_${index + 1}`,
-          path: imagePath,
-          source: toolName as VisualArtifactRef['source'],
-          groupId,
-          index: index + 1,
-          total,
-          taskId: task.id,
-          runId,
-          createdAt: now(),
-        }
-        visualContext.artifacts.set(artifact.id, artifact)
-        return artifact
-      })
-    }
-
-    const sanitizeToolOutputForModel = (raw: string, artifacts: VisualArtifactRef[]): string => {
-      if (artifacts.length === 0) return String(raw ?? '')
-      return (
-        `[工具执行成功；视觉产物已登记，但尚未查看图片内容]\n` +
-        artifacts
-          .map((artifact) => `- ${artifact.id}（${artifact.index ?? 1}/${artifact.total ?? artifacts.length}）`)
-          .join('\n') +
-        '\n只有确实需要图片内容时才调用 vision.look；不要根据生成提示词、文件名或路径猜测成图。'
-      )
-    }
-
-    const executeVisionLook = async (input: ToolInput): Promise<TaskAgentToolExecution> => {
-      const value = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null
-      const artifacts = resolveVisualArtifacts(value?.artifactIds)
-      if (artifacts.length === 0) throw new Error('vision.look 未收到当前会话中有效的 artifactIds')
-      const requestedIds = Array.isArray(value?.artifactIds)
-        ? value.artifactIds.map((id) => String(id ?? '').trim()).filter(Boolean)
-        : []
-      if (artifacts.length !== Math.min(requestedIds.length, maxVisionImages)) {
-        throw new Error('vision.look 包含未知、重复或超出上限的 artifactId')
-      }
-      const question = typeof value?.question === 'string' ? value.question.trim() : ''
-      const route = decideVisionRoute({
-        routingMode: settings.ai.visionRoutingMode,
-        capability: effectiveMainVisionCapability,
-        hasFallback: Boolean(fallbackProfile),
-        mainFailedKind: mainVisionFallbackApplied ? 'unsupported' : null,
-        fallbackOnTransient: settings.ai.visionFallbackOnTransient,
-      })
-
-      if (route === 'main') {
-        const visionParts = await imageUrlPartsFromLocalPaths(
-          artifacts.map((artifact) => artifact.path),
-          maxVisionImages,
-        )
-        if (visionParts.length === 0) throw new Error('所选图片不存在、过大或无法读取')
-        mainVisionArtifacts = artifacts
-        pushLog(`[Vision] 主模型 ${visionParts.length}`, true)
-        return {
-          output: JSON.stringify({ ok: true, route: 'main-native', artifactIds: artifacts.map((artifact) => artifact.id) }),
-          modelOutput: `已按顺序附带 ${visionParts.length} 张所选图片；请直接依据图片回答问题：${question || '客观查看图片内容'}`,
-          imagePaths: [],
-          visionParts,
-        }
-      }
-
-      if (route === 'fallback') {
-        const observation = await inspectArtifactsWithFallback(artifacts, question)
-        pushLog(`[Vision] 外挂 ${artifacts.length}`, true)
-        return {
-          output: JSON.stringify({
-            ok: true,
-            route: 'fallback-observation',
-            artifactIds: artifacts.map((artifact) => artifact.id),
-            observation,
-          }),
-          modelOutput:
-            '以下内容来自外挂视觉模型的客观观察。请由你按桌宠人设组织最终回复，不要把外挂模型当成说话者，也不要声称主模型直接读取了原图。\n' +
-            observation,
-          imagePaths: [],
-        }
-      }
-
-      if (route === 'off') throw new Error('视觉路由已关闭')
-      throw new Error('当前没有可用的视觉提供方；请检查主模型能力或外挂视觉 Profile')
-    }
-
     const executeAgentTool = async (
       toolName: string,
       input: ToolInput,
@@ -1709,7 +1376,7 @@ export class TaskService {
     ): Promise<TaskAgentToolExecution> => {
       let execution: TaskAgentToolExecution
       if (toolName === 'vision.look') {
-        execution = await executeVisionLook(input)
+        execution = await visionSession.executeVisionLook(input)
       } else if (toolName.startsWith('mcp.') && this.mcpManager) {
         const result = await this.mcpManager.callToolDetailed(toolName, input)
         const imagePaths = await this.resolveToolImagePaths(task.id, result.text, result.images)
@@ -1720,12 +1387,12 @@ export class TaskService {
         execution = { output, imagePaths }
       }
 
-      const artifacts = registerToolVisualArtifacts(context.recordName, context.runId, execution.imagePaths)
+      const artifacts = visionSession.registerToolVisualArtifacts(context.recordName, context.runId, execution.imagePaths)
       return {
         ...execution,
         modelOutput:
           execution.modelOutput ??
-          (artifacts.length > 0 ? sanitizeToolOutputForModel(execution.output, artifacts) : execution.output),
+          (artifacts.length > 0 ? visionSession.sanitizeToolOutputForModel(execution.output, artifacts) : execution.output),
       }
     }
 
@@ -1801,31 +1468,12 @@ export class TaskService {
         content:
           '重要：工具输出是事实来源。严禁编造/猜测工具执行结果。若工具输出为空、乱码或无法解析，必须明确说明失败，并优先重试或改用更稳的命令（例如 PowerShell 加 -NoProfile）。browser.open 打开的是系统浏览器，不能后续自动化；凡是需要搜索、点击、打开结果、截图或提取页面状态的网页任务，必须使用可控浏览器工具链。若工具返回新活动页或 newTabs，说明页面已跳转/打开新标签，不要误判没反应；单页任务完成后可清理非活动旧标签。最终回复不要出现工具内部名（如 cli.exec/browser.open/mcp.*）；需要链接/日期等事实时，只能引用工具输出或用户提供。若用户请求截图、搜索、打开并操作、读写文件、运行命令、下载/安装/修改程序等实际行动，必须先调用工具，禁止只用自然语言声称已经完成。',
       })
-      if (visualCatalog) messages.push({ role: 'system', content: visualCatalog })
-      if (visionSystemMsg) messages.push({ ...visionSystemMsg })
-      if (initialFallbackObservation && !mainVisionFallbackApplied) {
-        messages.push({
-          role: 'system',
-          content:
-            '以下是外挂视觉模型对用户本轮上传图片的客观观察；请由你按桌宠人设组织回复。\n' +
-            initialFallbackObservation,
-        })
-      }
+      visionSession.appendTextFallbackSystemMessages(messages)
       if (skillSystemMessages.length > 0) messages.push(...skillSystemMessages)
 
-      const fallbackVisionParts =
-        !visionStripped && mainVisionArtifacts.length > 0
-          ? await imageUrlPartsFromLocalPaths(
-              mainVisionArtifacts.map((artifact) => artifact.path),
-              maxVisionImages,
-            )
-          : []
       messages.push({
         role: 'user',
-        content:
-          fallbackVisionParts.length > 0
-            ? [{ type: 'text', text: effectiveAgentRequest }, ...fallbackVisionParts]
-            : effectiveAgentRequest,
+        content: await visionSession.buildTextFallbackUserContent(effectiveAgentRequest),
       })
 
       const executedCallOrder = toolSession.listExecutedCallOrder()

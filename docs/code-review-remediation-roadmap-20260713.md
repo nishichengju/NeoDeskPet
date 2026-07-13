@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第二十六批：Task Agent 多轮循环与 auto fallback 已拆分）
+- 状态：P2-1 进行中（第二十七批：Task Agent 视觉会话与恢复编排已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -773,6 +773,15 @@ AI 与能力
 - 打包 IPC smoke 新增真实 auto fallback 路径：第 1 次 native 请求返回 `delay.sleep`，第 2 次携带 `role=tool` 后收到模拟 400 `thought_signature` 错误，第 3 次文本请求必须包含重放的 `TOOL_RESULT` 才返回最终答复；全程仅生成 1 条成功 toolRun，证明外部副作用未重复执行。
 - `taskService.ts` 从第二十五批后的 2123 行降至 2005 行；Task IPC、任务 store/schema、工具定义、最大回合、视觉路由、消息角色和最终输出契约保持不变。
 - `npm test` 共 47 个测试文件、207 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Agent 视觉上下文、主/外挂路由和视觉恢复消息编排。
+
+### P2-1 进展记录（2026-07-13，第二十七批）
+
+- 新增 `electron/task/taskAgentVisionSession.ts`，集中管理视觉 artifact 目录与旧 `imagePaths` 兼容、ID 顺序/去重/数量限制、主模型能力状态、初始 main/fallback/off 路由、本地图片 parts、外挂观察解析、主视觉失败恢复、`vision.look`、工具视觉产物登记和 text fallback 视觉上下文重建。
+- `TaskService` 继续持有跨任务 `visualContextByTask` 与主模型能力缓存，并通过回调提供本地图片读取、`image.inspect` 实际执行、日志和取消状态；模型循环、工具会话不再直接读写视觉会话内部状态。Task IPC、任务 store/schema、工具定义、模型配置字段和界面契约保持不变。
+- 修复视觉组合路径中的四处缺口：`vision.look` 现在严格拒绝重复、未知和超出上限的 ID；无初始上传图时由 `vision.look` 注入的图片也能在主模型失败后剥离并补入外挂观察；明确不支持后会立即更新当前会话能力，后续查看不再重复尝试主视觉；外挂检查期间取消会原样向上终止，不再被当成普通 fallback 失败吞掉。
+- text fallback 会按当时的 artifact 目录重新生成视觉目录，并重新注入当前主模型图片；新增打包 IPC smoke 在既有 `thought_signature` auto fallback 路径中附带真实本地 PNG，三次 provider 请求均检测到 `image_url`，同时 `delay.sleep` 仍只执行一次且文本请求保留已完成 `TOOL_RESULT`。
+- `taskService.ts` 从第二十六批后的 2005 行降至 1651 行；新增 7 个视觉会话测试，覆盖持久化/旧图片归一化、artifact 顺序与硬上限、main/fallback/off 初始路由、错误剥离与能力更新、取消传播、`vision.look` 三类路由、工具图片组序号和模型安全输出。
+- `npm test` 共 48 个测试文件、214 个用例通过；TypeScript、lint、Windows unpacked 打包、扩展后的 IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 Task step 执行与状态收尾边界，并扩大真实多图片工具和外挂视觉故障回归。
 
 ## 14. P2-2：前端加载与运行性能
 

@@ -19,6 +19,11 @@ const packagedExe = packagedExeName ? path.join(packagedDir, packagedExeName) : 
 const electronExe = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe')
 
 mkdirSync(userDataDir, { recursive: true })
+const visionSmokeImage = path.join(outputDir, 'agent-vision-smoke.png')
+writeFileSync(
+  visionSmokeImage,
+  Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+)
 
 const aiSmokeKey = 'ipc-smoke-main-key'
 const aiRequests = []
@@ -46,6 +51,13 @@ const aiServer = http.createServer(async (request, response) => {
   const messageText = JSON.stringify(body.messages ?? [])
   const hasAgentToolResult = messageText.includes('<<<[TOOL_RESULT]>>>')
   const hasNativeToolResult = Array.isArray(body.messages) && body.messages.some((message) => message?.role === 'tool')
+  const hasVisionInput =
+    Array.isArray(body.messages) &&
+    body.messages.some(
+      (message) =>
+        Array.isArray(message?.content) &&
+        message.content.some((part) => part?.type === 'image_url' && typeof part?.image_url?.url === 'string'),
+    )
   const isClaudeAgent = body.model === 'ipc-agent-claude-smoke'
   const isNativeAgent = body.model === 'ipc-agent-native-smoke'
   const isAutoFallbackAgent = body.model === 'ipc-agent-auto-fallback-smoke'
@@ -58,6 +70,7 @@ const aiServer = http.createServer(async (request, response) => {
     model: body.model,
     hasAgentToolResult,
     hasNativeToolResult,
+    hasVisionInput,
     claudePayloadMatches:
       isClaudeAgent &&
       typeof body.system === 'string' &&
@@ -783,12 +796,29 @@ try {
   assert(taskAgentNative.dismissed?.ok, 'agent native task cleanup failed')
 
   await settings.evaluate(() =>
-    window.neoDeskPet.setAISettings({ model: 'ipc-agent-auto-fallback-smoke', apiMode: 'openai-compatible' }),
+    window.neoDeskPet.setAISettings({
+      model: 'ipc-agent-auto-fallback-smoke',
+      apiMode: 'openai-compatible',
+      visionRoutingMode: 'main-only',
+      visionCapability: 'supported',
+    }),
   )
-  const taskAgentAutoFallback = await chat.evaluate(async () => {
+  const taskAgentAutoFallback = await chat.evaluate(async (imagePath) => {
     const created = await window.neoDeskPet.createTask({
       queue: 'chat',
       title: 'IPC Agent Auto Fallback Task',
+      visualArtifacts: [
+        {
+          id: 'ipc-agent-vision-upload',
+          path: imagePath,
+          source: 'upload',
+          groupId: 'ipc-agent-vision-group',
+          index: 1,
+          total: 1,
+          createdAt: Date.now(),
+        },
+      ],
+      initialVisionIds: ['ipc-agent-vision-upload'],
       steps: [
         {
           title: 'Run native then fallback to text',
@@ -806,7 +836,7 @@ try {
     }
     const dismissed = await window.neoDeskPet.dismissTask(created.id)
     return { taskId: created.id, completed, dismissed }
-  })
+  }, visionSmokeImage)
   const taskAgentAutoFallbackRequests = aiRequests.filter(
     (request) => request.model === 'ipc-agent-auto-fallback-smoke',
   )
@@ -832,12 +862,20 @@ try {
       taskAgentAutoFallbackRequests[1]?.hasNativeToolResult === true &&
       taskAgentAutoFallbackRequests[1]?.simulatedStatus === 400 &&
       taskAgentAutoFallbackRequests[2]?.nativePayloadMatches === false &&
-      taskAgentAutoFallbackRequests[2]?.hasAgentToolResult === true,
-    'agent auto fallback did not replay the completed native tool result into text mode',
+      taskAgentAutoFallbackRequests[2]?.hasAgentToolResult === true &&
+      taskAgentAutoFallbackRequests.every((request) => request.hasVisionInput === true),
+    'agent auto fallback did not replay the completed native tool result and main-model image into text mode',
   )
   assert(taskAgentAutoFallback.dismissed?.ok, 'agent auto fallback task cleanup failed')
 
-  await settings.evaluate(() => window.neoDeskPet.setAISettings({ model: 'ipc-agent-claude-smoke', apiMode: 'claude' }))
+  await settings.evaluate(() =>
+    window.neoDeskPet.setAISettings({
+      model: 'ipc-agent-claude-smoke',
+      apiMode: 'claude',
+      visionRoutingMode: 'off',
+      visionCapability: 'auto',
+    }),
+  )
   const taskAgentClaude = await chat.evaluate(async () => {
     const created = await window.neoDeskPet.createTask({
       queue: 'chat',
@@ -1177,6 +1215,7 @@ try {
       nativeResultRoundTrip: taskAgentAutoFallbackRequests[1]?.hasNativeToolResult === true,
       fallbackStatus: taskAgentAutoFallbackRequests[1]?.simulatedStatus,
       textResultReplay: taskAgentAutoFallbackRequests[2]?.hasAgentToolResult === true,
+      visionReplay: taskAgentAutoFallbackRequests.every((request) => request.hasVisionInput === true),
       cleanup: taskAgentAutoFallback.dismissed?.ok === true,
     },
     taskAgentClaude: {
