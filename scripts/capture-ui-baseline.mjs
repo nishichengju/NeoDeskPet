@@ -136,7 +136,7 @@ function installChatMock(page, options = {}) {
       messageCount: initialMessages.length,
     }
     const session = { ...summary, nameMode: 'manual', messages: initialMessages, autoExtractCursor: 0 }
-    const calls = { settingsTargets: [], clearCount: 0, createCount: 0, cancelTaskIds: [], stopTtsCount: 0 }
+    const calls = { settingsTargets: [], clearCount: 0, createCount: 0, renameCount: 0, cancelTaskIds: [], stopTtsCount: 0 }
     Object.defineProperty(window, '__chatBaseline', { configurable: true, value: calls })
     const off = () => undefined
     let tasksListener = null
@@ -177,6 +177,14 @@ function installChatMock(page, options = {}) {
           return session
         },
         setCurrentChatSession: async () => summary,
+        renameChatSession: async (sessionId, name) => {
+          calls.renameCount += 1
+          if (sessionId === summary.id) {
+            summary.name = name
+            session.name = name
+          }
+          return summary
+        },
         clearChatSession: async () => {
           calls.clearCount += 1
           session.messages = []
@@ -569,6 +577,29 @@ try {
       if (statusMetricCount < 6) failures.push(`chat runtime status drawer has only ${statusMetricCount} metrics`)
       if (statusVisible) await statusDrawer.getByRole('button', { name: '关闭运行状态' }).click()
 
+      const sessionButton = page.locator('.ndp-session-name')
+      await sessionButton.click()
+      const sessionList = page.locator('.ndp-session-list')
+      await sessionList.waitFor({ state: 'visible' })
+      const sessionItemCount = await sessionList.locator('.ndp-session-item').count()
+      await sessionList.getByRole('button', { name: '重命名 界面基线会话' }).click()
+      const sessionRenameInput = sessionList.locator('.ndp-session-rename-input')
+      await sessionRenameInput.waitFor({ state: 'visible' })
+      const sessionOriginalName = await sessionRenameInput.inputValue()
+      await sessionRenameInput.fill('已重命名会话')
+      const sessionScreenshotPath = path.join(outputDir, `${baseline.name}-session-rename.png`)
+      const sessionScreenshot = path.relative(projectRoot, sessionScreenshotPath)
+      await page.screenshot({ path: sessionScreenshotPath })
+      await sessionRenameInput.press('Enter')
+      await page.waitForFunction(() => window.__chatBaseline?.renameCount === 1)
+      await sessionRenameInput.waitFor({ state: 'hidden' })
+      const sessionSavedName = (await sessionButton.textContent())?.trim() ?? ''
+      if (sessionItemCount !== 1) failures.push(`chat session list has ${sessionItemCount} items`)
+      if (sessionOriginalName !== '界面基线会话') failures.push(`chat session rename opened with ${JSON.stringify(sessionOriginalName)}`)
+      if (!sessionSavedName.includes('已重命名会话')) failures.push(`chat session rename saved ${sessionSavedName || 'nothing'}`)
+      await sessionButton.click()
+      await sessionList.waitFor({ state: 'hidden' })
+
       await page.getByRole('button', { name: '配置模型', exact: true }).click()
       await page.getByRole('button', { name: '选择角色', exact: true }).click()
       await page.getByRole('button', { name: '导入配置', exact: true }).click()
@@ -657,6 +688,13 @@ try {
         statusVisible,
         quickSwitchCount,
         statusMetricCount,
+        sessionState: {
+          itemCount: sessionItemCount,
+          originalName: sessionOriginalName,
+          savedName: sessionSavedName,
+          renameCount: 1,
+          screenshot: sessionScreenshot,
+        },
         settingsTargets,
         attachmentChoices,
         multilineValue,

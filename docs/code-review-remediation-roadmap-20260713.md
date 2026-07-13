@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P2-1 进行中（第十二批：Chat 消息主体已拆分）
+- 状态：P2-1 进行中（第十三批：Chat 会话列表已拆分）
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -644,6 +644,16 @@ AI 与能力
 - 新增 4 个消息主体测试，覆盖 Markdown/status/tool block 顺序、助手 fallback/头像/overlay、用户编辑态隐藏原内容与附件、分段增量揭示及零段空输出。
 - 既有紧凑 Chat UI baseline 增加真实用户消息右键编辑流程，验证编辑器初值、编辑态截图与保存后文本更新；连同图片查看器和工具卡场景共 15 个基线场景全部通过。
 - `npm test` 共 124 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分会话列表与 composer。
+
+### P2-1 进展记录（2026-07-13，第十三批）
+
+- 将会话列表 overlay、活动会话样式、消息计数、重命名输入与删除/重命名操作迁移到 `src/windows/chat/ChatSessionList.tsx`；会话数据、当前会话和持久化 API 继续由 `ChatWindow` 持有。
+- 组件继续沿用现有 DOM class、列表位置和受控重命名状态；Enter 现在通过 blur 统一提交，避免原实现 keydown 与 blur 可能重复调用重命名 API，Escape 仍取消编辑。
+- 重命名与删除图标按钮补充包含会话名的 `aria-label`，保留现有 title、符号和点击阻止冒泡语义；新建、切换、删除后的关闭列表行为仍由父级原回调负责。
+- `ChatWindow.tsx` 从第十二批后的 5106 行降至 5057 行；相较 Chat 拆分开始时累计减少 579 行。
+- 新增 3 个会话列表测试，覆盖关闭态空输出、当前会话/消息计数/活动态、操作按钮可访问名称和受控重命名输入。
+- 紧凑 Chat UI baseline 新增打开会话列表、进入重命名、截图、Enter 提交、名称更新与单次 API 调用断言；连同消息编辑、图片查看器和工具卡共 15 个场景全部通过。
+- `npm test` 共 127 个用例通过；TypeScript、lint、Windows unpacked 打包、IPC smoke、本地媒体 smoke 和 15 个 UI baseline 场景均通过。下一批继续拆分 composer。
 
 ## 14. P2-2：前端加载与运行性能
 

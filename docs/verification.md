@@ -269,3 +269,22 @@
 | `git diff --check` | 通过 |
 
 消息编辑态截图：`artifacts/ui-baseline/chat-compact-420x560-scale100-message-edit.png`。本批未修改消息持久化结构、block 契约、TTS 分段算法、样式 class、preload API 或 IPC 权限；`ChatWindow.tsx` 后续继续拆分会话列表与 composer。
+
+## P2-1：大型模块拆分与领域边界（第十三批）
+
+- 验证日期：2026-07-13
+- 拆分范围：Chat 会话列表与重命名交互
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm test` | 34 个测试文件、127 个用例通过 |
+| 会话列表测试 | 关闭态、当前会话、消息计数、活动态、可访问操作按钮和受控重命名输入通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 通过，Chat 会话持久化与五类窗口运行无错误 |
+| `npm run media:smoke` | 图片/视频托管、resourceId、Range 206、路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；会话列表打开、重命名初值、Enter 单次提交和名称更新通过 |
+| `git diff --check` | 通过 |
+
+会话重命名截图：`artifacts/ui-baseline/chat-compact-420x560-scale100-session-rename.png`。本批未修改会话持久化结构、IPC 通道、样式 class、preload API 或删除/切换语义；`ChatWindow.tsx` 后续继续拆分 composer。

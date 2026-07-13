@@ -8,6 +8,7 @@ import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
 import { ChatMessageBody } from './chat/ChatMessageBody'
 import { ChatMessageAttachments } from './chat/ChatMessageAttachments'
 import { ChatToolUseCard } from './chat/ChatToolUseCard'
+import { ChatSessionList } from './chat/ChatSessionList'
 import { parseModelMetadata } from '../live2d/live2dModels'
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, AIService, getAIService, setModelInfoToAIService, type ChatContentPart, type ChatMessage, type ChatUsage } from '../services/aiService'
@@ -4596,77 +4597,27 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         </aside>
       ) : null}
 
-      {showSessionList && (
-        <div className="ndp-session-list" onMouseDown={(e) => e.stopPropagation()}>
-          <div className="ndp-session-list-header">
-            <div className="ndp-session-current">{currentSession?.name ?? '对话'}</div>
-            <button className="ndp-btn" onClick={handleNewSession}>
-              新对话
-            </button>
-          </div>
-          <div className="ndp-session-list-items">
-            {sessions.map((s) => (
-              <div
-                key={s.id}
-                className={`ndp-session-item ${s.id === currentSessionId ? 'active' : ''}`}
-                onClick={() => handleSwitchSession(s.id)}
-              >
-                <div className="ndp-session-info">
-                  {editingSessionId === s.id ? (
-                    <input
-                      className="ndp-session-rename-input"
-                      value={editingSessionName}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onChange={(e) => setEditingSessionName(e.target.value)}
-                      onBlur={() => handleRenameSession(s.id, editingSessionName)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleRenameSession(s.id, editingSessionName)
-                        if (e.key === 'Escape') {
-                          setEditingSessionId(null)
-                          setEditingSessionName('')
-                        }
-                      }}
-                      autoFocus
-                    />
-                  ) : (
-                    <>
-                      <span className="ndp-session-item-name">{s.name}</span>
-                      <span className="ndp-session-item-count">{s.messageCount} 条</span>
-                    </>
-                  )}
-                </div>
-                <div
-                  className="ndp-session-actions"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <button
-                    className="ndp-session-action"
-                    title="重命名"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setEditingSessionId(s.id)
-                      setEditingSessionName(s.name)
-                    }}
-                  >
-                    ✎
-                  </button>
-                  <button
-                    className="ndp-session-action delete"
-                    title="删除"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleDeleteSession(s.id)
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <ChatSessionList
+        open={showSessionList}
+        sessions={sessions}
+        currentSessionId={currentSessionId}
+        currentSessionName={currentSession?.name}
+        editingSessionId={editingSessionId}
+        editingSessionName={editingSessionName}
+        onNewSession={handleNewSession}
+        onSwitchSession={handleSwitchSession}
+        onDeleteSession={handleDeleteSession}
+        onRenameSession={handleRenameSession}
+        onStartRename={(session) => {
+          setEditingSessionId(session.id)
+          setEditingSessionName(session.name)
+        }}
+        onCancelRename={() => {
+          setEditingSessionId(null)
+          setEditingSessionName('')
+        }}
+        onEditingSessionNameChange={setEditingSessionName}
+      />
 
       <main className="ndp-chat-messages">
         {messages.length === 0 ? (
