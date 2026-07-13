@@ -1,4 +1,9 @@
 import type {
+  AICredentialRef,
+  AIHttpRequestPayload,
+  AIHttpResponse,
+  AIHttpStreamStartPayload,
+  AIHttpStreamStartResult,
   AISettings,
   AppSettings,
   BubbleSettings,
@@ -51,6 +56,7 @@ import type {
   LocalMediaReference,
   LocalMediaUrlResult,
   LocalMediaDataUrlResult,
+  SettingsSecretTarget,
 } from '../electron/types'
 import type { TtsOptions } from '../electron/ttsOptions'
 
@@ -84,6 +90,7 @@ export type NeoDeskPetApi = {
   appendDebugLog(event: string, data?: unknown): void
 
   getSettings(): Promise<AppSettings>
+  setSecret(target: SettingsSecretTarget, value: string): Promise<{ ok: true; hasValue: boolean }>
   setAlwaysOnTop(value: boolean): Promise<AppSettings>
   setClickThrough(value: boolean): Promise<AppSettings>
   setActivePersonaId(personaId: string): Promise<AppSettings>
@@ -101,17 +108,19 @@ export type NeoDeskPetApi = {
     id?: string
     name: string
     apiMode?: AISettings['apiMode']
-    apiKey: string
+    apiKey?: string
     baseUrl: string
     model: string
   }): Promise<AppSettings>
   deleteAIProfile(id: string): Promise<AppSettings>
   applyAIProfile(id: string): Promise<AppSettings>
-  listAIModels(payload?: {
-    apiMode?: AISettings['apiMode']
-    apiKey?: string
-    baseUrl?: string
-  }): Promise<{ ok: boolean; models: string[]; error?: string }>
+  listAIModels(payload?: { credential?: AICredentialRef }): Promise<{ ok: boolean; models: string[]; error?: string }>
+  aiHttpRequest(payload: AIHttpRequestPayload): Promise<AIHttpResponse>
+  aiHttpStreamStart(payload: AIHttpStreamStartPayload): Promise<AIHttpStreamStartResult>
+  aiHttpStreamCancel(streamId: string): Promise<{ ok: true }>
+  onAiHttpStreamChunk(listener: (payload: { streamId: string; chunk: Uint8Array }) => void): () => void
+  onAiHttpStreamDone(listener: (payload: { streamId: string }) => void): () => void
+  onAiHttpStreamError(listener: (payload: { streamId: string; error: string }) => void): () => void
   // Bubble settings
   setBubbleSettings(bubbleSettings: Partial<BubbleSettings>): Promise<AppSettings>
   // Task panel settings (M2)

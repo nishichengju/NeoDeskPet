@@ -1,5 +1,6 @@
-import type { AISettings } from '../../electron/types'
+import type { AICredentialRef, AISettings } from '../../electron/types'
 import { buildOpenAICompatReasoningOptions } from '../../electron/reasoningConfig'
+import { getApi } from '../neoDeskPetApi'
 
 export type ChatContentPart =
   | { type: 'text'; text: string }
@@ -219,11 +220,112 @@ async function readApiHttpError(response: Response): Promise<{ status: number; s
 async function postChatCompletion(args: {
   endpoint: string
   apiKey: string
+  credential: AICredentialRef
   body: Record<string, unknown>
   headers?: Record<string, string>
   signal?: AbortSignal
   timeoutMs?: number
 }): Promise<Response> {
+  const bridge = getApi()
+  if (
+    bridge?.aiHttpStreamStart &&
+    bridge.aiHttpStreamCancel &&
+    bridge.onAiHttpStreamChunk &&
+    bridge.onAiHttpStreamDone &&
+    bridge.onAiHttpStreamError
+  ) {
+    const streamId =
+      globalThis.crypto?.randomUUID?.().replace(/-/g, '') ??
+      `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+    let controller: ReadableStreamDefaultController<Uint8Array> | null = null
+    let settled = false
+    const stream = new ReadableStream<Uint8Array>({
+      start(nextController) {
+        controller = nextController
+      },
+      cancel() {
+        settled = true
+        void bridge.aiHttpStreamCancel(streamId).catch(() => undefined)
+      },
+    })
+
+    const cleanup = () => {
+      offChunk()
+      offDone()
+      offError()
+      args.signal?.removeEventListener('abort', onAbort)
+    }
+    const finishWithError = (error: Error) => {
+      if (settled) return
+      settled = true
+      try {
+        controller?.error(error)
+      } catch {
+        // The stream may already be closed by the consumer.
+      }
+      cleanup()
+    }
+    const offChunk = bridge.onAiHttpStreamChunk((payload) => {
+      if (payload.streamId !== streamId || settled) return
+      try {
+        controller?.enqueue(payload.chunk)
+      } catch (error) {
+        finishWithError(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+    const offDone = bridge.onAiHttpStreamDone((payload) => {
+      if (payload.streamId !== streamId || settled) return
+      settled = true
+      try {
+        controller?.close()
+      } catch {
+        // The stream may already be closed by the consumer.
+      }
+      cleanup()
+    })
+    const offError = bridge.onAiHttpStreamError((payload) => {
+      if (payload.streamId !== streamId) return
+      finishWithError(new Error(payload.error || 'AI stream failed'))
+    })
+    const onAbort = () => {
+      void bridge.aiHttpStreamCancel(streamId).catch(() => undefined)
+      finishWithError(new DOMException('Aborted', 'AbortError'))
+    }
+
+    if (args.signal?.aborted) {
+      onAbort()
+      throw new DOMException('Aborted', 'AbortError')
+    }
+    args.signal?.addEventListener('abort', onAbort, { once: true })
+
+    try {
+      const result = await bridge.aiHttpStreamStart({
+        streamId,
+        credential: args.credential,
+        body: args.body,
+        timeoutMs: args.timeoutMs,
+      })
+      if (!result.ok) {
+        settled = true
+        cleanup()
+        return new Response(result.bodyText, {
+          status: result.status,
+          statusText: result.statusText,
+          headers: result.contentType ? { 'Content-Type': result.contentType } : undefined,
+        })
+      }
+      return new Response(stream, {
+        status: result.status,
+        statusText: result.statusText,
+        headers: result.contentType ? { 'Content-Type': result.contentType } : undefined,
+      })
+    } catch (error) {
+      void bridge.aiHttpStreamCancel(streamId).catch(() => undefined)
+      finishWithError(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
+  }
+
   const ac = new AbortController()
   const timeoutMs = Math.max(1_000, Math.trunc(args.timeoutMs ?? REQUEST_CONNECT_TIMEOUT_MS))
   let timedOut = false
@@ -540,11 +642,13 @@ function buildSystemPrompt(basePrompt: string, expressions: string[], motions: s
  */
 export class AIService {
   private settings: AISettings
+  private credential: AICredentialRef
   private expressions: string[] = []
   private motions: string[] = []
 
-  constructor(settings: AISettings) {
+  constructor(settings: AISettings, credential: AICredentialRef = { kind: 'main' }) {
     this.settings = settings
+    this.credential = credential
   }
 
   updateSettings(settings: AISettings) {
@@ -575,7 +679,7 @@ export class AIService {
       systemPrompt,
     } = this.settings
 
-    if (!apiKey) {
+    if (!(this.settings.hasApiKey ?? Boolean(apiKey))) {
       return { content: '', error: '请先配置 API Key' }
     }
 
@@ -620,6 +724,7 @@ export class AIService {
         const response = await postChatCompletion({
           endpoint,
           apiKey,
+          credential: this.credential,
           body: bodyForAttempt,
           headers,
           signal: options?.signal,
@@ -705,7 +810,7 @@ export class AIService {
       systemPrompt,
     } = this.settings
 
-    if (!apiKey) {
+    if (!(this.settings.hasApiKey ?? Boolean(apiKey))) {
       return { content: '', error: '请先配置 API Key' }
     }
 
@@ -751,6 +856,7 @@ export class AIService {
         const response = await postChatCompletion({
           endpoint,
           apiKey,
+          credential: this.credential,
           body: bodyForAttempt,
           headers,
           signal: options?.signal,

@@ -49,6 +49,7 @@ export type OrchestratorSettings = {
 
   toolUseCustomAi: boolean // Use a dedicated LLM config for tool/agent execution
   toolAiApiKey: string
+  hasToolAiApiKey?: boolean
   toolAiBaseUrl: string
   toolAiModel: string
   toolAiTemperature: number // 0.0 - 2.0
@@ -140,6 +141,7 @@ export type GeminiThinkingEffort = 'disabled' | 'low' | 'medium' | 'high'
 export type AISettings = {
   apiMode: AIApiMode
   apiKey: string
+  hasApiKey?: boolean // Renderer-safe configuration status; never persisted as a secret.
   baseUrl: string
   model: string
   temperature: number // 0.0 - 2.0
@@ -171,10 +173,38 @@ export type AIProfile = {
   name: string
   apiMode: AIApiMode
   apiKey: string
+  hasApiKey?: boolean // Renderer-safe configuration status; never persisted as a secret.
   baseUrl: string
   model: string
   createdAt: number
   updatedAt: number
+}
+
+export type AICredentialRef =
+  | { kind: 'main' }
+  | { kind: 'profile'; profileId: string }
+  | { kind: 'memory-auto-extract' }
+
+export type AIHttpRequestPayload = {
+  credential: AICredentialRef
+  body: Record<string, unknown>
+  timeoutMs?: number
+}
+
+export type AIHttpResponse = {
+  ok: boolean
+  status: number
+  statusText: string
+  contentType: string
+  bodyText: string
+}
+
+export type AIHttpStreamStartPayload = AIHttpRequestPayload & {
+  streamId: string
+}
+
+export type AIHttpStreamStartResult = AIHttpResponse & {
+  streamId: string
 }
 
 export type NovelAIPromptPreset = {
@@ -191,6 +221,7 @@ export type NovelAIPromptPreset = {
 export type NovelAISettings = {
   enabled: boolean
   apiKey: string
+  hasApiKey?: boolean
   endpoint: string
   cloudQueueEnabled: boolean
   cloudQueueUrl: string
@@ -446,6 +477,7 @@ export type MemorySettings = {
   autoExtractCooldownMs?: number // Minimum interval between auto extractions
   autoExtractUseCustomAi?: boolean // Use dedicated LLM config for auto extraction
   autoExtractAiApiKey?: string
+  hasAutoExtractAiApiKey?: boolean
   autoExtractAiBaseUrl?: string
   autoExtractAiModel?: string
   autoExtractAiTemperature?: number
@@ -463,6 +495,7 @@ export type MemorySettings = {
   vectorScanLimit?: number // Max scanned records per retrieval
   vectorUseCustomAi?: boolean // Use dedicated API config for vector retrieval
   vectorAiApiKey?: string
+  hasVectorAiApiKey?: boolean
   vectorAiBaseUrl?: string
 
   // M5.5: Multimodal vector retrieval (image/video)
@@ -470,6 +503,7 @@ export type MemorySettings = {
   mmVectorEmbeddingModel?: string // Multimodal embedding model (OpenAI-compatible)
   mmVectorUseCustomAi?: boolean // Use dedicated API config for multimodal retrieval
   mmVectorAiApiKey?: string
+  hasMmVectorAiApiKey?: boolean
   mmVectorAiBaseUrl?: string
 
   // M6: Knowledge graph (KG) retrieval and maintenance
@@ -477,6 +511,7 @@ export type MemorySettings = {
   kgIncludeChatMessages?: boolean // Include chat_message records in KG construction
   kgUseCustomAi?: boolean // Use dedicated LLM config for KG operations
   kgAiApiKey?: string
+  hasKgAiApiKey?: boolean
   kgAiBaseUrl?: string
   kgAiModel?: string
   kgAiTemperature?: number
@@ -805,6 +840,15 @@ export type TaskRecord = {
 export type TaskListResult = {
   items: TaskRecord[]
 }
+
+export type SettingsSecretTarget =
+  | 'ai-main'
+  | 'novelai'
+  | 'tool-ai'
+  | 'memory-auto-extract'
+  | 'memory-vector'
+  | 'memory-mm-vector'
+  | 'memory-kg'
 
 export type VisualArtifactRef = {
   id: string

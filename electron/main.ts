@@ -5,6 +5,7 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
+  safeStorage,
   screen,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
@@ -14,8 +15,8 @@ import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
-import { getSettings, initializeSettingsStore, setSettings } from './store'
-import { SettingsMigrationProtectionError } from './settingsMigrationSafety'
+import { getSettings, initializeSettingsStore, installSettingsSecretAdapter, setSettings } from './store'
+import { createUserDataBackup, SettingsMigrationProtectionError } from './settingsMigrationSafety'
 import {
   LocalMediaError,
   LocalMediaRegistry,
@@ -48,6 +49,9 @@ import {
   updateChatMessageRecord,
 } from './chatStore'
 import type {
+  AIHttpRequestPayload,
+  AIHttpStreamStartPayload,
+  AICredentialRef,
   AISettings,
   AIProfile,
   AIApiMode,
@@ -94,11 +98,19 @@ import type {
   TaskListResult,
   TaskRecord,
   TtsSettings,
+  SettingsSecretTarget,
   WorldBookSettings,
 } from './types'
 import { MemoryService } from './memoryService'
 import { McpManager } from './mcpManager'
 import { appendDebugLog, clearDebugLog, getDebugLogPath, initDebugLog, isDebugLogEnabled } from './debugLog'
+import { AIHttpProxy, resolveAiCredential } from './aiHttpProxy'
+import { createRendererSettings } from './rendererSettings'
+import {
+  hasManagedPlaintextSecrets,
+  SettingsSecretStore,
+  SettingsSecretStoreError,
+} from './settingsSecretStore'
 import {
   assertTrustedIpcSender,
   getIpcWindowPermission,
@@ -232,7 +244,65 @@ const windowManager = new WindowManager({
   rendererDistDir: RENDERER_DIST,
   mainDistDir: MAIN_DIST,
 })
+const aiHttpProxy = new AIHttpProxy(getSettings)
 setWindowManagerInstance(windowManager)
+
+type SettingsSecretInitializationResult = {
+  aborted: boolean
+  backupPath: string | null
+  preservedUnreadablePath: string | null
+}
+
+async function initializeEncryptedSettingsSecrets(): Promise<SettingsSecretInitializationResult> {
+  const userDataDir = app.getPath('userData')
+  const current = getSettings()
+  const needsPlaintextMigration = hasManagedPlaintextSecrets(current)
+  const secretStore = new SettingsSecretStore(userDataDir, {
+    isAvailable: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (value) => safeStorage.encryptString(value),
+    decrypt: (value) => safeStorage.decryptString(value),
+  })
+  let preservedUnreadablePath: string | null = null
+  try {
+    secretStore.initialize()
+  } catch (error) {
+    const recoverable =
+      error instanceof SettingsSecretStoreError &&
+      (error.code === 'invalid-file' || error.code === 'decrypt-failed')
+    if (!recoverable) throw error
+
+    const choice = await dialog.showMessageBox({
+      type: 'error',
+      title: 'NeoDeskPet 密钥无法解密',
+      message: '当前系统账户无法读取已保存的 API 密钥。',
+      detail:
+        `${error.message}\n\n密钥文件：${error.filePath}\n\n` +
+        '选择“重置密钥并启动”会保留故障文件，只清空不可用的密钥；聊天、记忆和其他设置不会被删除。启动后请在设置页重新输入 API Key。',
+      buttons: ['退出程序', '重置密钥并启动'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+    if (choice.response !== 1) {
+      return { aborted: true, backupPath: null, preservedUnreadablePath: null }
+    }
+    preservedUnreadablePath = secretStore.preserveUnreadableFile()
+    secretStore.initialize()
+  }
+
+  let backupPath: string | null = null
+  if (needsPlaintextMigration) {
+    const version = app.getVersion()
+    backupPath = createUserDataBackup(userDataDir, {
+      status: 'current',
+      previousVersion: version,
+      targetVersion: version,
+    }).directory
+  }
+
+  installSettingsSecretAdapter(secretStore)
+  return { aborted: false, backupPath, preservedUnreadablePath }
+}
 
 const LIVE2D_MOUSE_POLL_MS = 33
 let live2dMouseTrackingTimer: NodeJS.Timeout | null = null
@@ -834,7 +904,7 @@ let taskService: TaskService | null = null
 let mcpManager: McpManager | null = null
 
 function broadcastSettingsChanged() {
-  const settings = getSettings()
+  const settings = createRendererSettings(getSettings())
   for (const win of windowManager.getAllWindows()) {
     if (win.isDestroyed()) continue
     win.webContents.send('settings:changed', settings)
@@ -855,6 +925,17 @@ function broadcastMcpChanged(payload?: McpStateSnapshot) {
     if (win.isDestroyed()) continue
     win.webContents.send('mcp:changed', snap)
   }
+}
+
+function isAppSettingsResult(value: unknown): value is ReturnType<typeof getSettings> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const candidate = value as Record<string, unknown>
+  return candidate.ai != null && candidate.memory != null && candidate.orchestrator != null && candidate.chatProfile != null
+}
+
+function protectIpcResult(channel: IpcChannel, value: unknown): unknown {
+  if (!channel.startsWith('settings:') || !isAppSettingsResult(value)) return value
+  return createRendererSettings(value)
 }
 
 type TrustedIpcEvent = IpcMainInvokeEvent | IpcMainEvent
@@ -904,7 +985,11 @@ function handleIpc<Args extends unknown[], Result>(
 ): void {
   ipcMain.handle(channel, (event, ...args) => {
     assertIpcEventTrusted(channel, event)
-    return listener(event, ...(args as Args))
+    const result = listener(event, ...(args as Args))
+    if (result instanceof Promise) {
+      return result.then((value) => protectIpcResult(channel, value))
+    }
+    return protectIpcResult(channel, result)
   })
 }
 
@@ -936,6 +1021,27 @@ function registerIpc() {
   })
 
   handleIpc('settings:get', () => getSettings())
+  handleIpc('settings:setSecret', (_event, target: SettingsSecretTarget, valueRaw: string) => {
+    const value = String(valueRaw ?? '').trim()
+    const current = getSettings()
+    if (target === 'ai-main') setSettings({ ai: { ...current.ai, apiKey: value } })
+    else if (target === 'novelai') setSettings({ novelai: { ...current.novelai, apiKey: value } })
+    else if (target === 'tool-ai') {
+      setSettings({ orchestrator: { ...current.orchestrator, toolAiApiKey: value } })
+    } else if (target === 'memory-auto-extract') {
+      setSettings({ memory: { ...current.memory, autoExtractAiApiKey: value } })
+    } else if (target === 'memory-vector') {
+      setSettings({ memory: { ...current.memory, vectorAiApiKey: value } })
+    } else if (target === 'memory-mm-vector') {
+      setSettings({ memory: { ...current.memory, mmVectorAiApiKey: value } })
+    } else if (target === 'memory-kg') {
+      setSettings({ memory: { ...current.memory, kgAiApiKey: value } })
+    } else {
+      throw new Error('Unknown settings secret target')
+    }
+    broadcastSettingsChanged()
+    return { ok: true as const, hasValue: Boolean(value) }
+  })
   handleIpc('settings:setAlwaysOnTop', (_event, value: boolean) => {
     windowManager.setAlwaysOnTop(value)
     broadcastSettingsChanged()
@@ -954,6 +1060,15 @@ function registerIpc() {
   })
 
   handleIpc('settings:setMemorySettings', (_event, memory: Partial<MemorySettings>) => {
+    const secretKeys: Array<keyof MemorySettings> = [
+      'autoExtractAiApiKey',
+      'vectorAiApiKey',
+      'mmVectorAiApiKey',
+      'kgAiApiKey',
+    ]
+    if (secretKeys.some((key) => Object.prototype.hasOwnProperty.call(memory, key))) {
+      throw new Error('Memory API keys must be updated through settings:setSecret')
+    }
     const current = getSettings()
     setSettings({ memory: { ...current.memory, ...memory } })
     broadcastSettingsChanged()
@@ -1002,6 +1117,9 @@ function registerIpc() {
 
   // AI settings handlers
   handleIpc('settings:setAISettings', (_event, aiSettings: Partial<AISettings>) => {
+    if (Object.prototype.hasOwnProperty.call(aiSettings, 'apiKey')) {
+      throw new Error('AI API Key must be updated through settings:setSecret')
+    }
     const current = getSettings()
     setSettings({ ai: { ...current.ai, ...aiSettings } })
     broadcastSettingsChanged()
@@ -1009,6 +1127,9 @@ function registerIpc() {
   })
 
   handleIpc('settings:setNovelAISettings', (_event, patch: Partial<NovelAISettings>) => {
+    if (Object.prototype.hasOwnProperty.call(patch, 'apiKey')) {
+      throw new Error('NovelAI API Key must be updated through settings:setSecret')
+    }
     const current = getSettings()
     setSettings({ novelai: { ...current.novelai, ...patch } })
     broadcastSettingsChanged()
@@ -1019,25 +1140,25 @@ function registerIpc() {
     'settings:saveAIProfile',
     (
       _event,
-      payload: { id?: string; name: string; apiMode?: AIApiMode; apiKey: string; baseUrl: string; model: string } | null | undefined,
+      payload: { id?: string; name: string; apiMode?: AIApiMode; apiKey?: string; baseUrl: string; model: string } | null | undefined,
     ) => {
       const current = getSettings()
       const now = Date.now()
       const idRaw = String(payload?.id ?? '').trim()
       const id = idRaw || `api_${randomUUID().slice(0, 8)}`
       const name = String(payload?.name ?? '').trim() || id
+      const list = Array.isArray(current.aiProfiles) ? current.aiProfiles : []
       const nextProfile: AIProfile = {
         id,
         name,
         apiMode: normalizeAiApiMode(payload?.apiMode),
-        apiKey: String(payload?.apiKey ?? '').trim(),
+        apiKey: current.ai.apiKey,
         baseUrl: String(payload?.baseUrl ?? '').trim(),
         model: String(payload?.model ?? '').trim(),
         createdAt: now,
         updatedAt: now,
       }
 
-      const list = Array.isArray(current.aiProfiles) ? current.aiProfiles : []
       const idx = list.findIndex((p) => p.id === id)
       if (idx >= 0) {
         nextProfile.createdAt = list[idx]?.createdAt ?? now
@@ -1106,11 +1227,11 @@ function registerIpc() {
     return getSettings()
   })
 
-  handleIpc('ai:listModels', async (_event, payload: { apiMode?: AIApiMode; apiKey?: string; baseUrl?: string } | null | undefined) => {
-    const current = getSettings().ai
-    const apiMode = normalizeAiApiMode(payload?.apiMode ?? current.apiMode)
-    const baseUrl = normalizeOpenAiBaseUrl(String(payload?.baseUrl ?? '').trim() || current.baseUrl)
-    const apiKey = String(payload?.apiKey ?? '').trim() || String(current.apiKey ?? '').trim()
+  handleIpc('ai:listModels', async (_event, payload: { credential?: AICredentialRef } | null | undefined) => {
+    const credential = resolveAiCredential(getSettings(), payload?.credential ?? { kind: 'main' })
+    const apiMode = credential.apiMode
+    const baseUrl = normalizeOpenAiBaseUrl(credential.baseUrl)
+    const apiKey = credential.apiKey
     if (!baseUrl) return { ok: false, models: [] as string[], error: 'baseUrl 不能为空' }
 
     const ac = new AbortController()
@@ -1156,6 +1277,9 @@ function registerIpc() {
   })
 
   handleIpc('settings:setOrchestratorSettings', (_event, patch: Partial<OrchestratorSettings>) => {
+    if (Object.prototype.hasOwnProperty.call(patch, 'toolAiApiKey')) {
+      throw new Error('Tool API Key must be updated through settings:setSecret')
+    }
     const current = getSettings()
     setSettings({ orchestrator: { ...current.orchestrator, ...patch } })
     broadcastSettingsChanged()
@@ -1256,6 +1380,12 @@ function registerIpc() {
   handleIpc('models:scan', () => {
     return scanLive2dModels()
   })
+
+  handleIpc('ai:httpRequest', (_event, payload: AIHttpRequestPayload) => aiHttpProxy.request(payload))
+  handleIpc('ai:httpStreamStart', (event, payload: AIHttpStreamStartPayload) =>
+    aiHttpProxy.startStream(event.sender, payload),
+  )
+  handleIpc('ai:httpStreamCancel', (event, streamId: string) => aiHttpProxy.cancelStream(event.sender.id, streamId))
 
   // Chat persistence
   handleIpc('chat:list', () => listChatSessions())
@@ -2262,6 +2392,7 @@ app.on('before-quit', (event) => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  aiHttpProxy.close()
   void localMediaServer?.close()
   localMediaServer = null
   localMediaRegistry = null
@@ -2273,7 +2404,30 @@ app.on('will-quit', () => {
   void mcpManager?.sync({ enabled: false, servers: [] })
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  try {
+    const secretInitialization = await initializeEncryptedSettingsSecrets()
+    if (secretInitialization.aborted) {
+      app.exit(1)
+      return
+    }
+    if (secretInitialization.backupPath) {
+      console.info(`[Secrets] plaintext settings backup created at ${secretInitialization.backupPath}`)
+    }
+    if (secretInitialization.preservedUnreadablePath) {
+      console.warn(`[Secrets] unreadable encrypted secret file preserved at ${secretInitialization.preservedUnreadablePath}`)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[Secrets] initialization failed:', error)
+    dialog.showErrorBox(
+      'NeoDeskPet 密钥存储初始化失败',
+      `${message}\n\n程序未清除原始配置。请确认当前系统账户可以使用系统凭据加密后重试。`,
+    )
+    app.exit(1)
+    return
+  }
+
   initDebugLog({
     userDataDir: app.getPath('userData'),
     enabled: !app.isPackaged,

@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { _electron as electron } from 'playwright-core'
@@ -7,6 +8,8 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '')
 const outputDir = path.join(projectRoot, 'artifacts', `ipc-security-smoke-${stamp}`)
 const userDataDir = path.join(outputDir, 'userData')
+const settingsFile = path.join(userDataDir, 'neodeskpet-settings.json')
+const secretsFile = path.join(userDataDir, 'neodeskpet-secrets.json')
 const packageVersion = JSON.parse(readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).version
 const packagedDir = path.join(projectRoot, 'release', packageVersion, 'win-unpacked')
 const packagedExeName = existsSync(packagedDir)
@@ -17,6 +20,33 @@ const electronExe = path.join(projectRoot, 'node_modules', 'electron', 'dist', '
 
 mkdirSync(userDataDir, { recursive: true })
 
+const aiSmokeKey = 'ipc-smoke-main-key'
+const aiRequests = []
+const aiServer = http.createServer(async (request, response) => {
+  const chunks = []
+  for await (const chunk of request) chunks.push(Buffer.from(chunk))
+  const bodyText = Buffer.concat(chunks).toString('utf8')
+  const body = bodyText ? JSON.parse(bodyText) : {}
+  aiRequests.push({
+    path: request.url,
+    authMatches: request.headers.authorization === `Bearer ${aiSmokeKey}`,
+    streaming: body.stream === true,
+  })
+
+  if (body.stream === true) {
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    response.write('data: {"choices":[{"delta":{"content":"代理"}}]}\n\n')
+    response.end('data: [DONE]\n\n')
+    return
+  }
+
+  response.writeHead(200, { 'Content-Type': 'application/json' })
+  response.end(JSON.stringify({ ok: true, via: 'main-process' }))
+})
+await new Promise((resolve) => aiServer.listen(0, '127.0.0.1', resolve))
+const aiServerAddress = aiServer.address()
+const aiServerOrigin = `http://127.0.0.1:${aiServerAddress.port}`
+
 function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
@@ -25,6 +55,19 @@ async function waitForApi(page, route) {
   await page.waitForFunction(
     (expectedRoute) => window.location.hash === `#/${expectedRoute}` && Boolean(window.neoDeskPet?.getSettings),
     route,
+    { timeout: 30_000 },
+  )
+}
+
+async function waitForMainWindowApi(page) {
+  return page.waitForFunction(
+    () => {
+      const route = window.location.hash.replace(/^#\//, '')
+      return (route === 'pet' || route === 'orb') && Boolean(window.neoDeskPet?.getSettings)
+        ? route
+        : false
+    },
+    undefined,
     { timeout: 30_000 },
   )
 }
@@ -52,9 +95,13 @@ const args = packagedExe && existsSync(packagedExe)
   ? [`--user-data-dir=${userDataDir}`]
   : [projectRoot, `--user-data-dir=${userDataDir}`]
 
+async function launchApp() {
+  return electron.launch({ executablePath, args, timeout: 30_000 })
+}
+
 let app
 try {
-  app = await electron.launch({ executablePath, args, timeout: 30_000 })
+  app = await launchApp()
   const pet = await app.firstWindow({ timeout: 30_000 })
   await waitForApi(pet, 'pet')
 
@@ -68,6 +115,80 @@ try {
     orb = await windowPromise
   }
   await waitForApi(orb, 'orb')
+
+  await settings.evaluate(
+    async ({ origin, key }) => {
+      await window.neoDeskPet.setSecret('ai-main', key)
+      await window.neoDeskPet.setAISettings({ baseUrl: `${origin}/v1`, model: 'ipc-smoke' })
+    },
+    { origin: aiServerOrigin, key: aiSmokeKey },
+  )
+  const rendererSecretExposure = await Promise.all(
+    [pet, chat, settings, memory, orb].map((page) =>
+      page.evaluate(async () => {
+        const current = await window.neoDeskPet.getSettings()
+        return { apiKey: current.ai.apiKey, hasApiKey: current.ai.hasApiKey }
+      }),
+    ),
+  )
+  assert(
+    rendererSecretExposure.every((item) => item.apiKey === '' && item.hasApiKey === true),
+    'renderer settings exposed the AI API key',
+  )
+  const aiProxyRequest = await chat.evaluate(async () => {
+    const response = await window.neoDeskPet.aiHttpRequest({
+      credential: { kind: 'main' },
+      body: { model: 'ipc-smoke', messages: [] },
+    })
+    return { ok: response.ok, status: response.status, body: JSON.parse(response.bodyText) }
+  })
+  const aiProxyStream = await chat.evaluate(async () => {
+    const streamId = `ipc_smoke_${Date.now().toString(36)}`
+    const decoder = new TextDecoder()
+    let text = ''
+    return await new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        cleanup()
+        reject(new Error('AI proxy stream timed out'))
+      }, 10_000)
+      const cleanup = () => {
+        window.clearTimeout(timeout)
+        offChunk()
+        offDone()
+        offError()
+      }
+      const offChunk = window.neoDeskPet.onAiHttpStreamChunk((payload) => {
+        if (payload.streamId === streamId) text += decoder.decode(payload.chunk, { stream: true })
+      })
+      const offDone = window.neoDeskPet.onAiHttpStreamDone((payload) => {
+        if (payload.streamId !== streamId) return
+        cleanup()
+        resolve({ ok: true, text })
+      })
+      const offError = window.neoDeskPet.onAiHttpStreamError((payload) => {
+        if (payload.streamId !== streamId) return
+        cleanup()
+        reject(new Error(payload.error))
+      })
+      void window.neoDeskPet
+        .aiHttpStreamStart({
+          streamId,
+          credential: { kind: 'main' },
+          body: { model: 'ipc-smoke', stream: true, messages: [] },
+        })
+        .then((result) => {
+          if (!result.ok) throw new Error(`AI proxy stream HTTP ${result.status}`)
+        })
+        .catch((error) => {
+          cleanup()
+          reject(error)
+        })
+    })
+  })
+  assert(aiProxyRequest.ok && aiProxyRequest.body?.via === 'main-process', 'AI proxy request failed')
+  assert(aiProxyStream.ok && aiProxyStream.text.includes('代理'), 'AI proxy stream failed')
+  assert(aiRequests.length === 2 && aiRequests.every((request) => request.authMatches), 'AI proxy did not inject the configured key')
+  assert(aiRequests.every((request) => request.path === '/v1/chat/completions'), 'AI proxy used an unexpected endpoint')
 
   const keys = {
     pet: await apiKeys(pet),
@@ -137,19 +258,78 @@ try {
   await chat.waitForTimeout(150)
   assert(chat.url().endsWith('#/chat'), `untrusted navigation was not blocked: ${chat.url()}`)
 
+  const urls = {
+    pet: pet.url(),
+    chat: chat.url(),
+    settings: settings.url(),
+    memory: memory.url(),
+    orb: orb.url(),
+  }
+
+  await app.close()
+  app = undefined
+
+  assert(existsSync(settingsFile), 'settings file was not created')
+  assert(existsSync(secretsFile), 'encrypted secrets file was not created')
+  const settingsText = readFileSync(settingsFile, 'utf8')
+  const secretsText = readFileSync(secretsFile, 'utf8')
+  assert(!settingsText.includes(aiSmokeKey), 'settings file contains the plaintext AI key')
+  assert(!secretsText.includes(aiSmokeKey), 'encrypted secrets file contains the plaintext AI key')
+  const persistedSettings = JSON.parse(settingsText)
+  const persistedSecrets = JSON.parse(secretsText)
+  assert(persistedSettings?.ai?.apiKey === '', 'settings file retained a usable AI key')
+  assert(
+    typeof persistedSecrets?.values?.['ai.main'] === 'string' && persistedSecrets.values['ai.main'].length > 0,
+    'encrypted secrets file is missing the main AI key',
+  )
+
+  app = await launchApp()
+  const restartedPet = await app.firstWindow({ timeout: 30_000 })
+  const restartMainRoute = await (await waitForMainWindowApi(restartedPet)).jsonValue()
+  const restartedChat = await openWindow(app, restartedPet, 'openChat', 'chat')
+  const restartSecretExposure = await restartedChat.evaluate(async () => {
+    const current = await window.neoDeskPet.getSettings()
+    return { apiKey: current.ai.apiKey, hasApiKey: current.ai.hasApiKey }
+  })
+  assert(
+    restartSecretExposure.apiKey === '' && restartSecretExposure.hasApiKey === true,
+    'renderer secret state was not restored safely after restart',
+  )
+  const restartProxyRequest = await restartedChat.evaluate(async () => {
+    const response = await window.neoDeskPet.aiHttpRequest({
+      credential: { kind: 'main' },
+      body: { model: 'ipc-smoke-restart', messages: [] },
+    })
+    return { ok: response.ok, status: response.status, body: JSON.parse(response.bodyText) }
+  })
+  assert(restartProxyRequest.ok && restartProxyRequest.body?.via === 'main-process', 'AI proxy failed after restart')
+  assert(aiRequests.length === 3 && aiRequests.at(-1)?.authMatches, 'AI key was not restored after restart')
+  assert(aiRequests.at(-1)?.path === '/v1/chat/completions', 'AI proxy used an unexpected endpoint after restart')
+
   const report = {
     generatedAt: new Date().toISOString(),
     executablePath,
     outputDir,
-    urls: {
-      pet: pet.url(),
-      chat: chat.url(),
-      settings: settings.url(),
-      memory: memory.url(),
-      orb: orb.url(),
-    },
+    urls,
     keys,
     runtimeErrors,
+    aiProxy: {
+      request: aiProxyRequest,
+      streamReceived: aiProxyStream.text.includes('代理'),
+      requests: aiRequests,
+      rendererSecretExposure,
+      persistedFiles: {
+        settingsFile,
+        secretsFile,
+        settingsContainsPlaintextKey: false,
+        secretsContainsPlaintextKey: false,
+      },
+      restart: {
+        mainRoute: restartMainRoute,
+        rendererSecretExposure: restartSecretExposure,
+        request: restartProxyRequest,
+      },
+    },
     routeTamper,
     childWindowDenied,
   }
@@ -157,4 +337,5 @@ try {
   console.log(JSON.stringify(report, null, 2))
 } finally {
   await app?.close().catch(() => undefined)
+  await new Promise((resolve) => aiServer.close(() => resolve()))
 }

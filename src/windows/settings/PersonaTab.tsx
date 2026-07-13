@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AppSettings, Persona, PersonaSummary } from '../../../electron/types'
 import { getApi } from '../../neoDeskPetApi'
+import { SecretSettingInput } from './SecretSettingInput'
 
 export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
   const { api, settings } = props
@@ -15,7 +16,7 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
   const autoExtractCooldownMs = settings?.memory?.autoExtractCooldownMs ?? 120000
   const autoExtractUseCustomAi = settings?.memory?.autoExtractUseCustomAi ?? false
   const autoExtractAiBaseUrl = settings?.memory?.autoExtractAiBaseUrl ?? ''
-  const autoExtractAiApiKey = settings?.memory?.autoExtractAiApiKey ?? ''
+  const hasAutoExtractAiApiKey = settings?.memory?.hasAutoExtractAiApiKey ?? false
   const autoExtractAiModel = settings?.memory?.autoExtractAiModel ?? ''
   const autoExtractAiTemperature = settings?.memory?.autoExtractAiTemperature ?? 0.2
   const autoExtractAiMaxTokens = settings?.memory?.autoExtractAiMaxTokens ?? 1600
@@ -30,19 +31,19 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
   const vectorScanLimit = settings?.memory?.vectorScanLimit ?? 2000
   const vectorUseCustomAi = settings?.memory?.vectorUseCustomAi ?? false
   const vectorAiBaseUrl = settings?.memory?.vectorAiBaseUrl ?? ''
-  const vectorAiApiKey = settings?.memory?.vectorAiApiKey ?? ''
+  const hasVectorAiApiKey = settings?.memory?.hasVectorAiApiKey ?? false
 
   const mmVectorEnabled = settings?.memory?.mmVectorEnabled ?? false
   const mmVectorEmbeddingModel = settings?.memory?.mmVectorEmbeddingModel ?? 'qwen3-vl-embedding-8b'
   const mmVectorUseCustomAi = settings?.memory?.mmVectorUseCustomAi ?? false
   const mmVectorAiBaseUrl = settings?.memory?.mmVectorAiBaseUrl ?? ''
-  const mmVectorAiApiKey = settings?.memory?.mmVectorAiApiKey ?? ''
+  const hasMmVectorAiApiKey = settings?.memory?.hasMmVectorAiApiKey ?? false
 
   const kgEnabled = settings?.memory?.kgEnabled ?? false
   const kgIncludeChatMessages = settings?.memory?.kgIncludeChatMessages ?? false
   const kgUseCustomAi = settings?.memory?.kgUseCustomAi ?? true
   const kgAiBaseUrl = settings?.memory?.kgAiBaseUrl ?? ''
-  const kgAiApiKey = settings?.memory?.kgAiApiKey ?? ''
+  const hasKgAiApiKey = settings?.memory?.hasKgAiApiKey ?? false
   const kgAiModel = settings?.memory?.kgAiModel ?? 'gpt-4o-mini'
   const kgAiTemperature = settings?.memory?.kgAiTemperature ?? 0.2
   const kgAiMaxTokens = settings?.memory?.kgAiMaxTokens ?? 1200
@@ -466,12 +467,12 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
 
           <div className="ndp-setting-item">
             <label>embeddings API Key</label>
-            <input
-              className="ndp-input"
-              type="password"
-              value={vectorAiApiKey}
+            <SecretSettingInput
+              api={api}
+              target="memory-vector"
+              hasValue={hasVectorAiApiKey}
+              ariaLabel="embeddings API Key"
               placeholder="sk-..."
-              onChange={(e) => void onSetAutoExtractSettings({ vectorAiApiKey: e.target.value })}
             />
           </div>
         </>
@@ -531,12 +532,12 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
 
               <div className="ndp-setting-item">
                 <label>多模态 embeddings API Key</label>
-                <input
-                  className="ndp-input"
-                  type="password"
-                  value={mmVectorAiApiKey}
+                <SecretSettingInput
+                  api={api}
+                  target="memory-mm-vector"
+                  hasValue={hasMmVectorAiApiKey}
+                  ariaLabel="多模态 embeddings API Key"
                   placeholder="留空则不发送 Authorization"
-                  onChange={(e) => void onSetAutoExtractSettings({ mmVectorAiApiKey: e.target.value })}
                 />
               </div>
             </>
@@ -598,12 +599,12 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
 
           <div className="ndp-setting-item">
             <label>KG API Key</label>
-            <input
-              className="ndp-input"
-              type="password"
-              value={kgAiApiKey}
+            <SecretSettingInput
+              api={api}
+              target="memory-kg"
+              hasValue={hasKgAiApiKey}
+              ariaLabel="KG API Key"
               placeholder="sk-..."
-              onChange={(e) => void onSetAutoExtractSettings({ kgAiApiKey: e.target.value })}
             />
           </div>
 
@@ -724,12 +725,12 @@ export function PersonaSettingsTab(props: { api: ReturnType<typeof getApi>; sett
           </div>
           <div className="ndp-setting-item">
             <label>API Key</label>
-            <input
-              className="ndp-input"
-              type="password"
+            <SecretSettingInput
+              api={api}
+              target="memory-auto-extract"
+              hasValue={hasAutoExtractAiApiKey}
+              ariaLabel="自动提炼 API Key"
               placeholder="留空则继承聊天主模型"
-              value={autoExtractAiApiKey}
-              onChange={(e) => void onSetAutoExtractSettings({ autoExtractAiApiKey: e.target.value })}
             />
           </div>
           <div className="ndp-setting-item">

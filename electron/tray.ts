@@ -2,6 +2,7 @@ import { Menu, Tray, app, nativeImage } from 'electron'
 import path from 'node:path'
 import type { WindowManager } from './windowManager'
 import { getSettings, setSettings } from './store'
+import { createRendererSettings } from './rendererSettings'
 
 export function createTray(windowManager: WindowManager): Tray {
   // Windows 托盘图标优先使用 PNG（16x16 或 32x32）
@@ -18,7 +19,7 @@ export function createTray(windowManager: WindowManager): Tray {
   const tray = new Tray(icon)
 
   const broadcastSettingsChanged = () => {
-    const settings = getSettings()
+    const settings = createRendererSettings(getSettings())
     for (const win of windowManager.getAllWindows()) {
       if (win.isDestroyed()) continue
       win.webContents.send('settings:changed', settings)

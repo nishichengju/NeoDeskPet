@@ -15,6 +15,7 @@ import {
 } from '../../../electron/reasoningConfig'
 import { getApi } from '../../neoDeskPetApi'
 import { clampIntValue } from '../../utils/settingsHelpers'
+import { SecretSettingInput } from './SecretSettingInput'
 
 export function AISettingsTab(props: {
   api: ReturnType<typeof getApi>
@@ -26,7 +27,7 @@ export function AISettingsTab(props: {
   const { api, aiSettings, orchestrator, aiProfiles, activeAiProfileId } = props
 
   const apiMode = aiSettings?.apiMode ?? 'openai-compatible'
-  const apiKey = aiSettings?.apiKey ?? ''
+  const hasApiKey = aiSettings?.hasApiKey ?? false
   const baseUrl = aiSettings?.baseUrl ?? 'https://api.openai.com/v1'
   const model = aiSettings?.model ?? 'gpt-4o-mini'
   const temperature = aiSettings?.temperature ?? 0.7
@@ -89,7 +90,7 @@ export function AISettingsTab(props: {
     const id = overwrite ? activeProfile?.id : undefined
     const fallbackName = `${baseUrl || '接口'} ${model || ''}`.trim() || '新配置'
     const name = profileName.trim() || fallbackName
-    await api.saveAIProfile({ id, name, apiMode, apiKey, baseUrl, model })
+    await api.saveAIProfile({ id, name, apiMode, baseUrl, model })
   }
 
   const deleteApiProfile = async () => {
@@ -108,7 +109,7 @@ export function AISettingsTab(props: {
     setModelsLoading(true)
     setModelsError('')
     try {
-      const res = await api.listAIModels({ apiMode, apiKey, baseUrl })
+      const res = await api.listAIModels({ credential: { kind: 'main' } })
       if (!res.ok) {
         setModelOptions([])
         setModelsError(res.error || '拉取模型列表失败')
@@ -132,8 +133,6 @@ export function AISettingsTab(props: {
   const fetchCompressionModelList = async () => {
     if (!api) return
     const sourceProfile = compressionProfile
-    const requestApiMode = autoContextCompressionApiSource === 'profile' ? sourceProfile?.apiMode ?? 'openai-compatible' : apiMode
-    const requestApiKey = autoContextCompressionApiSource === 'profile' ? sourceProfile?.apiKey ?? '' : apiKey
     const requestBaseUrl = autoContextCompressionApiSource === 'profile' ? sourceProfile?.baseUrl ?? '' : baseUrl
     const fallbackModel = autoContextCompressionApiSource === 'profile' ? sourceProfile?.model ?? '' : model
 
@@ -146,7 +145,12 @@ export function AISettingsTab(props: {
     setCompressionModelsLoading(true)
     setCompressionModelsError('')
     try {
-      const res = await api.listAIModels({ apiMode: requestApiMode, apiKey: requestApiKey, baseUrl: requestBaseUrl })
+      const res = await api.listAIModels({
+        credential:
+          autoContextCompressionApiSource === 'profile' && sourceProfile
+            ? { kind: 'profile', profileId: sourceProfile.id }
+            : { kind: 'main' },
+      })
       if (!res.ok) {
         setCompressionModelOptions([])
         setCompressionModelsError(res.error || '拉取压缩模型列表失败')
@@ -169,7 +173,7 @@ export function AISettingsTab(props: {
 
   const toolMode = orchestrator?.toolCallingMode ?? 'auto'
   const toolUseCustomAi = orchestrator?.toolUseCustomAi ?? false
-  const toolAiApiKey = orchestrator?.toolAiApiKey ?? ''
+  const hasToolAiApiKey = orchestrator?.hasToolAiApiKey ?? false
   const toolAiBaseUrl = orchestrator?.toolAiBaseUrl ?? ''
   const toolAiModel = orchestrator?.toolAiModel ?? ''
   const toolAiTemperature = orchestrator?.toolAiTemperature ?? 0.2
@@ -287,12 +291,12 @@ export function AISettingsTab(props: {
       {/* API Key */}
       <div className="ndp-setting-item">
         <label>API Key</label>
-        <input
-          type="password"
-          className="ndp-input"
-          value={apiKey}
+        <SecretSettingInput
+          api={api}
+          target="ai-main"
+          hasValue={hasApiKey}
+          ariaLabel="API Key"
           placeholder={apiMode === 'claude' ? 'sk-ant-...' : 'sk-...'}
-          onChange={(e) => api?.setAISettings({ apiKey: e.target.value })}
         />
         <p className="ndp-setting-hint">支持 OpenAI 兼容的 API</p>
       </div>
@@ -809,12 +813,12 @@ export function AISettingsTab(props: {
         <>
           <div className="ndp-setting-item">
             <label>工具 API Key</label>
-            <input
-              type="password"
-              className="ndp-input"
-              value={toolAiApiKey}
+            <SecretSettingInput
+              api={api}
+              target="tool-ai"
+              hasValue={hasToolAiApiKey}
+              ariaLabel="工具 API Key"
               placeholder="(可留空，沿用主 API Key)"
-              onChange={(e) => api?.setOrchestratorSettings({ toolAiApiKey: e.target.value })}
             />
           </div>
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AppSettings, NovelAIPromptPreset } from '../../../electron/types'
 import { getApi } from '../../neoDeskPetApi'
+import { SecretSettingInput } from './SecretSettingInput'
 
 const MODEL_OPTIONS = ['nai-diffusion-4-5-curated', 'nai-diffusion-4-5-full', 'nai-diffusion-4-curated-preview', 'nai-diffusion-3']
 const SAMPLER_OPTIONS = ['k_euler_ancestral', 'k_euler', 'k_dpmpp_2m', 'k_dpmpp_sde', 'ddim_v3']
@@ -88,7 +89,7 @@ function usageText(current: string, extra: string, max: number): string {
 export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings['novelai'] | undefined }) {
   const { api, settings } = props
   const enabled = settings?.enabled ?? false
-  const apiKey = settings?.apiKey ?? ''
+  const hasApiKey = settings?.hasApiKey ?? false
   const endpoint = settings?.endpoint ?? DEFAULT_ENDPOINT
   const cloudQueueEnabled = settings?.cloudQueueEnabled ?? false
   const cloudQueueUrl = settings?.cloudQueueUrl ?? DEFAULT_QUEUE_URL
@@ -212,7 +213,13 @@ export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; sett
 
       <div className="ndp-setting-item">
         <label>API Key</label>
-        <input className="ndp-input" type="password" value={apiKey} placeholder="NovelAI persistent API token" onChange={(e) => patch({ apiKey: e.target.value })} />
+        <SecretSettingInput
+          api={api}
+          target="novelai"
+          hasValue={hasApiKey}
+          ariaLabel="NovelAI API Key"
+          placeholder="NovelAI persistent API token"
+        />
       </div>
 
       <div className="ndp-setting-item">

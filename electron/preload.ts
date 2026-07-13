@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
+  AICredentialRef,
+  AIHttpRequestPayload,
+  AIHttpResponse,
+  AIHttpStreamStartPayload,
+  AIHttpStreamStartResult,
   AISettings,
   AppSettings,
   BubbleSettings,
@@ -52,6 +57,7 @@ import type {
   LocalMediaReference,
   LocalMediaUrlResult,
   LocalMediaDataUrlResult,
+  SettingsSecretTarget,
 } from './types'
 import type { TtsOptions } from './ttsOptions'
 import { parsePreloadWindowType, pickPreloadApi } from './preloadPermissions'
@@ -86,6 +92,8 @@ const neoDeskPetApi = {
   },
 
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
+  setSecret: (target: SettingsSecretTarget, value: string): Promise<{ ok: true; hasValue: boolean }> =>
+    ipcRenderer.invoke('settings:setSecret', target, value),
   setAlwaysOnTop: (value: boolean): Promise<AppSettings> => ipcRenderer.invoke('settings:setAlwaysOnTop', value),
   setClickThrough: (value: boolean): Promise<AppSettings> => ipcRenderer.invoke('settings:setClickThrough', value),
   setActivePersonaId: (personaId: string): Promise<AppSettings> => ipcRenderer.invoke('settings:setActivePersonaId', personaId),
@@ -110,19 +118,34 @@ const neoDeskPetApi = {
     id?: string
     name: string
     apiMode?: AISettings['apiMode']
-    apiKey: string
+    apiKey?: string
     baseUrl: string
     model: string
   }): Promise<AppSettings> =>
     ipcRenderer.invoke('settings:saveAIProfile', payload),
   deleteAIProfile: (id: string): Promise<AppSettings> => ipcRenderer.invoke('settings:deleteAIProfile', id),
   applyAIProfile: (id: string): Promise<AppSettings> => ipcRenderer.invoke('settings:applyAIProfile', id),
-  listAIModels: (payload?: {
-    apiMode?: AISettings['apiMode']
-    apiKey?: string
-    baseUrl?: string
-  }): Promise<{ ok: boolean; models: string[]; error?: string }> =>
+  listAIModels: (payload?: { credential?: AICredentialRef }): Promise<{ ok: boolean; models: string[]; error?: string }> =>
     ipcRenderer.invoke('ai:listModels', payload),
+  aiHttpRequest: (payload: AIHttpRequestPayload): Promise<AIHttpResponse> => ipcRenderer.invoke('ai:httpRequest', payload),
+  aiHttpStreamStart: (payload: AIHttpStreamStartPayload): Promise<AIHttpStreamStartResult> =>
+    ipcRenderer.invoke('ai:httpStreamStart', payload),
+  aiHttpStreamCancel: (streamId: string): Promise<{ ok: true }> => ipcRenderer.invoke('ai:httpStreamCancel', streamId),
+  onAiHttpStreamChunk: (listener: (payload: { streamId: string; chunk: Uint8Array }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { streamId: string; chunk: Uint8Array }) => listener(payload)
+    ipcRenderer.on('ai:httpStreamChunk', handler)
+    return () => ipcRenderer.off('ai:httpStreamChunk', handler)
+  },
+  onAiHttpStreamDone: (listener: (payload: { streamId: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { streamId: string }) => listener(payload)
+    ipcRenderer.on('ai:httpStreamDone', handler)
+    return () => ipcRenderer.off('ai:httpStreamDone', handler)
+  },
+  onAiHttpStreamError: (listener: (payload: { streamId: string; error: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { streamId: string; error: string }) => listener(payload)
+    ipcRenderer.on('ai:httpStreamError', handler)
+    return () => ipcRenderer.off('ai:httpStreamError', handler)
+  },
 
   // Bubble settings
   setBubbleSettings: (bubbleSettings: Partial<BubbleSettings>): Promise<AppSettings> =>

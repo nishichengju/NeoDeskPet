@@ -399,6 +399,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           ? {
               ...base,
               apiKey: mem.autoExtractAiApiKey?.trim() || base.apiKey,
+              hasApiKey: mem.hasAutoExtractAiApiKey || base.hasApiKey,
               baseUrl: mem.autoExtractAiBaseUrl?.trim() || base.baseUrl,
               model: mem.autoExtractAiModel?.trim() || base.model,
               temperature:
@@ -412,7 +413,10 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
             }
           : base
 
-        const ai = new AIService(extractAiSettings)
+        const ai = new AIService(
+          extractAiSettings,
+          useCustomAi ? { kind: 'memory-auto-extract' } : { kind: 'main' },
+        )
 
         const session = await api.getChatSession(sessionId)
         attemptAt = Date.now()
@@ -2103,19 +2107,23 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           ...ai,
           apiMode: compressionProfile?.apiMode ?? ai.apiMode,
           apiKey: compressionProfile?.apiKey?.trim() || ai.apiKey,
+          hasApiKey: compressionProfile?.hasApiKey ?? ai.hasApiKey,
           baseUrl: compressionProfile?.baseUrl?.trim() || ai.baseUrl,
           model: compressionModel || compressionProfile?.model?.trim() || ai.model,
         }
-        const compactor = new AIService({
-          ...compressionAiSettings,
-          maxTokens: compressionMaxTokens,
-          thinkingEffort: 'disabled',
-          openaiReasoningEffort: 'disabled',
-          claudeThinkingEffort: 'disabled',
-          geminiThinkingEffort: 'disabled',
-          enableVision: false,
-          enableChatStreaming: false,
-        })
+        const compactor = new AIService(
+          {
+            ...compressionAiSettings,
+            maxTokens: compressionMaxTokens,
+            thinkingEffort: 'disabled',
+            openaiReasoningEffort: 'disabled',
+            claudeThinkingEffort: 'disabled',
+            geminiThinkingEffort: 'disabled',
+            enableVision: false,
+            enableChatStreaming: false,
+          },
+          compressionProfile ? { kind: 'profile', profileId: compressionProfile.id } : { kind: 'main' },
+        )
         const summaryTargetChars = Math.max(600, Math.min(12000, allowedHistoryTokensAfter * 4))
         const compressionPrompt = compressionInput.length > 20000 ? `${compressionInput.slice(0, 20000)}\n\n（已截断过长历史）` : compressionInput
 
@@ -3563,6 +3571,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         ? {
             ...base,
             apiKey: mem.autoExtractAiApiKey?.trim() || base.apiKey,
+            hasApiKey: mem.hasAutoExtractAiApiKey || base.hasApiKey,
             baseUrl: mem.autoExtractAiBaseUrl?.trim() || base.baseUrl,
             model: mem.autoExtractAiModel?.trim() || base.model,
             temperature:
@@ -3576,7 +3585,10 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           }
         : base
 
-      const ai = new AIService(extractAiSettings)
+      const ai = new AIService(
+        extractAiSettings,
+        useCustomAi ? { kind: 'memory-auto-extract' } : { kind: 'main' },
+      )
 
       const session = await api.getChatSession(currentSessionId)
       attemptAt = Date.now()
@@ -4575,7 +4587,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           <div className="ndp-chat-empty">
             <div className="ndp-muted">还没有消息</div>
             <div className="ndp-muted ndp-chat-hint">
-              {settings?.ai?.apiKey ? (
+              {settings?.ai?.hasApiKey ? (
                 <>模型: {settings.ai.model}</>
               ) : (
                 <>请先在设置中配置 API Key</>

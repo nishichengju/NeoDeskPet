@@ -1257,6 +1257,12 @@ export type SettingsStoreInitializationResult = {
 
 let store: Store<AppSettings> | null = null
 let initializationResult: SettingsStoreInitializationResult | null = null
+let settingsSecretAdapter: SettingsSecretAdapter | null = null
+
+export type SettingsSecretAdapter = {
+  hydrate(settings: AppSettings): AppSettings
+  persist(settings: AppSettings): AppSettings
+}
 
 export function initializeSettingsStore(options: {
   userDataDir: string
@@ -1299,12 +1305,26 @@ function requireStore(): Store<AppSettings> {
   return store
 }
 
+export function installSettingsSecretAdapter(adapter: SettingsSecretAdapter): AppSettings {
+  const currentStore = requireStore()
+  const persisted = normalizeSettings(currentStore.store)
+  const effective = adapter.hydrate(persisted)
+  const sanitized = adapter.persist(effective)
+  currentStore.store = sanitized
+  settingsSecretAdapter = adapter
+  settingsCache = adapter.hydrate(normalizeSettings(currentStore.store))
+  return settingsCache
+}
+
 // getSettings 的高频调用方（点击穿透轮询、鼠标跟踪泵等）共享同一份缓存对象，
 // 调用方必须把返回值当作只读；所有写入都必须走 setSettings 以刷新缓存。
 let settingsCache: AppSettings | null = null
 
 export function getSettings(): AppSettings {
-  if (!settingsCache) settingsCache = normalizeSettings(requireStore().store)
+  if (!settingsCache) {
+    const persisted = normalizeSettings(requireStore().store)
+    settingsCache = settingsSecretAdapter ? settingsSecretAdapter.hydrate(persisted) : persisted
+  }
   return settingsCache
 }
 
@@ -1312,7 +1332,9 @@ export function setSettings(next: Partial<AppSettings>): AppSettings {
   const current = getSettings()
   const merged: AppSettings = normalizeSettings({ ...current, ...next })
   const currentStore = requireStore()
-  currentStore.store = merged
-  settingsCache = normalizeSettings(currentStore.store)
+  const persisted = settingsSecretAdapter ? settingsSecretAdapter.persist(merged) : merged
+  currentStore.store = persisted
+  const normalizedPersisted = normalizeSettings(currentStore.store)
+  settingsCache = settingsSecretAdapter ? settingsSecretAdapter.hydrate(normalizedPersisted) : normalizedPersisted
   return settingsCache
 }

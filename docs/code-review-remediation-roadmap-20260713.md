@@ -1,7 +1,7 @@
 # NeoDeskPet 代码审查修复路线图
 
 - 日期：2026-07-13
-- 状态：P0-3 已完成，下一阶段为 P0-4
+- 状态：P0-4 已完成，下一阶段为 P1-1
 - 适用项目：NeoDeskPet Electron
 - 目标：按风险和依赖顺序修复配置迁移、安全边界、默认窗口体验、发布质量与架构债务
 
@@ -309,7 +309,8 @@ renderer: attachmentId / artifactId
 - 已移除 renderer 启动入口对完整 settings 对象的控制台输出。
 - Debug log 已增加递归敏感字段脱敏，覆盖 `apiKey`、`authorization`、`password`、Cookie、secret、credential 和字符串 token；同时清洗 Bearer/Basic 凭证及 URL 查询参数中的密钥。
 - 数值型 token 用量（例如 `promptTokens`、`completion_tokens`）仍正常保留，便于排障和上下文统计。
-- 非设置窗口 settings 脱敏与独立密钥 IPC 仍需和主进程 AI 请求代理同步落地；当前 Chat 仍直接执行流式模型请求，提前移除 Key 会破坏聊天功能。
+- 五类 renderer 窗口接收的 settings 已统一脱敏，只保留 `hasApiKey` / `has...ApiKey` 状态；设置窗口也不会读取已有明文密钥。
+- 设置页通过仅 settings 窗口可调用的 `settings:setSecret` 写入或清除密钥；通用设置 IPC 会拒绝携带密钥字段。
 
 ### P0-4B：完整改造
 
@@ -326,6 +327,16 @@ renderer: attachmentId / artifactId
 - 配置文件中不存在可直接使用的明文 Key。
 - 系统密钥不可解密时不会静默丢失其他设置。
 - OpenAI 兼容、Claude、视觉、Embedding、NovelAI 和工具 API 均通过回归测试。
+
+### P0-4 完成记录（2026-07-13）
+
+- 新增 `SettingsSecretStore`，使用 Electron `safeStorage` 加密主 AI、AI Profile、NovelAI、工具 AI、自动提炼、向量、多模态向量和 KG 密钥；普通 settings 文件只保留空值，加密值独立写入 `neodeskpet-secrets.json`。
+- 首次迁移明文密钥前会创建完整 userData 备份；加密不可用时不改写原配置。密钥文件损坏或不可解密时提供“退出程序”与“保留故障文件并重置密钥后启动”两种明确恢复路径，其他设置不会被删除。
+- 新增 renderer settings 投影层，`settings:get`、设置写入返回值、主进程广播和托盘广播全部统一脱敏；打包 smoke 验证 Pet、Chat、Settings、Memory、Orb 五类窗口均无法读取明文 Key。
+- Chat、Memory Console 和 Orb 使用受权限控制的主进程 AI HTTP 代理；renderer 只提交请求体和 `main` / `profileId` / `memory-auto-extract` 凭据引用。代理固定使用已配置端点，负责 OpenAI/Claude 鉴权、普通响应、SSE、超时、取消、大小限制和请求归属。
+- 视觉 Profile 复用主进程代理；Embedding、Reranker、NovelAI、工具模型和任务 Agent 原有网络请求均位于主进程，密钥只从主进程内存中的解密 settings 获取。
+- `npm test` 共 60 个测试通过，覆盖 OpenAI、Claude/Profile、SSE、密钥迁移/恢复、renderer 脱敏和 IPC 权限；TypeScript、lint、UI baseline、Windows unpacked 打包及本地媒体 smoke 均通过。
+- `npm run ipc:smoke` 使用隔离 userData 完成两次打包 EXE 启动：普通配置和加密文件均不含测试 Key 明文；重启后 renderer 仍只看到 `hasApiKey`，主进程可解密同一密钥并成功完成鉴权请求。
 
 ## 9. P1-1：默认窗口可用性热修复
 

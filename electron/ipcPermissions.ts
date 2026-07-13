@@ -10,6 +10,7 @@ export const IPC_CHANNEL_PERMISSIONS = {
   'debug:append': ['pet', 'chat'],
 
   'settings:get': ALL_WINDOWS,
+  'settings:setSecret': ['settings'],
   'settings:setAlwaysOnTop': ['settings'],
   'settings:setClickThrough': ['settings'],
   'settings:setActivePersonaId': ['settings'],
@@ -26,6 +27,9 @@ export const IPC_CHANNEL_PERMISSIONS = {
   'settings:deleteAIProfile': ['settings'],
   'settings:applyAIProfile': ['settings'],
   'ai:listModels': ['settings'],
+  'ai:httpRequest': ['chat', 'memory', 'orb'],
+  'ai:httpStreamStart': ['chat', 'memory', 'orb'],
+  'ai:httpStreamCancel': ['chat', 'memory', 'orb'],
   'settings:setBubbleSettings': ['pet', 'settings'],
   'settings:setTaskPanelSettings': ['settings'],
   'settings:setOrchestratorSettings': ['chat', 'settings'],
