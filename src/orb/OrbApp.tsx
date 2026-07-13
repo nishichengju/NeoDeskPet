@@ -13,8 +13,15 @@ import type {
 import { getApi } from '../neoDeskPetApi'
 import { ABORTED_ERROR, getAIService, type ChatMessage } from '../services/aiService'
 import { MarkdownMessage } from '../components/MarkdownMessage'
-import { stripToolProtocolDisplayArtifacts } from '../utils/toolProtocolDisplay'
-import { filterVisibleToolRuns, isAgentShellToolName } from '../utils/chatMessages'
+import {
+  computeAppendDelta,
+  filterVisibleToolRuns,
+  isAgentShellToolName,
+  joinTextBlocks,
+  mergeLeadingPunctuationAcrossToolBoundary,
+  normalizeInterleavedTextSegment,
+} from '../utils/chatMessages'
+import { OrbImagePreview, OrbLocalVideo, ToolUseDuration } from './OrbMessageMedia'
 
 type OrbMode = 'ball' | 'bar' | 'panel'
 type PopoverKind = 'menu' | 'history'
@@ -85,207 +92,6 @@ function newMessageId(): string {
     /* ignore */
   }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function joinTextBlocks(blocks: ChatMessageBlock[]): string {
-  const parts = blocks
-    .filter((b) => b.type === 'text')
-    .map((b) => String((b as { text: string }).text ?? '').trim())
-    .filter(Boolean)
-  return parts.join('\n\n')
-}
-
-function toLocalMediaSrc(mediaPath: string): string {
-  const p = String(mediaPath ?? '').trim()
-  if (!p) return ''
-  if (/^(https?:|data:|blob:)/i.test(p)) return p
-  return ''
-}
-
-function normalizeInterleavedTextSegment(text: string): string {
-  return stripToolProtocolDisplayArtifacts(String(text ?? ''))
-    .replace(/\r\n/g, '\n')
-    .replace(/^\n+/g, '')
-    .replace(/\n+$/g, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n[ \t]+/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-}
-
-function computeAppendDelta(prev: string, next: string): string {
-  const p = String(prev ?? '')
-  const n = String(next ?? '')
-  if (!p) return n
-  if (n.startsWith(p)) return n.slice(p.length)
-  const pTrimEnd = p.replace(/\s+$/, '')
-  if (pTrimEnd && n.startsWith(pTrimEnd)) return n.slice(pTrimEnd.length)
-  return ''
-}
-
-function mergeLeadingPunctuationAcrossToolBoundary(segments: string[], runIds: string[]): string[] {
-  // 体验优化：把极短语气词/标点尽量合并到前一个文本块，避免工具卡把语义切碎。
-  const segs = Array.isArray(segments) ? [...segments] : ['']
-  const ids = Array.isArray(runIds) ? runIds : []
-  if (ids.length === 0 || segs.length < ids.length + 1) return segs
-
-  const stripLeft = (s: string) => String(s ?? '').replace(/^[ \t\r\n]+/g, '')
-  const endsWithPunc = (s: string) => /[，。！？：；…\s*]$/.test(String(s ?? ''))
-
-  // 允许搬运的“短前缀”：2字以内语气词 + 可选标点；或连续标点。
-  const pickLead = (s: string): { lead: string; rest: string } => {
-    const trimmed = stripLeft(s)
-    if (!trimmed) return { lead: '', rest: '' }
-
-    const m1 = trimmed.match(/^([吗呢啊吧呀]{1,2}[，。！？]?)/u)
-    if (m1?.[1]) {
-      const lead = m1[1]
-      return { lead, rest: trimmed.slice(lead.length) }
-    }
-
-    const m2 = trimmed.match(/^([，。！？…]{1,3})/u)
-    if (m2?.[1]) {
-      const lead = m2[1]
-      return { lead, rest: trimmed.slice(lead.length) }
-    }
-
-    return { lead: '', rest: trimmed }
-  }
-
-  for (let i = 0; i < ids.length; i += 1) {
-    const before = String(segs[i] ?? '')
-    const after = String(segs[i + 1] ?? '')
-    if (!before.trim()) continue
-    if (!after.trim()) continue
-    if (endsWithPunc(before)) continue
-
-    const { lead, rest } = pickLead(after)
-    if (!lead) continue
-    if (lead.length > 4) continue
-
-    segs[i] = before + lead
-    segs[i + 1] = rest
-  }
-
-  return segs
-}
-
-function formatDurationMs(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
-  const seconds = totalSeconds % 60
-  const minutes = Math.floor(totalSeconds / 60) % 60
-  const hours = Math.floor(totalSeconds / 3600)
-
-  if (hours > 0) {
-    const head = `${hours}小时`
-    const tail = minutes > 0 || seconds > 0 ? `${minutes}${seconds}秒` : ''
-    return `${head}${tail}`
-  }
-
-  if (minutes > 0) return `${minutes}${seconds}秒`
-  return `${seconds}秒`
-}
-
-function ToolUseDuration(props: { startedAt: number; endedAt: number | null }) {
-  const startedAt = typeof props.startedAt === 'number' ? props.startedAt : 0
-  const endedAt = typeof props.endedAt === 'number' ? props.endedAt : null
-
-  const isRunning = startedAt > 0 && endedAt == null
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (!isRunning) return
-    const id = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [isRunning])
-
-  const durationText = startedAt > 0 ? formatDurationMs(Math.max(0, (endedAt ?? now) - startedAt)) : ''
-  if (!durationText) return null
-
-  return (
-    <span className="ndp-tooluse-duration">
-      执行时间 {durationText} <span className="ndp-tooluse-caret"></span>
-    </span>
-  )
-}
-
-function OrbImagePreview(props: {
-  api: ReturnType<typeof getApi> | null
-  imagePath: string
-  resourceId?: string
-  alt: string
-  dataUrl?: string
-  className?: string
-  onClick?: () => void
-}) {
-  const { api, imagePath, resourceId, alt, dataUrl, className, onClick } = props
-  const [src, setSrc] = useState<string>('')
-
-  useEffect(() => {
-    let alive = true
-    const p = String(imagePath ?? '').trim()
-    if (dataUrl) {
-      setSrc(String(dataUrl))
-      return
-    }
-    if (!api || !p) return
-    if (/^(https?:|data:|blob:)/i.test(p)) {
-      setSrc(p)
-      return
-    }
-    api
-      .readChatAttachmentDataUrl(resourceId ? { resourceId, path: p } : p)
-      .then((res) => {
-        if (!alive) return
-        if (res?.ok && typeof res.dataUrl === 'string') setSrc(res.dataUrl)
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-  }, [api, dataUrl, imagePath, resourceId])
-
-  const fallback = toLocalMediaSrc(String(dataUrl ?? imagePath ?? '').trim())
-  const finalSrc = src || fallback
-  if (!finalSrc) return null
-  return <img className={className} src={finalSrc} alt={alt} onClick={onClick} />
-}
-
-function OrbLocalVideo(props: {
-  api: ReturnType<typeof getApi> | null
-  videoPath: string
-  resourceId?: string
-  className?: string
-  controls?: boolean
-  muted?: boolean
-  playsInline?: boolean
-  preload?: 'none' | 'metadata' | 'auto'
-}) {
-  const { api, videoPath, resourceId, className, controls = true, muted, playsInline, preload } = props
-  const [src, setSrc] = useState<string>('')
-
-  useEffect(() => {
-    let alive = true
-    const p = String(videoPath ?? '').trim()
-    if (!p) return
-    if (/^(https?:|data:|blob:)/i.test(p)) {
-      setSrc(p)
-      return
-    }
-    if (!api) return
-    api
-      .getChatAttachmentUrl(resourceId ? { resourceId, path: p } : p)
-      .then((res) => {
-        if (!alive) return
-        if (res?.ok && typeof res.url === 'string') setSrc(res.url)
-      })
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-  }, [api, resourceId, videoPath])
-
-  if (!src) return null
-  return <video className={className} src={src} controls={controls} muted={muted} playsInline={playsInline} preload={preload} />
 }
 
 export function OrbApp(props: { api: ReturnType<typeof getApi> }) {

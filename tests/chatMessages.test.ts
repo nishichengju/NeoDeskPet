@@ -51,4 +51,15 @@ describe('chat message normalization', () => {
       '下一步',
     ])
   })
+
+  it('keeps comma-bearing particles and punctuation-ending text together', () => {
+    expect(mergeLeadingPunctuationAcrossToolBoundary(['继续', '吧，下一步'], ['run-1'])).toEqual([
+      '继续吧，',
+      '下一步',
+    ])
+    expect(mergeLeadingPunctuationAcrossToolBoundary(['说明：', '吗？下一步'], ['run-1'])).toEqual([
+      '说明：',
+      '吗？下一步',
+    ])
+  })
 })

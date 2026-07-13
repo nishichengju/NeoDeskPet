@@ -910,6 +910,15 @@ AI 与能力
 - 打包 IPC smoke 继续通过 persona 创建/更新/删除、Memory list/update/meta/delete、版本、旧库迁移、FTS/Tag/Vector/KG 索引与召回；`memoryService.ts` 从 605 行降至 220 行，数据库生命周期和各领域对象接线之外不再直接持有业务 SQL。
 - `npm test` 共 70 个测试文件、314 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。Memory 子系统领域收口完成；P2-1 下一批转入 `OrbApp.tsx`，先审计现有 Ball/Bar/Panel、历史、图片查看器与消息操作边界，再按风险选择下一处拆分。
 
+第四十二批进展（2026-07-14）：
+
+- `OrbApp.tsx` 改为复用 `chatMessages.ts` 已有的文本块拼接、交错文本清洗、流式 append delta 和工具边界标点合并函数，删除 Orb 内四份重复实现；共享标点规则补齐中文/英文逗号、句号、问号、感叹号、冒号、省略号和语气词后标点，Chat 与 Orb 现在使用同一套边界行为。
+- 新增 `src/orb/OrbMessageMedia.tsx` 与 `src/orb/orbMessageMediaUtils.ts`，抽离工具执行时长、Orb 图片预览、本地视频预览、直接媒体源判断和附件 API 解析；保留原 DOM class、图片点击、video controls/muted/playsInline/preload 与 resourceId 契约。
+- 修复执行时长缺少单位的问题：旧逻辑会把 61 秒显示成 `11秒`、90 秒显示成 `130秒`，现在按 `小时/分/秒` 正确输出，并对负数、NaN 和无效时间戳归零；媒体路径或 resourceId 变化时会立即清空旧本地 URL，直接 `http/data/blob` 源首帧可用，旧异步请求完成后不会覆盖新预览。
+- 新增 3 个 Orb 时长/媒体测试，并扩充 1 个共享消息边界测试；聚焦运行共 7 个用例通过，覆盖小时/分钟格式、resourceId API 参数、直接媒体源、失败降级、服务端静态渲染和逗号/冒号工具边界。
+- `OrbApp.tsx` 从 2832 行降至 2638 行；Ball/Bar/Panel 状态机、会话历史、消息操作、图片查看器和 CSS 未改动。`npm test` 共 71 个测试文件、318 个用例通过，TypeScript、lint、Windows unpacked 打包、两项脚本语法检查、IPC/媒体 smoke 和 15 个 UI baseline 场景均通过。
+- P2-1 下一批继续按职责拆分 Orb 的 Ball/Bar/Panel 视图与交互接线；通用 Chat/Orb 媒体 URL 缓存合并仍留在 P2-2，避免本批扩大到 Chat 渲染路径。
+
 ## 14. P2-2：前端加载与运行性能
 
 ### 实施步骤

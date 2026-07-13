@@ -191,20 +191,20 @@ export function mergeLeadingPunctuationAcrossToolBoundary(segments: string[], ru
   if (ids.length === 0 || segs.length < ids.length + 1) return segs
 
   const stripLeft = (s: string) => String(s ?? '').replace(/^[ \t\r\n]+/g, '')
-  const endsWithPunc = (s: string) => /[，,。.!！?？…]\s*$/.test(String(s ?? ''))
+  const endsWithPunc = (s: string) => /[，,。.!！?？：:；;…]\s*$/.test(String(s ?? ''))
 
   // 允许搬运的“短前缀”：2字以内语气词 + 可选标点；或连续标点
   const pickLead = (s: string): { lead: string; rest: string } => {
     const trimmed = stripLeft(s)
     if (!trimmed) return { lead: '', rest: '' }
 
-    const m1 = trimmed.match(/^([吗嘛呢吧呀啊]{1,2}[？?！!。.]?)/u)
+    const m1 = trimmed.match(/^([吗嘛呢吧呀啊]{1,2}[，,？?！!。.：:；;]?)/u)
     if (m1?.[1]) {
       const lead = m1[1]
       return { lead, rest: trimmed.slice(lead.length) }
     }
 
-    const m2 = trimmed.match(/^([，,。.!！?？…]{1,3})/u)
+    const m2 = trimmed.match(/^([，,。.!！?？：:；;…]{1,3})/u)
     if (m2?.[1]) {
       const lead = m2[1]
       return { lead, rest: trimmed.slice(lead.length) }

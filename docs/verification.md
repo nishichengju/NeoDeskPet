@@ -863,3 +863,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/memory-default-900x720-scale100.png`、`artifacts/ui-baseline/memory-default-900x720-scale150.png`、`artifacts/ui-baseline/settings-default-860x680-scale100.png`、`artifacts/ui-baseline/chat-default-720x620-scale100.png`。本批未修改 renderer、preload API、Memory IPC 契约、SQLite schema、过滤器字段含义、排序优先级、保留度公式或界面样式。Node SQLite 聚焦测试直接覆盖 persona、目录和 maintenance SQL，并通过非法 rowid 断言确认 rowid=1 不再被误更新/误删除；打包 smoke 使用生产 `better-sqlite3` 验证真实 persona 与 Memory 管理闭环。组合过滤仍使用现有 `%query%` LIKE 语义，未引入通配符转义或全文索引；极大目录的 COUNT+分页延迟、数千条批量元数据/删除以及长期 retention 批次吞吐尚未建立性能基线。`MemoryService` 已收口为数据库和领域对象生命周期/委托层，P2-1 后续转入 Orb 界面模块拆分。
+
+## P2-1：大型模块拆分与领域边界（第四十二批）
+
+- 验证日期：2026-07-14
+- 拆分范围：Orb 共享消息文本工具、工具执行时长、图片/视频预览和附件源解析
+
+| 检查 | 结果 |
+| --- | --- |
+| 聚焦测试 | `tests/chatMessages.test.ts` 与 `tests/orbMessageMedia.test.tsx` 共 7 个用例通过；覆盖工具边界逗号/冒号、小时/分钟/秒格式、resourceId API 参数、直接媒体源、失败降级和静态渲染 |
+| `npm test` | 71 个测试文件、318 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，`better-sqlite3` native 依赖重建、独立 vector worker、品牌图标和版本元数据写入成功；renderer 主 chunk 约 1.41 MB，继续列入 P2-2 |
+| `npm run ipc:smoke` | Orb preload 权限、ball/panel/ball 状态往返、overlay 设置/清理、真实附件 API、聊天/任务/Memory/Agent/MCP/TTS/ASR 与重启路径全部通过，所有窗口 runtimeErrors 为空 |
+| `npm run media:smoke` | 图片 data URL、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 15 个场景通过；0 failure、0 console error、无横向或纵向溢出；人工检查 `orb-panel-560x720-scale100.png` 布局无回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+本批未修改 preload/API 契约、Orb 模式状态机、窗口尺寸、CSS class、会话持久化、任务结构或附件安全边界。共享文本函数由 Chat 与 Orb 共用，聚焦测试补齐中文逗号和冒号结束边界；媒体解析测试验证直接 URL 不触发 IPC、本地 path/resourceId 精确委托以及失败返回空源。组件把解析结果绑定到当前媒体 source key，依赖变化后的首帧不会复用旧源，并通过存活标记忽略过期 Promise；但当前 Node 测试环境未真实挂载 React DOM，因此 1 秒运行中计时刷新和连续快速切换多个本地媒体仍主要依赖实现审查与后续交互回归。Orb 主体仍有 2638 行，Ball/Bar/Panel、历史、图片查看器和消息操作将继续分批拆分；Chat/Orb 通用媒体 URL 缓存合并留到 P2-2。
