@@ -4,7 +4,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const outputDir = path.join(projectRoot, 'artifacts', 'ui-baseline')
+const startupOnly = process.argv.includes('--startup-only')
+const outputDir = path.join(projectRoot, 'artifacts', startupOnly ? 'window-startup' : 'ui-baseline')
 const browsersPath = path.join(projectRoot, 'playwright-browsers')
 const viteCli = path.join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js')
 const baseUrl = 'http://127.0.0.1:4173'
@@ -552,6 +553,204 @@ function installSettingsMock(page) {
   })
 }
 
+function installStartupObserver(page, readySelector) {
+  return page.addInitScript((selector) => {
+    const metrics = { firstContentFrame: null }
+    Object.defineProperty(window, '__ndpStartupMetrics', { configurable: true, value: metrics })
+
+    const observeRoot = () => {
+      const root = document.getElementById('root')
+      if (!root) {
+        requestAnimationFrame(observeRoot)
+        return
+      }
+
+      let framePending = false
+      const markVisibleContent = () => {
+        if (metrics.firstContentFrame != null || framePending) return
+        const content = document.querySelector(selector)
+        if (!content || !root.contains(content)) return
+        const rect = content.getBoundingClientRect()
+        const style = getComputedStyle(content)
+        if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') return
+        framePending = true
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (metrics.firstContentFrame == null) {
+              metrics.firstContentFrame = performance.now()
+              observer.disconnect()
+            }
+          })
+        })
+      }
+
+      const observer = new MutationObserver(markVisibleContent)
+      observer.observe(root, { childList: true, subtree: true, attributes: true })
+      markVisibleContent()
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', observeRoot, { once: true })
+    } else {
+      observeRoot()
+    }
+  }, readySelector)
+}
+
+async function installBaselineMock(page, baseline) {
+  if (baseline.mockChat) await installChatMock(page)
+  if (baseline.mockOrbState) await installOrbMock(page, { state: baseline.mockOrbState })
+  if (baseline.mockMemory) await installMemoryMock(page)
+  if (baseline.mockSettings) await installSettingsMock(page)
+}
+
+function percentile(values, ratio) {
+  const sorted = [...values].sort((a, b) => a - b)
+  if (sorted.length === 0) return null
+  const position = (sorted.length - 1) * ratio
+  const lower = Math.floor(position)
+  const upper = Math.ceil(position)
+  if (lower === upper) return sorted[lower]
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower)
+}
+
+function summarizeMetric(samples, key) {
+  const values = samples.map((sample) => sample[key]).filter(Number.isFinite)
+  if (values.length === 0) return null
+  return {
+    median: Number(percentile(values, 0.5).toFixed(2)),
+    p95: Number(percentile(values, 0.95).toFixed(2)),
+    min: Number(Math.min(...values).toFixed(2)),
+    max: Number(Math.max(...values).toFixed(2)),
+  }
+}
+
+async function runWindowStartupBaseline(browser) {
+  const requestedSampleCount = Number.parseInt(process.env.NDP_STARTUP_SAMPLES ?? '', 10)
+  const sampleCount = Number.isFinite(requestedSampleCount)
+    ? Math.min(20, Math.max(3, requestedSampleCount))
+    : 5
+  const warmupCount = 1
+  const startupBaselines = [
+    { name: 'pet', route: 'pet', width: 300, height: 500, readySelector: '.ndp-pet-root' },
+    { name: 'chat', route: 'chat', width: 720, height: 620, readySelector: '.ndp-chat-root', mockChat: true },
+    {
+      name: 'settings',
+      route: 'settings',
+      width: 860,
+      height: 680,
+      readySelector: '.ndp-settings-root',
+      mockSettings: true,
+    },
+    {
+      name: 'memory',
+      route: 'memory',
+      width: 900,
+      height: 720,
+      readySelector: '.ndp-settings-root',
+      mockMemory: true,
+    },
+    {
+      name: 'orb-panel',
+      route: 'orb',
+      width: 560,
+      height: 720,
+      readySelector: '.ndp-orbapp-mode-panel',
+      mockOrbState: 'panel',
+    },
+  ]
+  const startupReport = {
+    generatedAt: new Date().toISOString(),
+    baseUrl,
+    methodology: {
+      sampleCount,
+      warmupCount,
+      cacheMode: 'fresh Playwright browser context per sample',
+      firstContentFrame: 'second requestAnimationFrame after the route-specific ready selector becomes visible',
+    },
+    items: [],
+  }
+
+  for (const baseline of startupBaselines) {
+    const samples = []
+    const failures = []
+    for (let index = 0; index < sampleCount + warmupCount; index += 1) {
+      const context = await browser.newContext({
+        viewport: { width: baseline.width, height: baseline.height },
+        deviceScaleFactor: 1,
+      })
+      const page = await context.newPage()
+      const consoleErrors = []
+      page.on('console', (message) => {
+        if (message.type() === 'error') consoleErrors.push(message.text())
+      })
+      page.on('pageerror', (error) => consoleErrors.push(error.message))
+      await installStartupObserver(page, baseline.readySelector)
+      await installBaselineMock(page, baseline)
+
+      try {
+        const sampleId = `${baseline.name}-${index}`
+        await page.goto(`${baseUrl}/?startup=${sampleId}#/${baseline.route}`, { waitUntil: 'load' })
+        await page.waitForFunction(
+          () => Number.isFinite(window.__ndpStartupMetrics?.firstContentFrame),
+          undefined,
+          { timeout: 15_000 },
+        )
+        await page.waitForTimeout(100)
+        const metrics = await page.evaluate(() => {
+          const navigation = performance.getEntriesByType('navigation')[0]
+          const paints = Object.fromEntries(
+            performance.getEntriesByType('paint').map((entry) => [entry.name, entry.startTime]),
+          )
+          const resources = performance.getEntriesByType('resource')
+          return {
+            firstContentFrame: window.__ndpStartupMetrics.firstContentFrame,
+            firstPaint: paints['first-paint'] ?? null,
+            firstContentfulPaint: paints['first-contentful-paint'] ?? null,
+            domContentLoaded: navigation?.domContentLoadedEventEnd ?? null,
+            loadEventEnd: navigation?.loadEventEnd ?? null,
+            resourceCount: resources.length,
+            transferSize: resources.reduce((total, entry) => total + (entry.transferSize || 0), 0),
+            decodedBodySize: resources.reduce((total, entry) => total + (entry.decodedBodySize || 0), 0),
+          }
+        })
+        if (index >= warmupCount) samples.push(metrics)
+        if (consoleErrors.length > 0) failures.push(`sample ${index}: ${consoleErrors.join(' | ')}`)
+      } catch (error) {
+        failures.push(`sample ${index}: ${error instanceof Error ? error.message : String(error)}`)
+      } finally {
+        await context.close()
+      }
+    }
+
+    const summary = Object.fromEntries(
+      [
+        'firstContentFrame',
+        'firstPaint',
+        'firstContentfulPaint',
+        'domContentLoaded',
+        'loadEventEnd',
+        'resourceCount',
+        'transferSize',
+        'decodedBodySize',
+      ].map((key) => [key, summarizeMetric(samples, key)]),
+    )
+    if (samples.length !== sampleCount) failures.push(`expected ${sampleCount} samples, received ${samples.length}`)
+    startupReport.items.push({ ...baseline, samples, summary, failures })
+    const firstContent = summary.firstContentFrame
+    console.log(
+      `[Window startup] ${baseline.name}: median=${firstContent?.median ?? 'n/a'}ms p95=${firstContent?.p95 ?? 'n/a'}ms`,
+    )
+  }
+
+  writeFileSync(path.join(outputDir, 'report.json'), `${JSON.stringify(startupReport, null, 2)}\n`, 'utf8')
+  const failures = startupReport.items.flatMap((item) =>
+    item.failures.map((failure) => `${item.name}: ${failure}`),
+  )
+  if (failures.length > 0) throw new Error(`Window startup baseline failed:\n${failures.join('\n')}`)
+  console.log(`[Window startup] wrote ${startupReport.items.length} window summaries to ${outputDir}`)
+}
+
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
@@ -585,12 +784,7 @@ const report = {
   items: [],
 }
 
-let browser
-try {
-  await waitForPreview()
-  const { chromium } = await import('playwright-core')
-  browser = await chromium.launch({ headless: true })
-
+async function runUiBaseline(browser) {
   for (const baseline of baselines) {
     const context = await browser.newContext({
       viewport: { width: baseline.width, height: baseline.height },
@@ -1411,6 +1605,16 @@ try {
   const failures = report.items.flatMap((item) => item.failures.map((failure) => `${item.name}: ${failure}`))
   if (failures.length > 0) throw new Error(`UI baseline failed:\n${failures.join('\n')}`)
   console.log(`[UI baseline] wrote ${report.items.length} screenshots to ${outputDir}`)
+}
+
+let browser
+try {
+  await waitForPreview()
+  const { chromium } = await import('playwright-core')
+  browser = await chromium.launch({ headless: true })
+
+  if (startupOnly) await runWindowStartupBaseline(browser)
+  else await runUiBaseline(browser)
 } finally {
   if (browser) await browser.close()
   if (preview.exitCode == null) preview.kill()

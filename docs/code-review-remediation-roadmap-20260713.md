@@ -1043,6 +1043,15 @@ AI 与能力
 - 新增 4 个共享缓存测试，覆盖相同引用并发去重、同步读取成功缓存、过期保护窗刷新、data URL 去重、直接来源不触发 IPC，以及临时失败后的再次重试；既有 Orb 媒体、Markdown、Chat 附件和工具卡测试继续通过。
 - renderer 主 chunk 保持 146.30 kB；Chat 从 126.44 kB 降至 125.81 kB，Orb 从 50.25 kB 降至 49.63 kB，Markdown 从 160.55 kB 降至 160.34 kB，共享小 chunk 增至 3.35 kB。`npm test` 共 82 个测试文件、352 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 24 个 UI baseline 场景均通过。下一批建立可重复的窗口启动/首帧耗时基线，补齐 P2-2 最后一项性能证据。
 
+第五十六批进展（2026-07-14）：
+
+- 新增 `npm run perf:startup`，复用现有 UI baseline 的 Chat、Settings、Memory 与 Orb API mock，并直接测量生产构建产物；命令自动启动 Vite preview，对 Pet、Chat、Settings、Memory、Orb Panel 各预热 1 次，再在全新 Playwright browser context 中采集 5 个有效样本，报告写入 `artifacts/window-startup/report.json`。
+- 五类窗口分别以 `.ndp-pet-root`、`.ndp-chat-root`、`.ndp-settings-root` 和 `.ndp-orbapp-mode-panel` 作为 ready selector；首帧定义为目标 selector 可见后跨过第二个 `requestAnimationFrame` 的时间戳，避免只测到空 `#root` 或 Orb 切换到 Panel 前的初始外壳。报告同时保留浏览器 FP/FCP、DOMContentLoaded、load、资源数量、传输体积和解码体积，并输出中位数、P95、最小值和最大值。
+- 当前本机最终报告的首帧中位数/P95 为：Pet `167.9/179.72ms`、Chat `123.6/134.88ms`、Settings `118.1/120.08ms`、Memory `137.5/148.44ms`、Orb Panel `118.5/130.24ms`；中位资源数量分别为 42、13、6、7、10，解码体积约 4712.39、386.94、206.72、236.74、297.21 KiB。Pet 的额外 Live2D/Pixi 与模型资源成本在数字上清晰可见。
+- 使用相同生产构建按最终 selector 方法连续执行五轮，五类窗口中位数最大跨度约为 7.3% 至 16.5%，没有 console/page error 或缺失样本；操作系统缓存、CPU 调度和五样本 P95 都会产生可见波动，因此后续回归应优先比较多轮中位趋势，同时结合 P95 和原始样本判断，不把单轮几毫秒变化视为回归。透明 Canvas/Pet 与部分 Orb 首屏可能不产生 Chromium 的 FCP 条目，路由专属首帧指标是这两类窗口的主证据。
+- `npm test` 共 82 个测试文件、352 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke、24 个 UI baseline 场景和 5 类窗口启动基线均通过；UI 与启动基线均为 0 failure、0 console error，原 UI 场景继续无横向或纵向溢出。
+- P2-2 的路由级拆包、Settings 页级懒加载、Markdown 延迟加载、隐藏窗口轮询暂停、长历史渐进渲染、共享媒体缓存、bundle 资源门禁和窗口启动耗时基线均已落地，本阶段收口；下一批进入 P2-3，优先审计可点击非按钮元素、图标 accessible name、键盘操作和弹窗焦点管理。
+
 ## 15. P2-3：无障碍与交互一致性
 
 ### 实施步骤

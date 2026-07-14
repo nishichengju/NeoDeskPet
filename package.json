@@ -25,6 +25,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "ui:baseline": "vite build && node scripts/capture-ui-baseline.mjs",
+    "perf:startup": "vite build && node scripts/capture-ui-baseline.mjs --startup-only",
     "media:smoke": "node scripts/verify-local-media.mjs",
     "ipc:smoke": "node scripts/verify-ipc-security.mjs",
     "installer:smoke": "node scripts/verify-windows-installer.mjs",

@@ -1175,3 +1175,30 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 本批未修改主进程媒体注册表、token 签发、路径越界校验、伪造 source path 拒绝、Range 响应或删除语义；共享缓存位于每个 renderer 自身的 JS 上下文内，不跨 BrowserWindow 共享，也不会绕过首次 IPC 安全验证。URL 只在服务端过期时间距离当前超过 5 秒时缓存，失败与空结果不缓存；data URL 使用 60 秒短 TTL 和 32 项上限。当前尚未通过浏览器场景直接统计重复 IPC 次数，主要证据来自可控 API mock 的并发/过期测试与 packaged 媒体 smoke；若同一路径文件在 60 秒内被原地覆盖，已缓存 data URL 可能短暂显示旧内容。
+
+## P2-2：前端加载与运行性能（第五十六批）
+
+- 验证日期：2026-07-14
+- 优化范围：五类 renderer 窗口启动/首帧耗时采集命令、重复采样统计与 P2-2 性能证据收口
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run perf:startup` | 生产构建通过；Pet、Chat、Settings、Memory、Orb Panel 各 1 次预热、5 个全新 browser context 有效样本，0 console/page error、0 缺失样本 |
+| 首帧定义 | 路由专属 ready selector 可见后的第二个 `requestAnimationFrame`；不会把空 `#root` 或 Orb Panel 前的初始外壳记为目标窗口首帧 |
+| 首帧中位数/P95 | Pet 167.9/179.72ms；Chat 123.6/134.88ms；Settings 118.1/120.08ms；Memory 137.5/148.44ms；Orb Panel 118.5/130.24ms |
+| 中位资源数/解码体积 | Pet 42/4712.39 KiB；Chat 13/386.94 KiB；Settings 6/206.72 KiB；Memory 7/236.74 KiB；Orb Panel 10/297.21 KiB |
+| 连续复测稳定性 | 同一生产构建按最终 selector 方法连续五轮中位数最大跨度约 7.3% 至 16.5%；最终报告保存在 `artifacts/window-startup/report.json` |
+| Renderer bundle | 主 chunk 146.30 kB；Chat 125.81 kB、Settings 15.29 kB、Memory 30.94 kB、Orb 49.63 kB、Pet/Pixi 710.32 kB、Markdown 160.34 kB |
+| `npm test` | 82 个测试文件、352 个用例通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过，动态 chunk、Live2D 运行时、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Pet/Chat/Settings/Memory/Orb preload 与运行正常，五类窗口 `runtimeErrors` 全为空；聊天/任务/Memory/Agent/MCP/TTS/ASR、权限、持久化与重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 原有 24 个场景全部通过；0 failure、0 console error、无横向或纵向溢出，资源门禁、Settings 懒加载、长历史与媒体交互无回归 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+`perf:startup` 复用现有 UI baseline mock 和 Playwright 浏览器路径，默认样本数为 5，可通过 `NDP_STARTUP_SAMPLES` 调整到 3 至 20；每个样本创建独立 browser context，降低 HTTP 缓存复用对路由 chunk 测量的干扰。报告同时记录 FP/FCP、DOMContentLoaded、load、资源数量、transferSize、decodedBodySize，以及每项中位数、P95、最小值和最大值。透明 Canvas/Pet 与部分 Orb 场景可能没有 Chromium `first-contentful-paint` 条目，因此路由专属 ready selector 首帧是主指标；这套浏览器基线衡量 renderer 生产资源的导航到目标界面时间，不包含 Electron 进程冷启动、BrowserWindow 原生创建、杀毒软件扫描、GPU 驱动初始化或真实 IPC/磁盘数据延迟。独立 context 也无法消除操作系统文件缓存和 CPU 调度差异，P95 对五样本中的单次尖峰尤其敏感；后续判断回归时应比较多轮中位趋势，再检查 P95 和原始样本。
