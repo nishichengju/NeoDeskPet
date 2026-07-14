@@ -1100,6 +1100,13 @@ AI 与能力
 - UI baseline 在 Chat 真实错误出现后检查 `alert/assertive/atomic`，并检查 Settings 保存完成后的 `status/polite/atomic`；25 个场景全部 0 failure、0 console error、无溢出。3 个聚焦测试文件共 10 个用例通过。
 - `npm test` 共 85 个测试文件、359 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续处理 Memory Console 局部保存提示、Semantic Group 编辑反馈和表单错误关联。
 
+第六十一批进展（2026-07-14）：
+
+- Memory Console 不再把含 checkbox 的整张记忆卡作为鼠标点击入口，改为明确的原生“查看并编辑”按钮并用 `aria-pressed` 标记活动记录；textarea 增加“记忆内容”名称，键盘可通过聚焦按钮 + Enter 完成选中和进入编辑。
+- 保存/回滚提示通过 `aria-describedby` 关联编辑器，成功使用 atomic `status/polite`，失败使用 atomic `alert/assertive` 并令 textarea `aria-invalid=true`；版本历史加载与错误同步补齐对应优先级。
+- UI baseline 的默认 Memory 场景实际完成键盘打开、修改和保存，验证 updateMemory 只调用 1 次、活动按钮为 true、编辑器关联成功提示且 invalid=false，提示为 `status/polite/atomic`。25 个场景全部 0 failure、0 console error、无溢出。
+- `npm test` 85 个测试文件、359 个用例，TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。审计确认 `SemanticGroupPanel.tsx` 是无入口且类型/API 已脱节的遗留组件，未将其误计为在用功能；后续单独决定删除或重建。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

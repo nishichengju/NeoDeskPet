@@ -451,6 +451,11 @@ function installMemoryMock(page) {
       messageCount: 0,
     }
     const off = () => undefined
+    let updateCount = 0
+    Object.defineProperty(window, '__memoryBaseline', {
+      configurable: true,
+      value: { get updateCount() { return updateCount } },
+    })
     const api = {
       getSettings: async () => settings,
       onSettingsChanged: () => off,
@@ -483,6 +488,11 @@ function installMemoryMock(page) {
         ],
       }),
       listMemoryConflicts: async () => ({ total: 0, items: [] }),
+      listMemoryVersions: async () => [],
+      updateMemory: async (args) => {
+        updateCount += 1
+        return { ok: true, ...args }
+      },
       setMemoryConsoleSettings: async () => settings,
       openSettings: async () => undefined,
       closeCurrent: async () => undefined,
@@ -760,7 +770,7 @@ const baselines = [
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
   { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
-  { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true },
+  { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
   { name: 'orb-bar-560x80-scale100', route: 'orb', width: 560, height: 80, scale: 1, mockOrbState: 'bar' },
   { name: 'orb-panel-560x720-scale100', route: 'orb', width: 560, height: 720, scale: 1, mockOrbState: 'panel' },
@@ -1215,6 +1225,43 @@ async function runUiBaseline(browser) {
       if (!expandedLabel.includes('60')) failures.push(`progressive history expanded label is ${expandedLabel || 'missing'}`)
       if (Math.abs(progressiveHistory.anchorDelta) > 12) {
         failures.push(`progressive history shifted the anchor by ${progressiveHistory.anchorDelta}px`)
+      }
+    }
+
+    let memoryEdit = null
+    if (baseline.verifyMemoryEdit) {
+      const openEditButton = page.getByRole('button', { name: '查看并编辑', exact: true })
+      await openEditButton.waitFor({ state: 'visible' })
+      await openEditButton.focus()
+      await page.keyboard.press('Enter')
+      const editor = page.getByRole('textbox', { name: '记忆内容' })
+      await editor.waitFor({ state: 'visible' })
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '记忆内容')
+      await editor.fill('更新后的基线记忆。')
+      await page.getByRole('button', { name: '保存修改（生成版本）', exact: true }).click()
+      const notice = page.locator('#ndp-memory-edit-notice')
+      await notice.waitFor({ state: 'visible' })
+      memoryEdit = {
+        updateCount: await page.evaluate(() => window.__memoryBaseline?.updateCount ?? 0),
+        triggerPressed: await openEditButton.getAttribute('aria-pressed'),
+        editor: await editor.evaluate((element) => ({
+          describedBy: element.getAttribute('aria-describedby'),
+          invalid: element.getAttribute('aria-invalid'),
+        })),
+        notice: await notice.evaluate((element) => ({
+          text: element.textContent?.trim() ?? '',
+          role: element.getAttribute('role'),
+          live: element.getAttribute('aria-live'),
+          atomic: element.getAttribute('aria-atomic'),
+        })),
+      }
+      if (memoryEdit.updateCount !== 1) failures.push(`memory edit saved ${memoryEdit.updateCount} times`)
+      if (memoryEdit.triggerPressed !== 'true') failures.push('memory edit trigger did not expose the active row')
+      if (memoryEdit.editor.describedBy !== 'ndp-memory-edit-notice' || memoryEdit.editor.invalid !== 'false') {
+        failures.push('memory editor is not associated with its success notice')
+      }
+      if (memoryEdit.notice.role !== 'status' || memoryEdit.notice.live !== 'polite' || memoryEdit.notice.atomic !== 'true') {
+        failures.push('memory edit success is not an atomic polite status')
       }
     }
 
@@ -1729,6 +1776,7 @@ async function runUiBaseline(browser) {
       expandedChat,
       chatUi,
       progressiveHistory,
+      memoryEdit,
       imageViewer,
       orbImageViewer,
       orbMessageMenu,

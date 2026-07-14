@@ -1296,3 +1296,22 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 本批只增加辅助技术语义，没有改变错误文案、视觉样式、自动消失时间、关闭按钮、保存并发序列或业务异常处理。静态测试覆盖 Orb 加载和错误两种优先级，浏览器基线覆盖真实 Chat 错误出现后的 alert 属性以及 Settings 保存中到已保存后的 status 属性。当前尚未统一 Memory Console 局部“已保存/保存失败”短提示和 Semantic Group 编辑器状态，也没有加入全局可视 toast 容器；下一批继续审计这两类局部反馈和表单错误关联。
+
+## P2-3：无障碍与交互一致性（第六十一批）
+
+- 验证日期：2026-07-14
+- 优化范围：Memory Console 记忆选择键盘入口、编辑器名称、保存/回滚提示关联和版本加载错误播报
+
+| 检查 | 结果 |
+| --- | --- |
+| 操作入口 | 移除包含 checkbox 的整张记忆卡点击行为，增加原生“查看并编辑”按钮；活动记录通过 `aria-pressed` 暴露，避免在模拟 button 内嵌交互控件 |
+| 编辑器关联 | textarea 增加“记忆内容”名称；保存/回滚提示使用固定 id，并通过 `aria-describedby` 与编辑器关联；失败期间 `aria-invalid=true` |
+| 状态优先级 | 保存/回滚成功为 atomic `status/polite`，失败为 atomic `alert/assertive`；版本历史加载与错误分别使用 polite 与 assertive |
+| `npm test` | 85 个测试文件、359 个用例通过 |
+| TypeScript / lint / 三项脚本检查 | 全部通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过；Memory Console chunk 31.36 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 runtimeErrors 为空，数据、权限和媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；默认 Memory 场景以焦点 + Enter 打开编辑器，保存调用 1 次，活动按钮、描述关联、invalid 状态和成功 live-region 全部符合预期；0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/memory-default-900x720-scale100.png`，新增按钮位于原元数据行内，未改变卡片宽度、checkbox 操作或详情区布局。自动化报告中的 `updateCount=1`、`triggerPressed=true`、`describedBy=ndp-memory-edit-notice`、`invalid=false`，成功提示为 `status/polite/atomic`。审计同时确认 `src/components/SemanticGroupPanel.tsx` 当前没有入口引用，且引用的类型和 preload API 已不存在；它不是正在运行的产品界面，因此本批没有对其做表面修补，后续应单独决定删除遗留文件还是按现有 Memory 架构重建功能。

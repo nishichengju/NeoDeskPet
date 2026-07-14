@@ -1454,7 +1454,6 @@ export function MemoryConsoleWindow(props: Props) {
               <div
                 key={m.rowid}
                 className="ndp-memory-item"
-                onClick={() => setActiveRowid(m.rowid)}
                 style={
                   activeRowid === m.rowid
                     ? { outline: '1px solid rgba(120,200,255,0.65)', outlineOffset: 2 }
@@ -1474,6 +1473,14 @@ export function MemoryConsoleWindow(props: Props) {
                   <span>{m.scope}</span>
                   <span>{m.role ?? 'note'}</span>
                   <span>{new Date(m.createdAt).toLocaleString()}</span>
+                  <button
+                    type="button"
+                    className="ndp-btn ndp-btn-mini"
+                    aria-pressed={activeRowid === m.rowid}
+                    onClick={() => setActiveRowid(m.rowid)}
+                  >
+                    查看并编辑
+                  </button>
                 </div>
                 <div className="ndp-memory-content">{m.content}</div>
                 <div
@@ -1505,7 +1512,7 @@ export function MemoryConsoleWindow(props: Props) {
         <div className="ndp-settings-section">
           <h3>当前记忆（编辑/版本/回滚）</h3>
           {!activeMemory ? (
-            <div style={{ color: 'rgba(255,255,255,0.6)' }}>点击一条记忆查看详情</div>
+            <div style={{ color: 'rgba(255,255,255,0.6)' }}>选择一条记忆查看详情</div>
           ) : (
             <div>
               <div className="ndp-row" style={{ marginBottom: 10, fontSize: 12, color: 'rgba(255,255,255,0.72)' }}>
@@ -1519,6 +1526,9 @@ export function MemoryConsoleWindow(props: Props) {
               </div>
 
               <textarea
+                aria-label="记忆内容"
+                aria-describedby={activeEditNotice ? 'ndp-memory-edit-notice' : undefined}
+                aria-invalid={Boolean(activeEditNotice?.includes('失败'))}
                 className="ndp-input"
                 style={{ height: 90, whiteSpace: 'pre-wrap' }}
                 ref={activeEditRef}
@@ -1550,16 +1560,22 @@ export function MemoryConsoleWindow(props: Props) {
                   放弃修改
                 </button>
                 {activeEditNotice ? (
-                  <span style={{ marginLeft: 10, fontSize: 12, color: 'rgba(255,255,255,0.72)' }}>{activeEditNotice}</span>
+                  <span
+                    id="ndp-memory-edit-notice"
+                    style={{ marginLeft: 10, fontSize: 12, color: 'rgba(255,255,255,0.72)' }}
+                    {...getLiveRegionProps(activeEditNotice.includes('失败') ? 'assertive' : 'polite')}
+                  >
+                    {activeEditNotice}
+                  </span>
                 ) : null}
               </div>
 
               <div style={{ marginTop: 12, fontSize: 12, color: 'rgba(255,255,255,0.72)' }}>
                 版本历史（{versions.length}）
-                {versionsLoading ? <span style={{ marginLeft: 8 }}>加载中…</span> : null}
+                {versionsLoading ? <span style={{ marginLeft: 8 }} {...getLiveRegionProps('polite')}>加载中…</span> : null}
               </div>
               {versionsError ? (
-                <div style={{ marginTop: 6, color: 'rgba(255,180,180,0.95)', whiteSpace: 'pre-wrap' }}>{versionsError}</div>
+                <div style={{ marginTop: 6, color: 'rgba(255,180,180,0.95)', whiteSpace: 'pre-wrap' }} {...getLiveRegionProps('assertive')}>{versionsError}</div>
               ) : null}
               {versions.length === 0 ? (
                 <div style={{ marginTop: 6, color: 'rgba(255,255,255,0.6)' }}>暂无版本记录</div>
