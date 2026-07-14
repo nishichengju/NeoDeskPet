@@ -70,7 +70,7 @@ export function PersonaSettingsTab(props: {
   const [currentPersona, setCurrentPersona] = useState<Persona | null>(null)
   const [draftName, setDraftName] = useState('')
   const [draftPrompt, setDraftPrompt] = useState('')
-  const [subTab, setSubTab] = useState<PersonaSubTab>('persona')
+  const [subTab, setSubTab] = useState<PersonaSubTab>(requestedSubTab ?? 'persona')
   const [memScope, setMemScope] = useState<'persona' | 'shared' | 'all'>('persona')
   const [memRole, setMemRole] = useState<'all' | 'user' | 'assistant' | 'note'>('all')
   const [memQuery, setMemQuery] = useState('')
@@ -303,9 +303,9 @@ export function PersonaSettingsTab(props: {
           <h3>角色</h3>
 
           <div className="ndp-setting-item">
-            <label>当前角色</label>
+            <label htmlFor="ndp-persona-current">当前角色</label>
             <div className="ndp-row">
-              <select className="ndp-select" value={activePersonaId} onChange={(e) => void onChangePersona(e.target.value)}>
+              <select id="ndp-persona-current" className="ndp-select" value={activePersonaId} onChange={(e) => void onChangePersona(e.target.value)}>
                 {personas.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
@@ -323,9 +323,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>角色名称</label>
+            <label htmlFor="ndp-persona-name">角色名称</label>
             <div className="ndp-row">
-              <input className="ndp-input" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+              <input id="ndp-persona-name" className="ndp-input" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
               <button className="ndp-btn" disabled={!currentPersona} onClick={() => void onRenamePersona()}>
                 保存
               </button>
@@ -333,8 +333,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>人设补充提示词</label>
+            <label htmlFor="ndp-persona-prompt">人设补充提示词</label>
             <textarea
+              id="ndp-persona-prompt"
               className="ndp-textarea"
               rows={10}
               value={draftPrompt}
@@ -380,8 +381,9 @@ export function PersonaSettingsTab(props: {
           <h3>向量去重</h3>
 
           <div className="ndp-setting-item">
-            <label>向量去重阈值（越高越保守）</label>
+            <label htmlFor="ndp-persona-vector-dedupe-threshold">向量去重阈值（越高越保守）</label>
             <input
+              id="ndp-persona-vector-dedupe-threshold"
               className="ndp-input"
               type="number"
               min={0.1}
@@ -412,8 +414,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>Tag 扩展数（0=不扩展）</label>
+            <label htmlFor="ndp-persona-tag-max-expand">Tag 扩展数（0=不扩展）</label>
             <input
+              id="ndp-persona-tag-max-expand"
               className="ndp-input"
               type="number"
               min={0}
@@ -442,8 +445,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
       <div className="ndp-setting-item">
-        <label>embeddings 模型</label>
+        <label htmlFor="ndp-persona-vector-model">embeddings 模型</label>
         <input
+          id="ndp-persona-vector-model"
           className="ndp-input"
           value={vectorEmbeddingModel}
           placeholder="例如：text-embedding-3-small"
@@ -452,8 +456,9 @@ export function PersonaSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>向量最低相似度（0~1）</label>
+        <label htmlFor="ndp-persona-vector-min-score">向量最低相似度（0~1）</label>
         <input
+          id="ndp-persona-vector-min-score"
           className="ndp-input"
           type="number"
           min={0}
@@ -465,8 +470,9 @@ export function PersonaSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>向量 TopK</label>
+        <label htmlFor="ndp-persona-vector-top-k">向量 TopK</label>
         <input
+          id="ndp-persona-vector-top-k"
           className="ndp-input"
           type="number"
           min={1}
@@ -477,8 +483,9 @@ export function PersonaSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>向量扫描上限（降低延迟）</label>
+        <label htmlFor="ndp-persona-vector-scan-limit">向量扫描上限（降低延迟）</label>
         <input
+          id="ndp-persona-vector-scan-limit"
           className="ndp-input"
           type="number"
           min={200}
@@ -504,8 +511,9 @@ export function PersonaSettingsTab(props: {
       {vectorUseCustomAi ? (
         <>
           <div className="ndp-setting-item">
-            <label>embeddings BaseUrl</label>
+            <label htmlFor="ndp-persona-vector-base-url">embeddings BaseUrl</label>
             <input
+              id="ndp-persona-vector-base-url"
               className="ndp-input"
               value={vectorAiBaseUrl}
               placeholder="例如：https://api.openai.com/v1"
@@ -545,8 +553,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>多模态 embeddings 模型</label>
+            <label htmlFor="ndp-persona-mm-vector-model">多模态 embeddings 模型</label>
             <input
+              id="ndp-persona-mm-vector-model"
               className="ndp-input"
               value={mmVectorEmbeddingModel}
               placeholder="例如：qwen3-vl-embedding-8b"
@@ -569,8 +578,9 @@ export function PersonaSettingsTab(props: {
           {mmVectorUseCustomAi ? (
             <>
               <div className="ndp-setting-item">
-                <label>多模态 embeddings BaseUrl</label>
+                <label htmlFor="ndp-persona-mm-vector-base-url">多模态 embeddings BaseUrl</label>
                 <input
+                  id="ndp-persona-mm-vector-base-url"
                   className="ndp-input"
                   value={mmVectorAiBaseUrl}
                   placeholder="例如：http://127.0.0.1:8000/v1"
@@ -636,8 +646,9 @@ export function PersonaSettingsTab(props: {
       {subTab === 'recall' && kgEnabled && kgUseCustomAi ? (
         <>
           <div className="ndp-setting-item">
-            <label>KG BaseUrl</label>
+            <label htmlFor="ndp-persona-kg-base-url">KG BaseUrl</label>
             <input
+              id="ndp-persona-kg-base-url"
               className="ndp-input"
               value={kgAiBaseUrl}
               placeholder="例如：https://api.openai.com/v1"
@@ -657,8 +668,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>KG 模型</label>
+            <label htmlFor="ndp-persona-kg-model">KG 模型</label>
             <input
+              id="ndp-persona-kg-model"
               className="ndp-input"
               value={kgAiModel}
               placeholder="例如：gpt-4o-mini"
@@ -667,8 +679,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>KG Temperature</label>
+            <label htmlFor="ndp-persona-kg-temperature">KG Temperature</label>
             <input
+              id="ndp-persona-kg-temperature"
               className="ndp-input"
               type="number"
               min={0}
@@ -680,8 +693,9 @@ export function PersonaSettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>KG MaxTokens</label>
+            <label htmlFor="ndp-persona-kg-max-tokens">KG MaxTokens</label>
             <input
+              id="ndp-persona-kg-max-tokens"
               className="ndp-input"
               type="number"
               min={200}
@@ -712,8 +726,9 @@ export function PersonaSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>每新增多少条有效消息触发一次</label>
+        <label htmlFor="ndp-persona-auto-extract-every">每新增多少条有效消息触发一次</label>
         <input
+          id="ndp-persona-auto-extract-every"
           className="ndp-input"
           type="number"
           min={2}
@@ -724,8 +739,9 @@ export function PersonaSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>提炼窗口：最多取最近多少条有效消息</label>
+        <label htmlFor="ndp-persona-auto-extract-max">提炼窗口：最多取最近多少条有效消息</label>
         <input
+          id="ndp-persona-auto-extract-max"
           className="ndp-input"
           type="number"
           min={10}
@@ -736,8 +752,9 @@ export function PersonaSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>自动提炼最小间隔（秒）</label>
+        <label htmlFor="ndp-persona-auto-extract-cooldown">自动提炼最小间隔（秒）</label>
         <input
+          id="ndp-persona-auto-extract-cooldown"
           className="ndp-input"
           type="number"
           min={0}
@@ -763,8 +780,9 @@ export function PersonaSettingsTab(props: {
           <label>自动提炼 LLM 配置</label>
           <div className="ndp-setting-hint">留空表示继承聊天主模型对应字段。</div>
           <div className="ndp-setting-item">
-            <label>Base URL</label>
+            <label htmlFor="ndp-persona-auto-extract-base-url">Base URL</label>
             <input
+              id="ndp-persona-auto-extract-base-url"
               className="ndp-input"
               placeholder="例如：https://api.openai.com/v1"
               value={autoExtractAiBaseUrl}
@@ -782,8 +800,9 @@ export function PersonaSettingsTab(props: {
             />
           </div>
           <div className="ndp-setting-item">
-            <label>Model</label>
+            <label htmlFor="ndp-persona-auto-extract-model">Model</label>
             <input
+              id="ndp-persona-auto-extract-model"
               className="ndp-input"
               placeholder="例如：gpt-4o-mini"
               value={autoExtractAiModel}
@@ -791,8 +810,9 @@ export function PersonaSettingsTab(props: {
             />
           </div>
           <div className="ndp-setting-item">
-            <label>Temperature</label>
+            <label htmlFor="ndp-persona-auto-extract-temperature">Temperature</label>
             <input
+              id="ndp-persona-auto-extract-temperature"
               className="ndp-input"
               type="number"
               min={0}
@@ -803,8 +823,9 @@ export function PersonaSettingsTab(props: {
             />
           </div>
           <div className="ndp-setting-item">
-            <label>Max Tokens</label>
+            <label htmlFor="ndp-persona-auto-extract-max-tokens">Max Tokens</label>
             <input
+              id="ndp-persona-auto-extract-max-tokens"
               className="ndp-input"
               type="number"
               min={128}
@@ -870,7 +891,7 @@ export function PersonaSettingsTab(props: {
           <div className="ndp-setting-item">
             <label>手动添加</label>
             <div className="ndp-row">
-              <select className="ndp-select" value={memNewScope} onChange={(e) => setMemNewScope(e.target.value as 'persona' | 'shared')}>
+              <select aria-label="手动记忆范围" className="ndp-select" value={memNewScope} onChange={(e) => setMemNewScope(e.target.value as 'persona' | 'shared')}>
                 <option value="persona">当前角色</option>
                 <option value="shared">共享</option>
               </select>
@@ -879,6 +900,7 @@ export function PersonaSettingsTab(props: {
               </button>
             </div>
             <textarea
+              aria-label="手动记忆内容"
               className="ndp-textarea ndp-textarea-compact"
               rows={3}
               value={memNewText}
@@ -891,6 +913,7 @@ export function PersonaSettingsTab(props: {
             <label>筛选</label>
             <div className="ndp-row">
               <select
+                aria-label="记忆范围筛选"
                 className="ndp-select"
                 value={memScope}
                 onChange={(e) => {
@@ -904,6 +927,7 @@ export function PersonaSettingsTab(props: {
                 <option value="all">当前角色 + 共享</option>
               </select>
               <select
+                aria-label="记忆角色筛选"
                 className="ndp-select"
                 value={memRole}
                 onChange={(e) => {
@@ -919,7 +943,7 @@ export function PersonaSettingsTab(props: {
               </select>
             </div>
             <div className="ndp-row" style={{ marginTop: 10 }}>
-              <input className="ndp-input" value={memQuery} placeholder="关键词（LIKE）" onChange={(e) => setMemQuery(e.target.value)} />
+              <input aria-label="记忆关键词" className="ndp-input" value={memQuery} placeholder="关键词（LIKE）" onChange={(e) => setMemQuery(e.target.value)} />
               <button
                 className="ndp-btn"
                 onClick={() => {

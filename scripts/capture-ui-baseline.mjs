@@ -560,6 +560,24 @@ function installSettingsMock(page) {
           },
         ],
       },
+      memory: {
+        enabled: true,
+        includeSharedOnRetrieve: true,
+        autoExtractEnabled: true,
+        autoExtractUseCustomAi: true,
+        hasAutoExtractAiApiKey: true,
+        tagEnabled: true,
+        vectorEnabled: true,
+        vectorUseCustomAi: true,
+        hasVectorAiApiKey: true,
+        mmVectorEnabled: true,
+        mmVectorUseCustomAi: true,
+        hasMmVectorAiApiKey: true,
+        kgEnabled: true,
+        kgIncludeChatMessages: true,
+        kgUseCustomAi: true,
+        hasKgAiApiKey: true,
+      },
       worldBook: {
         enabled: true,
         activeTagIds: [],
@@ -597,7 +615,20 @@ function installSettingsMock(page) {
         },
         consumeSettingsNavigation: async () => null,
         scanModels: async () => [],
-        listPersonas: async () => [],
+        listPersonas: async () => [
+          { id: 'default', name: '默认角色', updatedAt: Date.now() },
+        ],
+        getPersona: async () => ({
+          id: 'default',
+          name: '默认角色',
+          prompt: '用于设置页无障碍基线。',
+          captureEnabled: true,
+          captureUser: true,
+          captureAssistant: true,
+          retrieveEnabled: true,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        }),
         listMemory: async () => ({ total: 0, items: [] }),
         listTasks: async () => ({ items: [] }),
         onTasksChanged: () => off,
@@ -855,7 +886,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifySettingsChatUiControlNames: true, verifySettingsConditionalControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifySettingsChatUiControlNames: true, verifySettingsConditionalControlNames: true, verifySettingsPersonaControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -2240,6 +2271,105 @@ async function runUiBaseline(browser) {
       }
     }
 
+    let settingsPersonaControlNames = null
+    if (baseline.verifySettingsPersonaControlNames) {
+      await page.getByRole('button', { name: '角色与长期记忆', exact: true }).click()
+      const personaTablist = page.getByRole('tablist', { name: '角色与长期记忆设置' })
+      const screenshots = {}
+      const captureSubTab = async (tabName, controls, suffix) => {
+        await personaTablist.getByRole('tab', { name: tabName, exact: true }).click()
+        await Promise.all(controls.map((control) => control.waitFor({ state: 'visible' })))
+        await controls.at(-1)?.scrollIntoViewIfNeeded()
+        const screenshotPath = path.join(outputDir, `${baseline.name}-persona-${suffix}-controls.png`)
+        await page.screenshot({ path: screenshotPath })
+        screenshots[suffix] = path.relative(projectRoot, screenshotPath)
+        return controls.length
+      }
+
+      const personaControls = [
+        page.getByRole('combobox', { name: '当前角色', exact: true }),
+        page.getByRole('textbox', { name: '角色名称', exact: true }),
+        page.getByRole('textbox', { name: '人设补充提示词', exact: true }),
+      ]
+      const personaCount = await captureSubTab('角色', personaControls, 'profile')
+
+      const memoryControls = [
+        page.getByRole('checkbox', { name: '启用长期记忆（全局）', exact: true }),
+        page.getByRole('checkbox', { name: '检索时包含共享记忆（默认）', exact: true }),
+        page.getByRole('checkbox', { name: '对话超过阈值自动提炼（写入长期记忆）', exact: true }),
+        page.getByRole('spinbutton', { name: '每新增多少条有效消息触发一次', exact: true }),
+        page.getByRole('spinbutton', { name: '提炼窗口：最多取最近多少条有效消息', exact: true }),
+        page.getByRole('spinbutton', { name: '自动提炼最小间隔（秒）', exact: true }),
+        page.getByRole('checkbox', { name: '自动提炼使用单独的 LLM 配置（不影响聊天主模型）', exact: true }),
+        page.getByRole('textbox', { name: 'Base URL', exact: true }),
+        page.getByRole('textbox', { name: '自动提炼 API Key', exact: true }),
+        page.getByRole('textbox', { name: 'Model', exact: true }),
+        page.getByRole('spinbutton', { name: 'Temperature', exact: true }),
+        page.getByRole('spinbutton', { name: 'Max Tokens', exact: true }),
+        page.getByRole('checkbox', { name: '允许写入该角色的长期记忆', exact: true }),
+        page.getByRole('checkbox', { name: '记录用户消息', exact: true }),
+        page.getByRole('checkbox', { name: '记录 AI 消息', exact: true }),
+        page.getByRole('checkbox', { name: '允许该角色参与召回注入', exact: true }),
+      ]
+      const memoryCount = await captureSubTab('记忆', memoryControls, 'memory')
+
+      const recallControls = [
+        page.getByRole('checkbox', { name: '启用 Tag 网络（模糊问法扩展，本地低延迟）', exact: true }),
+        page.getByRole('spinbutton', { name: 'Tag 扩展数（0=不扩展）', exact: true }),
+        page.getByRole('checkbox', { name: '启用 KG（实体/关系）召回', exact: true }),
+        page.getByRole('checkbox', { name: '抽取 chat_message（更全但更噪）', exact: true }),
+        page.getByRole('checkbox', { name: 'KG 抽取使用单独 API', exact: true }),
+        page.getByRole('textbox', { name: 'KG BaseUrl', exact: true }),
+        page.getByRole('textbox', { name: 'KG API Key', exact: true }),
+        page.getByRole('textbox', { name: 'KG 模型', exact: true }),
+        page.getByRole('spinbutton', { name: 'KG Temperature', exact: true }),
+        page.getByRole('spinbutton', { name: 'KG MaxTokens', exact: true }),
+      ]
+      const recallCount = await captureSubTab('召回', recallControls, 'recall')
+
+      const textVectorControls = [
+        page.getByRole('spinbutton', { name: '向量去重阈值（越高越保守）', exact: true }),
+        page.getByRole('checkbox', { name: '启用向量召回（更强，需 embeddings API）', exact: true }),
+        page.getByRole('textbox', { name: 'embeddings 模型', exact: true }),
+        page.getByRole('spinbutton', { name: '向量最低相似度（0~1）', exact: true }),
+        page.getByRole('spinbutton', { name: '向量 TopK', exact: true }),
+        page.getByRole('spinbutton', { name: '向量扫描上限（降低延迟）', exact: true }),
+        page.getByRole('checkbox', { name: '向量使用单独 API Key/BaseUrl', exact: true }),
+        page.getByRole('textbox', { name: 'embeddings BaseUrl', exact: true }),
+        page.getByRole('textbox', { name: 'embeddings API Key', exact: true }),
+      ]
+      const textVectorCount = await captureSubTab('文本向量', textVectorControls, 'text-vector')
+
+      const mmVectorControls = [
+        page.getByRole('checkbox', { name: '启用多模态向量（图片/视频）', exact: true }),
+        page.getByRole('textbox', { name: '多模态 embeddings 模型', exact: true }),
+        page.getByRole('checkbox', { name: '多模态向量使用单独 API Key/BaseUrl', exact: true }),
+        page.getByRole('textbox', { name: '多模态 embeddings BaseUrl', exact: true }),
+        page.getByRole('textbox', { name: '多模态 embeddings API Key', exact: true }),
+      ]
+      const mmVectorCount = await captureSubTab('多模态向量', mmVectorControls, 'mm-vector')
+
+      const manageControls = [
+        page.getByRole('combobox', { name: '手动记忆范围', exact: true }),
+        page.getByRole('textbox', { name: '手动记忆内容', exact: true }),
+        page.getByRole('combobox', { name: '记忆范围筛选', exact: true }),
+        page.getByRole('combobox', { name: '记忆角色筛选', exact: true }),
+        page.getByRole('textbox', { name: '记忆关键词', exact: true }),
+      ]
+      const manageCount = await captureSubTab('管理', manageControls, 'manage')
+
+      settingsPersonaControlNames = {
+        persona: personaCount,
+        memory: memoryCount,
+        recall: recallCount,
+        textVector: textVectorCount,
+        mmVector: mmVectorCount,
+        manage: manageCount,
+        total: personaCount + memoryCount + recallCount + textVectorCount + mmVectorCount + manageCount,
+        screenshots,
+      }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2389,6 +2519,7 @@ async function runUiBaseline(browser) {
       settingsNovelAiControlNames,
       settingsChatUiControlNames,
       settingsConditionalControlNames,
+      settingsPersonaControlNames,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

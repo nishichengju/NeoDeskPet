@@ -1172,6 +1172,12 @@ AI 与能力
 - 工具中心补齐默认视图的工具总开关与搜索框，并为内置分组、内置工具、MCP 总开关、Server 开关、六类 Server 编辑字段、Server 工具分组和 MCP 工具生成带动态 id/name 的明确名称。UI baseline 使用一个真实配置形状的 MCP Server 和工具展开验证，避免只覆盖空列表。
 - UI baseline 实际定位高级压缩 7 项、独立 Agent API 7 项、NovelAI 队列 6 项、内置工具 4 项和 MCP 10 项，共 34 个当前可见条件控件；25 个场景全部 0 failure、0 console error、无溢出，四张展开态截图人工检查无布局回归。`settingsTabs` 12 个用例和全量 85 个测试文件、368 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 全部通过。AI、Tools、NovelAI chunk 分别为 26.34、20.34、12.40 kB；下一批集中展开 Persona 六个子标签及其嵌套条件状态。
 
+第七十二批进展（2026-07-14）：
+
+- 完成 Persona 六个子标签的 28 类缺名边界：角色选择/名称/提示词，自动提炼与三类自定义记忆 API，Tag/KG 召回，文本向量和多模态向量参数，以及记忆管理页的范围、角色和关键词筛选。数字输入、文本框和并排筛选控件均通过稳定 id 或独立 `aria-label` 区分。
+- `requestedSubTab` 初始化改为直接决定初始子页，避免设置导航请求到 Persona 子标签时先短暂显示“角色”页再切换；不改变现有保存、记忆查询或角色切换行为。
+- UI baseline 为 Persona 角色、记忆、召回、文本向量、多模态向量和管理页分别展开真实条件状态，按 role + accessible name 定位 3/16/10/9/5/5 项，共 48 项；25 个场景全部 0 failure、0 console error、无横向或纵向溢出，六张子页截图人工检查无布局回归。`settingsTabs` 增至 13 个用例，全量 85 个测试文件、369 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 全部通过。Persona chunk 为 24.54 kB；下一批建立全 Settings 可见表单控件自动门禁，确认默认与条件视图均无缺名控件，再进入对比度审计。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

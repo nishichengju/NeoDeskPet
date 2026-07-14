@@ -40,6 +40,59 @@ describe('settings tabs', () => {
     expect(html).toContain('aria-labelledby="ndp-persona-tab-persona"')
   })
 
+  it('names controls across every persona settings subtab', () => {
+    const renderPersona = (requestedSubTab: Parameters<typeof PersonaSettingsTab>[0]['requestedSubTab']) => (
+      renderToStaticMarkup(createElement(PersonaSettingsTab, {
+        api,
+        settings: {
+          memory: {
+            autoExtractUseCustomAi: true,
+            vectorUseCustomAi: true,
+            mmVectorUseCustomAi: true,
+            kgEnabled: true,
+            kgUseCustomAi: true,
+          },
+        } as Parameters<typeof PersonaSettingsTab>[0]['settings'],
+        requestedSubTab,
+      }))
+    )
+    const personaHtml = renderPersona('persona')
+    const memoryHtml = renderPersona('memory')
+    const recallHtml = renderPersona('recall')
+    const textVectorHtml = renderPersona('textVector')
+    const mmVectorHtml = renderPersona('mmVector')
+    const manageHtml = renderPersona('manage')
+
+    expect(personaHtml).toContain('id="ndp-persona-current"')
+    expect(personaHtml).toContain('id="ndp-persona-name"')
+    expect(personaHtml).toContain('id="ndp-persona-prompt"')
+    expect(memoryHtml).toContain('id="ndp-persona-auto-extract-every"')
+    expect(memoryHtml).toContain('id="ndp-persona-auto-extract-max"')
+    expect(memoryHtml).toContain('id="ndp-persona-auto-extract-cooldown"')
+    expect(memoryHtml).toContain('id="ndp-persona-auto-extract-base-url"')
+    expect(memoryHtml).toContain('id="ndp-persona-auto-extract-model"')
+    expect(memoryHtml).toContain('id="ndp-persona-auto-extract-temperature"')
+    expect(memoryHtml).toContain('id="ndp-persona-auto-extract-max-tokens"')
+    expect(recallHtml).toContain('id="ndp-persona-tag-max-expand"')
+    expect(recallHtml).toContain('id="ndp-persona-kg-base-url"')
+    expect(recallHtml).toContain('id="ndp-persona-kg-model"')
+    expect(recallHtml).toContain('id="ndp-persona-kg-temperature"')
+    expect(recallHtml).toContain('id="ndp-persona-kg-max-tokens"')
+    expect(textVectorHtml).toContain('id="ndp-persona-vector-dedupe-threshold"')
+    expect(textVectorHtml).toContain('id="ndp-persona-vector-model"')
+    expect(textVectorHtml).toContain('id="ndp-persona-vector-min-score"')
+    expect(textVectorHtml).toContain('id="ndp-persona-vector-top-k"')
+    expect(textVectorHtml).toContain('id="ndp-persona-vector-scan-limit"')
+    expect(textVectorHtml).toContain('id="ndp-persona-vector-base-url"')
+    expect(mmVectorHtml).toContain('id="ndp-persona-mm-vector-model"')
+    expect(mmVectorHtml).toContain('id="ndp-persona-mm-vector-base-url"')
+    expect(manageHtml).toContain('aria-label="手动记忆范围"')
+    expect(manageHtml).toContain('aria-label="手动记忆内容"')
+    expect(manageHtml).toContain('aria-label="记忆范围筛选"')
+    expect(manageHtml).toContain('aria-label="记忆角色筛选"')
+    expect(manageHtml).toContain('aria-label="记忆关键词"')
+  })
+
   it('renders tool settings as an associated roving tab set', () => {
     const html = renderToStaticMarkup(createElement(ToolsSettingsTab, { api, settings: null }))
 

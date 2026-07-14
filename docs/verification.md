@@ -1521,3 +1521,26 @@
 | `npm run ui:baseline` | 25 个场景通过；高级压缩 7、独立 Agent API 7、NovelAI 队列 6、内置工具 4、MCP 10 项按 role + name 定位，0 failure、0 console error、无溢出 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-compression-controls.png`、`settings-default-860x680-scale100-ai-custom-agent-controls.png`、`settings-default-860x680-scale100-novelai-queue-controls.png` 与 `settings-default-860x680-scale100-tools-conditional-controls.png`，展开后的选择框、长文本输入、成对数值输入、滑块和 MCP Server 编辑器没有出现重叠、宽度变化或异常横向滚动。默认视图最初 86 个缺名控件已全部收口；Persona 六个子标签及其嵌套条件状态仍需下一批逐页展开，之后再用全 Settings 自动门禁证明没有遗漏。
+
+## P2-3：无障碍与交互一致性（第七十二批）
+
+- 验证日期：2026-07-14
+- 优化范围：Persona 六个子标签及其嵌套条件状态的程序化名称
+
+| 检查 | 结果 |
+| --- | --- |
+| 角色页 | 当前角色、角色名称、人设补充提示词共 3 项通过稳定 id 与 `label/htmlFor` 关联 |
+| 记忆页 | 自动提炼阈值/窗口/冷却、自定义 API Base URL/Model/Temperature/Max Tokens，以及既有复选框和密钥输入共 16 项实际定位 |
+| 召回页 | Tag 扩展、KG 开关/选项、自定义 BaseUrl/Key/Model/Temperature/MaxTokens 共 10 项实际定位 |
+| 文本向量页 | 去重、模型、最低分、TopK、扫描上限、自定义 API 与密钥共 9 项实际定位 |
+| 多模态向量页 | 启用、模型、自定义 API 与密钥共 5 项实际定位 |
+| 管理页 | 手动记忆范围/内容、记忆范围筛选、角色筛选和关键词共 5 项实际定位 |
+| 聚焦测试 | `settingsTabs` 共 13 个用例通过，新增 Persona 六个子标签的稳定 id/name 契约 |
+| `npm test` | 85 个测试文件、369 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；Persona chunk 24.54 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，记忆/角色/Agent、密钥隔离、权限与媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；Persona 六页按 role + name 定位 48 项，0 failure、0 console error、无溢出 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-persona-profile-controls.png`、`settings-default-860x680-scale100-persona-memory-controls.png`、`settings-default-860x680-scale100-persona-recall-controls.png`、`settings-default-860x680-scale100-persona-text-vector-controls.png`、`settings-default-860x680-scale100-persona-mm-vector-controls.png` 与 `settings-default-860x680-scale100-persona-manage-controls.png`，深层自定义 API 字段、密钥输入、复选框、数字输入和管理页并排筛选没有出现标签重叠、宽度变化或异常滚动。已覆盖的默认与条件 Settings 控件均完成命名，下一批用程序化扫描作为最终门禁，并开始对比度审计。
