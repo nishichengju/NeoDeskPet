@@ -2,6 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { getApi } from '../src/neoDeskPetApi'
+import { BubbleSettingsTab } from '../src/windows/settings/BubbleTab'
+import { Live2DSettingsTab } from '../src/windows/settings/Live2DTab'
 import { PersonaSettingsTab } from '../src/windows/settings/PersonaTab'
 import { AsrSettingsTab } from '../src/windows/settings/AsrTab'
 import { AISettingsTab } from '../src/windows/settings/AiTab'
@@ -9,6 +11,7 @@ import { getSettingsTabTargetIndex } from '../src/windows/settings/settingsTabs'
 import { parseMcpImportText } from '../src/windows/settings/mcpImport'
 import { ToolsSettingsTab } from '../src/windows/settings/ToolsTab'
 import { TtsSettingsTab } from '../src/windows/settings/TtsTab'
+import { TaskPanelSettingsTab } from '../src/windows/settings/TaskPanelTab'
 
 const api = {} as ReturnType<typeof getApi>
 
@@ -45,6 +48,50 @@ describe('settings tabs', () => {
     expect(html).toContain('aria-selected="true"')
     expect(html).toContain('role="tabpanel"')
     expect(html).toContain('aria-labelledby="ndp-tools-tab-builtin"')
+  })
+
+  it('associates Live2D model and appearance controls with their labels', () => {
+    const html = renderToStaticMarkup(createElement(Live2DSettingsTab, {
+      api,
+      petScale: 1,
+      petOpacity: 1,
+      live2dModelId: '',
+      live2dMouseTrackingEnabled: true,
+      live2dIdleSwayEnabled: true,
+      availableModels: [],
+      selectedModelInfo: null,
+      isLoadingModels: false,
+      refreshModels: async () => {},
+    }))
+
+    expect(html).toContain('<label for="ndp-live2d-model">选择模型</label>')
+    expect(html).toContain('id="ndp-live2d-model"')
+    expect(html).toContain('<label for="ndp-live2d-scale">模型大小</label>')
+    expect(html).toContain('id="ndp-live2d-scale"')
+    expect(html).toContain('<label for="ndp-live2d-opacity">模型透明度</label>')
+    expect(html).toContain('id="ndp-live2d-opacity"')
+  })
+
+  it('associates bubble position, timing, and phrase controls with their labels', () => {
+    const html = renderToStaticMarkup(createElement(BubbleSettingsTab, { api, bubbleSettings: undefined }))
+
+    expect(html).toContain('<label for="ndp-bubble-position-x">水平位置 (X)</label>')
+    expect(html).toContain('id="ndp-bubble-position-x"')
+    expect(html).toContain('<label for="ndp-bubble-position-y">垂直位置 (Y)</label>')
+    expect(html).toContain('id="ndp-bubble-position-y"')
+    expect(html).toContain('<label for="ndp-bubble-auto-hide-delay">自动隐藏延迟</label>')
+    expect(html).toContain('id="ndp-bubble-auto-hide-delay"')
+    expect(html).toContain('<label for="ndp-bubble-click-phrases">点击台词</label>')
+    expect(html).toContain('id="ndp-bubble-click-phrases"')
+  })
+
+  it('associates task panel position controls with their labels', () => {
+    const html = renderToStaticMarkup(createElement(TaskPanelSettingsTab, { api, taskPanelSettings: undefined }))
+
+    expect(html).toContain('<label for="ndp-task-panel-position-x">水平位置 (X)</label>')
+    expect(html).toContain('id="ndp-task-panel-position-x"')
+    expect(html).toContain('<label for="ndp-task-panel-position-y">垂直位置 (Y)</label>')
+    expect(html).toContain('id="ndp-task-panel-position-y"')
   })
 
   it('parses supported MCP import formats and rejects empty server sets', () => {

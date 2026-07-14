@@ -1142,6 +1142,12 @@ AI 与能力
 - UI baseline 在默认 Settings 场景真实进入语音识别和语音合成页面，用 role + accessible name 定位 ASR 4 项与 TTS 8 项；25 个场景全部 0 failure、0 console error、无横向或纵向溢出。ASR/TTS 错误态截图人工检查无布局回归，既有资源错误关联仍然通过。
 - `settingsTabs` 7 个用例、全量 85 个测试文件和 363 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图还剩 74 个缺名控件，下一批优先处理 Live2D、气泡和任务面板；Persona 子标签、Tools 动态内容等必须展开条件状态后重新审计，不能以默认视图“未发现”代替完成。
 
+第六十七批进展（2026-07-14）：
+
+- 完成外观组剩余 9 个默认可见控件的程序化名称：Live2D 的模型选择、大小与透明度，气泡的水平/垂直位置、自动隐藏延迟与点击台词，以及任务面板的水平/垂直位置。全部使用稳定 id 与 `label/htmlFor`，没有改变设置值、保存调用、滑块步进或视觉样式。
+- UI baseline 在默认 Settings 场景逐页进入 Live2D、气泡和任务面板，用 role + accessible name 定位 3/4/2 项，并为三个页面分别保留截图。25 个场景全部 0 failure、0 console error、无横向或纵向溢出；截图确认选择框、滑块、气泡样式按钮网格和帮助文本未发生布局回归。
+- `settingsTabs` 增至 10 个用例，全量为 85 个测试文件、366 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图还剩 65 个缺名控件，下一批处理 API 连接、模型与生成、视觉和 Agent；条件配置、折叠高级区域和动态配置档仍要展开后复审。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

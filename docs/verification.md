@@ -1419,3 +1419,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-asr-device-error.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-tts-scan-error.png`，新增关联不改变控件尺寸、表单排列或错误提示位置。UI 报告中的 `settingsVoiceControlNames={asr:4,tts:8}`，并继续保留上一批资源错误的描述关联、invalid 状态和编辑恢复门禁。本轮真实 DOM 审计最初发现 86 个缺少程序化名称的可见控件，本批收口其中 12 个；其余 74 个仍需按页面分批处理，动态子标签和条件控件还必须展开后复审。
+
+## P2-3：无障碍与交互一致性（第六十七批）
+
+- 验证日期：2026-07-14
+- 优化范围：Live2D、气泡与任务面板设置中 9 个可见表单控件的程序化名称
+
+| 检查 | 结果 |
+| --- | --- |
+| Live2D 控件命名 | 模型选择、模型大小和模型透明度通过 `label/htmlFor` 与稳定 id 关联 |
+| 气泡控件命名 | 水平位置、垂直位置、自动隐藏延迟和点击台词通过 `label/htmlFor` 与稳定 id 关联 |
+| 任务面板控件命名 | 水平位置和垂直位置通过 `label/htmlFor` 与稳定 id 关联 |
+| 聚焦测试 | `settingsTabs` 共 10 个用例通过，新增三个页面的 label/id 静态契约 |
+| `npm test` | 85 个测试文件、366 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；Live2D 3.92 kB、Bubble 5.39 kB、Task Panel 1.36 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，窗口、设置持久化与本地媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；真实无障碍树按 role + name 定位 Live2D 3 项、气泡 4 项、任务面板 2 项，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-live2d-controls.png`、`settings-default-860x680-scale100-bubble-controls.png` 与 `settings-default-860x680-scale100-task-panel-controls.png`，新增标签关联未改变选择框、滑块、样式按钮网格或帮助文本布局。UI 报告中的计数分别为 Live2D 3、气泡 4、任务面板 2，并继续验证上一批语音控件 4/8 项。本轮收口 9 个缺名控件，默认视图剩余 65 个；下一批进入 API 连接、模型与生成、视觉和 Agent，仍需区分默认可见与条件展开控件。

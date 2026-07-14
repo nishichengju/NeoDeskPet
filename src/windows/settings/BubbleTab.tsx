@@ -76,9 +76,10 @@ export function BubbleSettingsTab(props: {
 
       {/* Position X */}
       <div className="ndp-setting-item">
-        <label>水平位置 (X)</label>
+        <label htmlFor="ndp-bubble-position-x">水平位置 (X)</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-bubble-position-x"
             type="range"
             min="0"
             max="100"
@@ -93,9 +94,10 @@ export function BubbleSettingsTab(props: {
 
       {/* Position Y */}
       <div className="ndp-setting-item">
-        <label>垂直位置 (Y)</label>
+        <label htmlFor="ndp-bubble-position-y">垂直位置 (Y)</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-bubble-position-y"
             type="range"
             min="0"
             max="100"
@@ -156,9 +158,10 @@ export function BubbleSettingsTab(props: {
 
       {/* Auto Hide Delay */}
       <div className="ndp-setting-item">
-        <label>自动隐藏延迟</label>
+        <label htmlFor="ndp-bubble-auto-hide-delay">自动隐藏延迟</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-bubble-auto-hide-delay"
             type="range"
             min="0"
             max="15000"
@@ -201,8 +204,9 @@ export function BubbleSettingsTab(props: {
 
       {/* Custom Click Phrases */}
       <div className="ndp-setting-item">
-        <label>点击台词</label>
+        <label htmlFor="ndp-bubble-click-phrases">点击台词</label>
         <textarea
+          id="ndp-bubble-click-phrases"
           className="ndp-textarea"
           value={phrasesText}
           placeholder="每行一句台词..."

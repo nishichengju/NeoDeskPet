@@ -15,9 +15,10 @@ export function TaskPanelSettingsTab(props: {
       <p className="ndp-setting-hint">仅在有任务进行中时出现，用于查看进度与暂停/终止。</p>
 
       <div className="ndp-setting-item">
-        <label>水平位置 (X)</label>
+        <label htmlFor="ndp-task-panel-position-x">水平位置 (X)</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-task-panel-position-x"
             type="range"
             min="0"
             max="100"
@@ -31,9 +32,10 @@ export function TaskPanelSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>垂直位置 (Y)</label>
+        <label htmlFor="ndp-task-panel-position-y">垂直位置 (Y)</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-task-panel-position-y"
             type="range"
             min="0"
             max="100"

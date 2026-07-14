@@ -784,7 +784,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -1912,6 +1912,44 @@ async function runUiBaseline(browser) {
       settingsVoiceControlNames = { asr: asrControls.length, tts: ttsControls.length }
     }
 
+    let settingsAppearanceControlNames = null
+    if (baseline.verifySettingsAppearanceControlNames) {
+      await page.getByRole('button', { name: 'Live2D', exact: true }).click()
+      const live2dControls = [
+        page.getByRole('combobox', { name: '选择模型', exact: true }),
+        page.getByRole('slider', { name: '模型大小', exact: true }),
+        page.getByRole('slider', { name: '模型透明度', exact: true }),
+      ]
+      await Promise.all(live2dControls.map((control) => control.waitFor({ state: 'visible' })))
+      const live2dScreenshotPath = path.join(outputDir, `${baseline.name}-live2d-controls.png`)
+      await page.screenshot({ path: live2dScreenshotPath })
+
+      await page.getByRole('button', { name: '气泡', exact: true }).click()
+      const bubbleControls = [
+        page.getByRole('slider', { name: '水平位置 (X)', exact: true }),
+        page.getByRole('slider', { name: '垂直位置 (Y)', exact: true }),
+        page.getByRole('slider', { name: '自动隐藏延迟', exact: true }),
+        page.getByRole('textbox', { name: '点击台词', exact: true }),
+      ]
+      await Promise.all(bubbleControls.map((control) => control.waitFor({ state: 'visible' })))
+      const bubbleScreenshotPath = path.join(outputDir, `${baseline.name}-bubble-controls.png`)
+      await page.screenshot({ path: bubbleScreenshotPath })
+
+      await page.getByRole('button', { name: '任务面板', exact: true }).click()
+      const taskPanelControls = [
+        page.getByRole('slider', { name: '水平位置 (X)', exact: true }),
+        page.getByRole('slider', { name: '垂直位置 (Y)', exact: true }),
+      ]
+      await Promise.all(taskPanelControls.map((control) => control.waitFor({ state: 'visible' })))
+      const taskPanelScreenshotPath = path.join(outputDir, `${baseline.name}-task-panel-controls.png`)
+      await page.screenshot({ path: taskPanelScreenshotPath })
+      settingsAppearanceControlNames = {
+        live2d: { count: live2dControls.length, screenshot: path.relative(projectRoot, live2dScreenshotPath) },
+        bubble: { count: bubbleControls.length, screenshot: path.relative(projectRoot, bubbleScreenshotPath) },
+        taskPanel: { count: taskPanelControls.length, screenshot: path.relative(projectRoot, taskPanelScreenshotPath) },
+      }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2056,6 +2094,7 @@ async function runUiBaseline(browser) {
       settingsAiModelErrors,
       settingsResourceErrors,
       settingsVoiceControlNames,
+      settingsAppearanceControlNames,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

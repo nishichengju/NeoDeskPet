@@ -36,8 +36,9 @@ export function Live2DSettingsTab(props: {
 
       {/* Model Selection */}
       <div className="ndp-setting-item">
-        <label>选择模型</label>
+        <label htmlFor="ndp-live2d-model">选择模型</label>
         <select
+          id="ndp-live2d-model"
           className="ndp-select"
           value={live2dModelId}
           onMouseDown={triggerRefresh}
@@ -147,9 +148,10 @@ export function Live2DSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>模型大小</label>
+        <label htmlFor="ndp-live2d-scale">模型大小</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-live2d-scale"
             type="range"
             min="0.5"
             max="5"
@@ -163,9 +165,10 @@ export function Live2DSettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>模型透明度</label>
+        <label htmlFor="ndp-live2d-opacity">模型透明度</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-live2d-opacity"
             type="range"
             min="0.3"
             max="1.0"
