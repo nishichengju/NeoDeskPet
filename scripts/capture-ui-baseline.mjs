@@ -1166,9 +1166,10 @@ async function runUiBaseline(browser) {
 
     let imageViewer = null
     if (baseline.verifyImageViewer) {
-      const messageImage = page.locator('.ndp-msg-image').first()
-      await messageImage.waitFor({ state: 'visible' })
-      await messageImage.click()
+      const messageImageButton = page.getByRole('button', { name: '查看图片附件 1' })
+      await messageImageButton.waitFor({ state: 'visible' })
+      await messageImageButton.focus()
+      await page.keyboard.press('Enter')
       const viewer = page.locator('.ndp-image-viewer')
       await viewer.waitFor({ state: 'visible' })
       imageViewer = await viewer.evaluate((element) => ({
@@ -1190,9 +1191,10 @@ async function runUiBaseline(browser) {
 
     let orbImageViewer = null
     if (baseline.verifyOrbImageViewer) {
-      const attachment = page.locator('.ndp-orbpanel-attachment').first()
+      const attachment = page.getByRole('button', { name: '查看工具图片 1' })
       await attachment.waitFor({ state: 'visible' })
-      await attachment.click()
+      await attachment.focus()
+      await page.keyboard.press('Enter')
       const viewer = page.locator('.ndp-orbimg-viewer')
       await viewer.waitFor({ state: 'visible' })
       const readViewerState = () => viewer.evaluate((element) => {
@@ -1206,7 +1208,9 @@ async function runUiBaseline(browser) {
         }
       })
       const initial = await readViewerState()
-      await page.keyboard.press('d')
+      const nextImageButton = viewer.locator('.ndp-orbimg-viewer-nav').nth(1)
+      await nextImageButton.focus()
+      await page.keyboard.press('Enter')
       await page.waitForFunction(() => document.querySelector('.ndp-orbimg-viewer-meta')?.textContent?.trim() === '2/2')
       const afterNext = await readViewerState()
       await viewer.locator('.ndp-orbimg-viewer-stage').dispatchEvent('wheel', { deltaY: -100 })

@@ -903,11 +903,20 @@
 }
 
 .ndp-avatar-clickable {
+  appearance: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
 }
 
 .ndp-avatar-clickable:hover {
   border-color: rgba(255, 255, 255, 0.28);
+}
+
+.ndp-avatar-clickable:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.95);
+  outline-offset: 2px;
 }
 
 .ndp-inline-textarea {
@@ -997,7 +1006,21 @@
 }
 
 .ndp-msg-image-hit {
+  appearance: none;
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
   cursor: zoom-in;
+}
+
+.ndp-msg-image-hit:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.95);
+  outline-offset: 2px;
 }
 
 .ndp-attachment-open {

@@ -1070,6 +1070,14 @@ AI 与能力
 - 屏幕阅读器能够识别按钮、标签页、输入错误和加载状态。
 - 减少动效模式下不播放非必要缩放和位移动画。
 
+第五十七批进展（2026-07-14）：
+
+- Chat 普通消息、分段 TTS 消息和生成占位中的用户/助手头像由可点击 `div` 改为原生 `button`，补充“更换用户头像/更换助手头像” accessible name；聊天错误条的 `×` 按钮增加“关闭错误提示”名称。原 30px 圆形尺寸、头像图片、拖拽区域和鼠标点击行为保持不变，并新增统一 `:focus-visible` 轮廓。
+- Chat data URL/MMVector 图片预览统一包裹在带序号名称的原生按钮中；Orb 消息图片和工具图片卡改为原生按钮，Orb 视频不再让含原生 controls 的整卡模拟按钮，而是由底部文件名区域提供独立“打开视频”按钮。`OrbImagePreview` 移除未使用的 `onClick` 接口，renderer 目标目录中不再存在作为操作入口的可点击 `img`。
+- 按钮样式显式重置 `appearance`、padding、字体、背景和对齐，保留原图片/卡片几何；Orb 视频播放器区域恢复默认指针，只有打开按钮显示可点击反馈。人工检查 Chat 图片、Orb 图片卡和 Orb 查看器截图，未出现浏览器默认按钮边框、额外内边距或尺寸偏移。
+- 4 个聚焦测试文件共 15 个用例通过，新增头像、Chat 图片、Orb 图片/视频和工具图片的元素类型与 accessible name 断言。UI baseline 的 Chat 图片与 Orb 工具图片场景改为先聚焦按钮、再按 Enter 打开查看器；Orb 查看器随后聚焦“下一张”按钮并按 Enter 完成 `1/2 → 2/2`，24 个场景全部 0 failure、0 console error、无横向或纵向溢出。
+- renderer 主 chunk 保持 146.30 kB；Chat 为 126.04 kB、Orb 为 49.83 kB，主 CSS 42.69 kB、Orb CSS 37.44 kB。`npm test` 共 82 个测试文件、352 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查和 IPC/媒体 smoke 均通过。下一批处理图片查看器与确认对话框的初始焦点、焦点循环、关闭后焦点恢复和 backdrop 语义。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

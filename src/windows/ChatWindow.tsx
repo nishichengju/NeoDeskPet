@@ -3656,13 +3656,19 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         ))}
         {(settings?.tts?.enabled ?? false) && (settings?.tts?.segmented ?? false) && ttsPendingUtteranceId ? (
           <div className="ndp-msg-row ndp-msg-row-pet" title="生成中…">
-            <div className="ndp-avatar ndp-avatar-clickable" onClick={() => pickAvatar('assistant')} title="点击更换头像">
+            <button
+              type="button"
+              className="ndp-avatar ndp-avatar-clickable"
+              onClick={() => pickAvatar('assistant')}
+              title="点击更换头像"
+              aria-label="更换助手头像"
+            >
               {settings?.chatProfile?.assistantAvatar ? (
                 <img src={settings.chatProfile.assistantAvatar} alt="assistant" />
               ) : (
                 <span>宠</span>
               )}
-            </div>
+            </button>
             <div className="ndp-msg ndp-msg-pet">
               <div className="ndp-msg-content ndp-muted">思考中…</div>
             </div>
@@ -3674,7 +3680,9 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       {error && (
         <div className="ndp-chat-error">
           <span>{error}</span>
-          <button onClick={() => setError(null)}>×</button>
+          <button type="button" onClick={() => setError(null)} aria-label="关闭错误提示" title="关闭">
+            ×
+          </button>
         </div>
       )}
 

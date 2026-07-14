@@ -44,6 +44,8 @@ describe('ChatMessageAttachments', () => {
     const html = renderToStaticMarkup(createElement(ChatMessageAttachments, props))
     expect(html).toContain('ndp-msg-attachments')
     expect(html).toContain('data:image/png;base64,one')
+    expect(html).toContain('<button type="button" class="ndp-msg-image-hit"')
+    expect(html).toContain('aria-label="查看图片附件 1"')
     expect(html).toContain('查看')
     expect(renderToStaticMarkup(createElement(ChatMessageAttachments, { ...props, hidden: true }))).toBe('')
   })

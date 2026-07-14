@@ -1202,3 +1202,28 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 `perf:startup` 复用现有 UI baseline mock 和 Playwright 浏览器路径，默认样本数为 5，可通过 `NDP_STARTUP_SAMPLES` 调整到 3 至 20；每个样本创建独立 browser context，降低 HTTP 缓存复用对路由 chunk 测量的干扰。报告同时记录 FP/FCP、DOMContentLoaded、load、资源数量、transferSize、decodedBodySize，以及每项中位数、P95、最小值和最大值。透明 Canvas/Pet 与部分 Orb 场景可能没有 Chromium `first-contentful-paint` 条目，因此路由专属 ready selector 首帧是主指标；这套浏览器基线衡量 renderer 生产资源的导航到目标界面时间，不包含 Electron 进程冷启动、BrowserWindow 原生创建、杀毒软件扫描、GPU 驱动初始化或真实 IPC/磁盘数据延迟。独立 context 也无法消除操作系统文件缓存和 CPU 调度差异，P95 对五样本中的单次尖峰尤其敏感；后续判断回归时应比较多轮中位趋势，再检查 P95 和原始样本。
+
+## P2-3：无障碍与交互一致性（第五十七批）
+
+- 验证日期：2026-07-14
+- 优化范围：Chat 头像、Chat/Orb 图片与视频入口、工具图片和错误提示关闭按钮的原生控件语义与键盘路径
+
+| 检查 | 结果 |
+| --- | --- |
+| 可点击元素审计 | Chat/Orb 本批目标目录中的操作型头像、图片和工具媒体已改为原生 `button`；仅剩图片查看器 backdrop/shell 的关闭与阻止冒泡 `div`，留给弹窗焦点批次 |
+| Accessible name | 用户/助手头像、Chat 图片序号、Orb 消息图片、工具图片、视频打开和错误提示关闭均有明确名称 |
+| 聚焦回归 | `chatMessageBody`、`chatMessageAttachments`、`orbMessageContent`、`orbMessageMedia` 共 15 个用例通过；验证 button 类型、名称、媒体委托和既有解析 |
+| Renderer bundle | 主 chunk 146.30 kB；Chat 126.04 kB、Orb 49.83 kB；主 CSS 42.69 kB、Orb CSS 37.44 kB |
+| `npm test` | 82 个测试文件、352 个用例通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过，按钮语义、动态 chunk、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Pet/Chat/Settings/Memory/Orb preload 与运行正常，五类窗口 `runtimeErrors` 全为空；权限、持久化、聊天/任务/Memory/Agent/MCP/TTS/ASR 和重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 24 个场景通过；Chat 图片按钮和 Orb 工具图片按钮均通过焦点 + Enter 打开查看器，Orb 下一张按钮通过 Enter 切换到 2/2；0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/chat-image-viewer-720x620-scale100.png`、`artifacts/ui-baseline/orb-image-viewer-560x720-scale100.png` 与 `artifacts/ui-baseline/orb-image-viewer-560x720-scale100-open.png`，按钮 reset 未引入默认边框、额外 padding 或卡片尺寸变化。Chat 图片仍保留图片本体和“查看”文字按钮两条入口；Orb 视频 controls 不再与整卡点击竞争，用户可通过底部文件名按钮打开独立媒体。当前尚未实现图片查看器/确认对话框的初始焦点、focus trap、关闭后焦点恢复或 backdrop dialog 语义；Orb 查看器从新图片按钮打开后，全局 A/D 快捷键在焦点仍留于弹窗外时不稳定，本批 UI 门禁改为聚焦查看器原生“下一张”按钮并按 Enter，下一批随焦点管理统一解决。

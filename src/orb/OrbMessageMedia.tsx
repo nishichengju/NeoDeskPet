@@ -34,9 +34,8 @@ export function OrbImagePreview(props: {
   alt: string
   dataUrl?: string
   className?: string
-  onClick?: () => void
 }) {
-  const { api, imagePath, resourceId, alt, dataUrl, className, onClick } = props
+  const { api, imagePath, resourceId, alt, dataUrl, className } = props
   const fallback = getImageFallback({ imagePath, resourceId, dataUrl })
   const sourceKey = JSON.stringify([imagePath, resourceId ?? '', dataUrl ?? ''])
   const [resolved, setResolved] = useState(() => ({ key: sourceKey, src: fallback }))
@@ -58,7 +57,7 @@ export function OrbImagePreview(props: {
   }, [api, dataUrl, fallback, imagePath, resourceId, sourceKey])
 
   if (!src) return null
-  return <img className={className} src={src} alt={alt} onClick={onClick} />
+  return <img className={className} src={src} alt={alt} />
 }
 
 export function OrbLocalVideo(props: {

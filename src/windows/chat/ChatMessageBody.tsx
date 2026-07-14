@@ -59,9 +59,15 @@ export function ChatMessageBody({
           onContextMenu={(event) => onContextMenu(event, message.id)}
           title={new Date(message.createdAt).toLocaleString()}
         >
-          <div className="ndp-avatar ndp-avatar-clickable" onClick={() => onPickAvatar('assistant')} title="点击更换头像">
+          <button
+            type="button"
+            className="ndp-avatar ndp-avatar-clickable"
+            onClick={() => onPickAvatar('assistant')}
+            title="点击更换头像"
+            aria-label="更换助手头像"
+          >
             {avatar ? <img src={avatar} alt="assistant" /> : <span>宠</span>}
-          </div>
+          </button>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {visible.map((segment, index) => {
@@ -92,9 +98,15 @@ export function ChatMessageBody({
         title={new Date(message.createdAt).toLocaleString()}
       >
         {!isUser ? (
-          <div className="ndp-avatar ndp-avatar-clickable" onClick={() => onPickAvatar('assistant')} title="点击更换头像">
+          <button
+            type="button"
+            className="ndp-avatar ndp-avatar-clickable"
+            onClick={() => onPickAvatar('assistant')}
+            title="点击更换头像"
+            aria-label="更换助手头像"
+          >
             {avatar ? <img src={avatar} alt="assistant" /> : <span>宠</span>}
-          </div>
+          </button>
         ) : null}
 
         <div className={`ndp-msg ndp-msg-${isUser ? 'user' : 'pet'}`}>
@@ -130,9 +142,15 @@ export function ChatMessageBody({
         </div>
 
         {isUser ? (
-          <div className="ndp-avatar ndp-avatar-clickable" onClick={() => onPickAvatar('user')} title="点击更换头像">
+          <button
+            type="button"
+            className="ndp-avatar ndp-avatar-clickable"
+            onClick={() => onPickAvatar('user')}
+            title="点击更换头像"
+            aria-label="更换用户头像"
+          >
             {avatar ? <img src={avatar} alt="user" /> : <span>我</span>}
-          </div>
+          </button>
         ) : null}
       </div>
       {overlay}

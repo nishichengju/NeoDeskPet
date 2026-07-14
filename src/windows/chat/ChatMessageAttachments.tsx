@@ -68,23 +68,23 @@ export function ChatMessageAttachments({
         const imageIndex = Math.max(0, imageSources.findIndex((item) => item === source))
         return (
           <div key={key} className="ndp-msg-attachment">
-            {dataUrl ? (
-              <img
-                className="ndp-msg-image"
-                src={dataUrl}
-                alt="attachment"
-                onClick={() => void onOpenImageViewer(imageSources, imageIndex)}
-              />
-            ) : (
-              <div className="ndp-msg-image-hit" onClick={() => void onOpenImageViewer(imageSources, imageIndex)}>
+            <button
+              type="button"
+              className="ndp-msg-image-hit"
+              aria-label={`查看图片附件 ${imageIndex + 1}`}
+              onClick={() => void onOpenImageViewer(imageSources, imageIndex)}
+            >
+              {dataUrl ? (
+                <img className="ndp-msg-image" src={dataUrl} alt="attachment" />
+              ) : (
                 <MmvectorImagePreview
                   api={api}
                   imagePath={path}
                   resourceId={attachment.resourceId}
                   alt="attachment"
                 />
-              </div>
-            )}
+              )}
+            </button>
             <button
               className="ndp-attachment-open"
               onClick={() => void onOpenImageViewer(imageSources, imageIndex)}

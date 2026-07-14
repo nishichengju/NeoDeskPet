@@ -103,7 +103,15 @@ describe('Orb message content', () => {
         task: task({
           toolRuns: [
             { id: 'shell', toolName: 'agent.run', status: 'done', startedAt: 1, endedAt: 2 },
-            { id: 'run-1', toolName: 'delay.sleep', status: 'done', inputPreview: 'one', startedAt: 1, endedAt: 1_001 },
+            {
+              id: 'run-1',
+              toolName: 'delay.sleep',
+              status: 'done',
+              inputPreview: 'one',
+              imagePaths: ['data:image/png;base64,tool'],
+              startedAt: 1,
+              endedAt: 1_001,
+            },
             { id: 'run-2', toolName: 'screen.capture', status: 'error', error: 'failed', startedAt: 1, endedAt: 2_001 },
           ],
         }),
@@ -116,6 +124,7 @@ describe('Orb message content', () => {
     expect(html).toContain('1/2')
     expect(html).toContain('2/2')
     expect(html).toContain('ndp-tooluse-pill-failed')
+    expect(html).toContain('aria-label="查看工具图片 1"')
   })
 
   it('renders text, status, and exact tool blocks for assistant messages', () => {
@@ -152,11 +161,13 @@ describe('Orb message content', () => {
       onOpenAttachment,
       onOpenImageViewer,
     })
-    const video = findElement(tree, (element) => element.props.title === 'legacy.mp4')
-    const image = findElement(tree, (element) => element.props.title === 'data:image/png;base64,legacy')
+    const video = findElement(tree, (element) => element.props['aria-label'] === '打开视频 1')
+    const image = findElement(tree, (element) => element.props['aria-label'] === '查看图片 1')
 
     video.props.onClick()
     image.props.onClick()
+    expect(video.type).toBe('button')
+    expect(image.type).toBe('button')
     expect(onOpenAttachment).toHaveBeenCalledWith('legacy.mp4', undefined)
     expect(onOpenImageViewer).toHaveBeenCalledWith(
       [{ source: 'data:image/png;base64,legacy', title: '图片 1' }],

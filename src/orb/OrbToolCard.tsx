@@ -47,10 +47,12 @@ export function OrbToolCard(props: OrbToolCardProps) {
         {imagePaths.length > 0 ? (
           <div className="ndp-orbpanel-attachments" data-orb-nodrag="true">
             {imagePaths.map((imagePath, imageIndex) => (
-              <div
+              <button
                 key={`tool-outside-img-${runKey}-${imageIndex}`}
+                type="button"
                 className="ndp-orbpanel-attachment"
                 title={imagePath}
+                aria-label={`查看工具图片 ${imageIndex + 1}`}
                 onClick={() => {
                   const viewerIndex = allToolImagePaths.findIndex((path) => path === imagePath)
                   void props.onOpenImageViewer(toolImageViewerItems, viewerIndex >= 0 ? viewerIndex : imageIndex)
@@ -62,8 +64,8 @@ export function OrbToolCard(props: OrbToolCardProps) {
                   imagePath={imagePath}
                   alt={`tool-image-${imageIndex + 1}`}
                 />
-                <div className="ndp-orbpanel-attachment-meta">image {imageIndex + 1}</div>
-              </div>
+                <span className="ndp-orbpanel-attachment-meta">image {imageIndex + 1}</span>
+              </button>
             ))}
           </div>
         ) : null}

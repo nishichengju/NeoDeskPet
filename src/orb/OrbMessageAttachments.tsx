@@ -28,12 +28,7 @@ export function OrbMessageAttachments(props: OrbMessageAttachmentsProps) {
           const path = String(attachment.path ?? '').trim()
           if (!path) return null
           return (
-            <div
-              key={key}
-              className="ndp-orbpanel-attachment"
-              title={path}
-              onClick={() => void props.onOpenAttachment(path, attachment.resourceId)}
-            >
+            <div key={key} className="ndp-orbpanel-attachment ndp-orbpanel-attachment-video" title={path}>
               <OrbLocalVideo
                 api={props.api}
                 className="ndp-orbpanel-video"
@@ -43,18 +38,28 @@ export function OrbMessageAttachments(props: OrbMessageAttachmentsProps) {
                 preload="metadata"
                 playsInline
               />
-              <div className="ndp-orbpanel-attachment-meta">{attachment.filename || 'video'}</div>
+              <button
+                type="button"
+                className="ndp-orbpanel-attachment-meta ndp-orbpanel-attachment-open"
+                aria-label={`打开视频 ${attachment.filename || index + 1}`}
+                onClick={() => void props.onOpenAttachment(path, attachment.resourceId)}
+              >
+                {attachment.filename || 'video'}
+              </button>
             </div>
           )
         }
 
         if (!source) return null
         const viewerIndex = imageViewerItems.findIndex((item) => item.source === source)
+        const imageNumber = viewerIndex >= 0 ? viewerIndex + 1 : index + 1
         return (
-          <div
+          <button
             key={key}
+            type="button"
             className="ndp-orbpanel-attachment"
             title={source}
+            aria-label={`查看图片 ${attachment.filename || imageNumber}`}
             onClick={() => {
               if (viewerIndex >= 0) void props.onOpenImageViewer(imageViewerItems, viewerIndex)
             }}
@@ -70,8 +75,8 @@ export function OrbMessageAttachments(props: OrbMessageAttachmentsProps) {
                 alt={attachment.filename || 'image'}
               />
             )}
-            <div className="ndp-orbpanel-attachment-meta">{attachment.filename || 'image'}</div>
-          </div>
+            <span className="ndp-orbpanel-attachment-meta">{attachment.filename || 'image'}</span>
+          </button>
         )
       })}
     </div>
