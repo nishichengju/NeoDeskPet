@@ -768,7 +768,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -1684,6 +1684,45 @@ async function runUiBaseline(browser) {
     }
 
     let settingsConfirmDialog = null
+    let settingsMcpImport = null
+    if (baseline.verifyMcpImport) {
+      await page.getByRole('button', { name: '工具中心', exact: true }).click()
+      const toolsTablist = page.getByRole('tablist', { name: '工具中心设置' })
+      await toolsTablist.getByRole('tab', { name: 'MCP', exact: true }).click()
+      await page.getByText('一键导入/导出（JSON）', { exact: true }).click()
+      const importInput = page.getByRole('textbox', { name: 'MCP JSON 配置' })
+      await importInput.fill('{bad json')
+      await page.getByRole('button', { name: '覆盖导入', exact: true }).click()
+      const importError = page.getByRole('alert')
+      await importError.waitFor({ state: 'visible' })
+      settingsMcpImport = {
+        invalid: await importInput.getAttribute('aria-invalid'),
+        describedBy: await importInput.getAttribute('aria-describedby'),
+        errorId: await importError.getAttribute('id'),
+        role: await importError.getAttribute('role'),
+        live: await importError.getAttribute('aria-live'),
+        atomic: await importError.getAttribute('aria-atomic'),
+        message: (await importError.textContent())?.trim() ?? '',
+      }
+      const mcpImportScreenshotPath = path.join(outputDir, `${baseline.name}-mcp-import-error.png`)
+      settingsMcpImport.screenshot = path.relative(projectRoot, mcpImportScreenshotPath)
+      await page.screenshot({ path: mcpImportScreenshotPath })
+      await importInput.fill('{')
+      settingsMcpImport.clearedOnEdit = await importInput.evaluate((element) => (
+        element.getAttribute('aria-invalid') === 'false'
+        && !element.hasAttribute('aria-describedby')
+        && !document.getElementById('ndp-mcp-import-error')
+      ))
+      if (settingsMcpImport.invalid !== 'true') failures.push('MCP import textarea was not marked invalid')
+      if (settingsMcpImport.describedBy !== 'ndp-mcp-import-error') failures.push('MCP import error was not associated with the textarea')
+      if (settingsMcpImport.errorId !== 'ndp-mcp-import-error') failures.push('MCP import error id is unstable')
+      if (settingsMcpImport.role !== 'alert' || settingsMcpImport.live !== 'assertive' || settingsMcpImport.atomic !== 'true') {
+        failures.push('MCP import error live region is incomplete')
+      }
+      if (!settingsMcpImport.message.startsWith('导入失败：')) failures.push('MCP import error message is missing its context')
+      if (!settingsMcpImport.clearedOnEdit) failures.push('MCP import error did not clear after editing')
+    }
+
     if (baseline.verifyConfirmDialog) {
       await page.getByRole('button', { name: '设定库', exact: true }).click()
       const deleteButton = page.getByRole('button', { name: '删除', exact: true })
@@ -1785,6 +1824,7 @@ async function runUiBaseline(browser) {
       settingsNavigation,
       settingsSearch,
       settingsTabs,
+      settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,
       settingsLazyAssets,

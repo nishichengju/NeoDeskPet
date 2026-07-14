@@ -1315,3 +1315,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/memory-default-900x720-scale100.png`，新增按钮位于原元数据行内，未改变卡片宽度、checkbox 操作或详情区布局。自动化报告中的 `updateCount=1`、`triggerPressed=true`、`describedBy=ndp-memory-edit-notice`、`invalid=false`，成功提示为 `status/polite/atomic`。审计同时确认 `src/components/SemanticGroupPanel.tsx` 当前没有入口引用，且引用的类型和 preload API 已不存在；它不是正在运行的产品界面，因此本批没有对其做表面修补，后续应单独决定删除遗留文件还是按现有 Memory 架构重建功能。
+
+## P2-3：无障碍与交互一致性（第六十二批）
+
+- 验证日期：2026-07-14
+- 优化范围：工具中心 MCP JSON 导入的输入名称、错误关联、无效状态、错误播报和重新编辑清理
+
+| 检查 | 结果 |
+| --- | --- |
+| 输入错误关联 | MCP JSON textarea 增加“MCP JSON 配置” accessible name；失败时 `aria-invalid=true`，并通过 `aria-describedby=ndp-mcp-import-error` 关联错误 |
+| 状态播报 | 导入错误为 atomic `alert/assertive`，错误文案以“导入失败”开头；继续编辑后旧错误节点、描述关联和 invalid 状态立即清除 |
+| 解析边界 | 新增独立 `mcpImport.ts`，支持 `{mcpServers:{...}}`、`{servers:[...]}` 和直接数组；单元测试覆盖对象、数组和空集合拒绝 |
+| `npm test` | 85 个测试文件、360 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；Tools chunk 19.97 kB，动态 chunk、native 依赖、vector worker 与品牌元数据写入成功 |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，权限、持久化、MCP、媒体 Range 与拒绝路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；默认 Settings 场景实际输入坏 JSON、触发覆盖导入并验证错误与编辑清理，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-mcp-import-error.png`，错误文本位于导入框和操作按钮之间，未改变工具中心宽度、按钮排列或 MCP Server 列表布局。UI 报告中的 `invalid=true`、`describedBy=ndp-mcp-import-error`、`role=alert`、`live=assertive`、`atomic=true`、`clearedOnEdit=true`，该场景无 failure 或 console error。本批只处理用户可直接修正的 MCP JSON 校验错误；AI 模型列表、ASR 麦克风和 TTS 资源扫描属于异步资源错误，尚未与对应输入控件建立统一关联，留待下一批继续审计。

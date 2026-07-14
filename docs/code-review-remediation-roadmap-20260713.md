@@ -1107,6 +1107,13 @@ AI 与能力
 - UI baseline 的默认 Memory 场景实际完成键盘打开、修改和保存，验证 updateMemory 只调用 1 次、活动按钮为 true、编辑器关联成功提示且 invalid=false，提示为 `status/polite/atomic`。25 个场景全部 0 failure、0 console error、无溢出。
 - `npm test` 85 个测试文件、359 个用例，TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。审计确认 `SemanticGroupPanel.tsx` 是无入口且类型/API 已脱节的遗留组件，未将其误计为在用功能；后续单独决定删除或重建。
 
+第六十二批进展（2026-07-14）：
+
+- 工具中心 MCP JSON 导入文本框增加稳定的“MCP JSON 配置” accessible name；解析失败时设置 `aria-invalid=true`，并通过固定 `ndp-mcp-import-error` id 与 `aria-describedby` 建立错误关联。错误使用 atomic `alert/assertive`，文案补充“导入失败”上下文；用户继续编辑后立即清除旧错误和无效状态。
+- 将 MCP 导入解析移到独立 `mcpImport.ts`，保持 React 组件模块符合 Fast Refresh 边界；解析器继续支持 `{mcpServers:{...}}`、`{servers:[...]}` 和直接数组三种格式。新增单元测试覆盖对象格式、数组格式和空服务器集合拒绝。
+- UI baseline 的默认 Settings 场景实际输入坏 JSON 并触发“覆盖导入”，验证 textarea 为 invalid、错误 id/描述关联正确、live-region 为 `alert/assertive/atomic`，继续输入后错误节点和描述关联均消失。错误态截图完成检查，25 个场景全部 0 failure、0 console error、无溢出。
+- `npm test` 共 85 个测试文件、360 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续处理 AI 模型列表、ASR 麦克风和 TTS 资源扫描等异步错误与对应控件的关联。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

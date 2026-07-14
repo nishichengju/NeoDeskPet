@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { getApi } from '../src/neoDeskPetApi'
 import { PersonaSettingsTab } from '../src/windows/settings/PersonaTab'
 import { getSettingsTabTargetIndex } from '../src/windows/settings/settingsTabs'
+import { parseMcpImportText } from '../src/windows/settings/mcpImport'
 import { ToolsSettingsTab } from '../src/windows/settings/ToolsTab'
 
 const api = {} as ReturnType<typeof getApi>
@@ -41,5 +42,26 @@ describe('settings tabs', () => {
     expect(html).toContain('aria-selected="true"')
     expect(html).toContain('role="tabpanel"')
     expect(html).toContain('aria-labelledby="ndp-tools-tab-builtin"')
+  })
+
+  it('parses supported MCP import formats and rejects empty server sets', () => {
+    expect(parseMcpImportText('{"mcpServers":{"exa":{"command":"npx","args":["-y","exa"]}}}')).toEqual({
+      servers: [{
+        id: 'exa',
+        enabled: true,
+        label: 'exa',
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', 'exa'],
+        cwd: '',
+        env: {},
+      }],
+    })
+    expect(parseMcpImportText('[{"id":"local","enabled":false,"command":"node"}]').servers[0]).toMatchObject({
+      id: 'local',
+      enabled: false,
+      command: 'node',
+    })
+    expect(() => parseMcpImportText('{"mcpServers":{}}')).toThrow('未解析到任何 MCP Server')
   })
 })
