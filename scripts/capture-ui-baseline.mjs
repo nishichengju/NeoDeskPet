@@ -784,7 +784,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -2005,6 +2005,42 @@ async function runUiBaseline(browser) {
       }
     }
 
+    let settingsNovelAiControlNames = null
+    if (baseline.verifySettingsNovelAiControlNames) {
+      await page.getByRole('button', { name: '生图', exact: true }).click()
+      const novelAiControls = [
+        page.getByRole('textbox', { name: 'Endpoint', exact: true }),
+        page.getByRole('combobox', { name: '提示词预设', exact: true }),
+        page.getByRole('textbox', { name: '预设名称', exact: true }),
+        page.getByRole('textbox', { name: '固定正面提示词', exact: true }),
+        page.getByRole('textbox', { name: '固定负面提示词', exact: true }),
+        page.getByRole('textbox', { name: '文生图规则', exact: true }),
+        page.getByRole('spinbutton', { name: '占用上限', exact: true }),
+        page.getByRole('combobox', { name: '模型', exact: true }),
+        page.getByRole('combobox', { name: '采样器', exact: true }),
+        page.getByRole('combobox', { name: '噪点表', exact: true }),
+        page.getByRole('spinbutton', { name: '图片宽度', exact: true }),
+        page.getByRole('spinbutton', { name: '图片高度', exact: true }),
+        page.getByRole('slider', { name: '步数', exact: true }),
+        page.getByRole('slider', { name: 'Prompt Guidance', exact: true }),
+        page.getByRole('slider', { name: 'Prompt Guidance Rescale', exact: true }),
+        page.getByRole('spinbutton', { name: '生成张数', exact: true }),
+        page.getByRole('spinbutton', { name: '随机种子', exact: true }),
+        page.getByRole('textbox', { name: '输出目录', exact: true }),
+      ]
+      await Promise.all(novelAiControls.map((control) => control.waitFor({ state: 'visible' })))
+      const promptScreenshotPath = path.join(outputDir, `${baseline.name}-novelai-prompt-controls.png`)
+      await page.screenshot({ path: promptScreenshotPath })
+      await novelAiControls.at(-1).scrollIntoViewIfNeeded()
+      const generationScreenshotPath = path.join(outputDir, `${baseline.name}-novelai-generation-controls.png`)
+      await page.screenshot({ path: generationScreenshotPath })
+      settingsNovelAiControlNames = {
+        count: novelAiControls.length,
+        promptScreenshot: path.relative(projectRoot, promptScreenshotPath),
+        generationScreenshot: path.relative(projectRoot, generationScreenshotPath),
+      }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2151,6 +2187,7 @@ async function runUiBaseline(browser) {
       settingsVoiceControlNames,
       settingsAppearanceControlNames,
       settingsAiControlNames,
+      settingsNovelAiControlNames,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

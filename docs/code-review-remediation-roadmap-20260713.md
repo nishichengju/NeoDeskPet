@@ -1154,6 +1154,12 @@ AI 与能力
 - OpenAI、Claude、Gemini 三种思考强度下拉互斥渲染并共享同一稳定 id；静态契约覆盖三条 JSX 分支，默认浏览器基线验证当前 OpenAI 分支。UI baseline 逐页按 role + accessible name 定位 API 连接 3、模型与生成 5、视觉 5、Agent 4 项，并分别保存截图；25 个场景全部 0 failure、0 console error、无溢出。
 - `settingsTabs` 保持 10 个用例但扩展 AI 四页断言，全量 85 个测试文件、366 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图还剩 46 个缺名控件，下一批处理 NovelAI；高级上下文压缩、自定义工具 API 和其他条件区域留到动态状态专项审计。
 
+第六十九批进展（2026-07-14）：
+
+- 完成 NovelAI 默认视图 18 个控件的程序化名称。单控件通过稳定 id 与 `label/htmlFor` 关联；提示词预设/名称、图片宽度/高度、生成张数/随机种子三组成对控件使用互不重复的明确名称，避免辅助技术无法区分同组输入。
+- UI baseline 进入“生图”页面并按 role + accessible name 定位全部 18 项，分别在提示词区和生成参数区保留截图；25 个场景全部 0 failure、0 console error、无横向或纵向溢出。截图确认预设行、文本域、成对数字输入和滑块布局无回归。
+- `settingsTabs` 增至 11 个用例，全量 85 个测试文件、367 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图最初 86 个缺名项已累计收口 58 个，剩余聊天界面 26 项与工具中心 2 项；NovelAI 云端队列的 5 个条件控件留到动态状态专项审计。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

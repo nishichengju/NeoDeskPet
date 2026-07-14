@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { getApi } from '../src/neoDeskPetApi'
 import { BubbleSettingsTab } from '../src/windows/settings/BubbleTab'
 import { Live2DSettingsTab } from '../src/windows/settings/Live2DTab'
+import { NovelAISettingsTab } from '../src/windows/settings/NovelAITab'
 import { PersonaSettingsTab } from '../src/windows/settings/PersonaTab'
 import { AsrSettingsTab } from '../src/windows/settings/AsrTab'
 import { AISettingsTab } from '../src/windows/settings/AiTab'
@@ -92,6 +93,31 @@ describe('settings tabs', () => {
     expect(html).toContain('id="ndp-task-panel-position-x"')
     expect(html).toContain('<label for="ndp-task-panel-position-y">垂直位置 (Y)</label>')
     expect(html).toContain('id="ndp-task-panel-position-y"')
+  })
+
+  it('names NovelAI prompt and generation controls', () => {
+    const html = renderToStaticMarkup(createElement(NovelAISettingsTab, { api, settings: undefined }))
+
+    expect(html).toContain('<label for="ndp-novelai-endpoint">Endpoint</label>')
+    expect(html).toContain('id="ndp-novelai-endpoint"')
+    expect(html).toContain('<label for="ndp-novelai-prompt-preset">提示词预设</label>')
+    expect(html).toContain('id="ndp-novelai-prompt-preset"')
+    expect(html).toContain('aria-label="预设名称"')
+    expect(html).toContain('id="ndp-novelai-fixed-positive-prompt"')
+    expect(html).toContain('id="ndp-novelai-fixed-negative-prompt"')
+    expect(html).toContain('id="ndp-novelai-prompt-rules"')
+    expect(html).toContain('id="ndp-novelai-max-prompt-chars"')
+    expect(html).toContain('id="ndp-novelai-model"')
+    expect(html).toContain('id="ndp-novelai-sampler"')
+    expect(html).toContain('id="ndp-novelai-noise-schedule"')
+    expect(html).toContain('aria-label="图片宽度"')
+    expect(html).toContain('aria-label="图片高度"')
+    expect(html).toContain('id="ndp-novelai-steps"')
+    expect(html).toContain('id="ndp-novelai-guidance"')
+    expect(html).toContain('id="ndp-novelai-guidance-rescale"')
+    expect(html).toContain('aria-label="生成张数"')
+    expect(html).toContain('aria-label="随机种子"')
+    expect(html).toContain('id="ndp-novelai-output-dir"')
   })
 
   it('parses supported MCP import formats and rejects empty server sets', () => {

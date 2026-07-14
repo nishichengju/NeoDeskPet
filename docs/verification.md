@@ -1462,3 +1462,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-connection-controls.png`、`settings-default-860x680-scale100-ai-generation-controls.png`、`settings-default-860x680-scale100-ai-vision-controls.png` 与 `settings-default-860x680-scale100-ai-agent-controls.png`，新增关联未改变输入宽度、滑块、禁用态或页面滚动布局。源码共处理 19 个控件；默认运行态只会渲染 OpenAI/Claude/Gemini 三种思考强度中的一个，因此 UI 报告实际定位 17 个当前可见控件，另外两条互斥分支由相同稳定 id 的静态契约覆盖。默认视图剩余 46 个缺名控件；高级上下文压缩和自定义工具 API 等条件区域仍保留到动态状态专项审计。
+
+## P2-3：无障碍与交互一致性（第六十九批）
+
+- 验证日期：2026-07-14
+- 优化范围：NovelAI 默认视图中 18 个提示词与生成参数控件的程序化名称
+
+| 检查 | 结果 |
+| --- | --- |
+| 单控件关联 | Endpoint、三类提示词、占用上限、模型、采样器、噪点表、三类生成滑块和输出目录通过稳定 id 与 `label/htmlFor` 关联 |
+| 成对控件命名 | 预设下拉框关联“提示词预设”，名称输入独立为“预设名称”；尺寸分别为“图片宽度/高度”，张数与种子分别为“生成张数/随机种子” |
+| 聚焦测试 | `settingsTabs` 共 11 个用例通过，新增 NovelAI 18 项静态契约 |
+| `npm test` | 85 个测试文件、367 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；NovelAI chunk 12.13 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，生图设置持久化、密钥隔离、权限与媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；真实无障碍树按 role + name 定位 18 项，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-novelai-prompt-controls.png` 与 `settings-default-860x680-scale100-novelai-generation-controls.png`，预设行、提示词输入、尺寸、滑块、张数/种子和输出目录没有出现标签重叠或宽度变化。默认视图最初 86 个缺名控件已累计收口 58 个，剩余 28 个分布在聊天界面 26 项和工具中心 2 项；云端队列启用后的 5 个条件控件仍留到动态状态专项审计。

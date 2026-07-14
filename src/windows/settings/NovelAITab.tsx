@@ -223,8 +223,8 @@ export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; sett
       </div>
 
       <div className="ndp-setting-item">
-        <label>Endpoint</label>
-        <input className="ndp-input" value={endpoint} onChange={(e) => patch({ endpoint: e.target.value })} />
+        <label htmlFor="ndp-novelai-endpoint">Endpoint</label>
+        <input id="ndp-novelai-endpoint" className="ndp-input" value={endpoint} onChange={(e) => patch({ endpoint: e.target.value })} />
       </div>
 
       <div className="ndp-setting-item">
@@ -261,16 +261,16 @@ export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; sett
       )}
 
       <div className="ndp-setting-item">
-        <label>提示词预设</label>
+        <label htmlFor="ndp-novelai-prompt-preset">提示词预设</label>
         <div className="ndp-row">
-          <select className="ndp-select" value={activePromptPresetId} onChange={(e) => applyPreset(e.target.value)}>
+          <select id="ndp-novelai-prompt-preset" className="ndp-select" value={activePromptPresetId} onChange={(e) => applyPreset(e.target.value)}>
             {promptPresets.map((preset) => (
               <option key={preset.id} value={preset.id}>
                 {preset.name}
               </option>
             ))}
           </select>
-          <input className="ndp-input" value={presetNameDraft} onChange={(e) => setPresetNameDraft(e.target.value)} />
+          <input aria-label="预设名称" className="ndp-input" value={presetNameDraft} onChange={(e) => setPresetNameDraft(e.target.value)} />
         </div>
         <div className="ndp-row">
           <button className="ndp-btn" type="button" onClick={savePreset}>保存</button>
@@ -281,44 +281,44 @@ export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; sett
       </div>
 
       <div className="ndp-setting-item">
-        <label>固定正面提示词</label>
-        <textarea className="ndp-textarea" rows={4} value={fixedPositivePrompt} onChange={(e) => patch({ fixedPositivePrompt: e.target.value })} />
+        <label htmlFor="ndp-novelai-fixed-positive-prompt">固定正面提示词</label>
+        <textarea id="ndp-novelai-fixed-positive-prompt" className="ndp-textarea" rows={4} value={fixedPositivePrompt} onChange={(e) => patch({ fixedPositivePrompt: e.target.value })} />
         <p className="ndp-setting-hint">{positiveUsage}</p>
       </div>
 
       <div className="ndp-setting-item">
-        <label>固定负面提示词</label>
-        <textarea className="ndp-textarea" rows={4} value={fixedNegativePrompt} onChange={(e) => patch({ fixedNegativePrompt: e.target.value })} />
+        <label htmlFor="ndp-novelai-fixed-negative-prompt">固定负面提示词</label>
+        <textarea id="ndp-novelai-fixed-negative-prompt" className="ndp-textarea" rows={4} value={fixedNegativePrompt} onChange={(e) => patch({ fixedNegativePrompt: e.target.value })} />
         <p className="ndp-setting-hint">{fixedNegativeUsage}</p>
       </div>
 
       <div className="ndp-setting-item">
-        <label>文生图规则</label>
-        <textarea className="ndp-textarea" rows={8} value={promptRules} onChange={(e) => patch({ promptRules: e.target.value })} />
+        <label htmlFor="ndp-novelai-prompt-rules">文生图规则</label>
+        <textarea id="ndp-novelai-prompt-rules" className="ndp-textarea" rows={8} value={promptRules} onChange={(e) => patch({ promptRules: e.target.value })} />
       </div>
 
       <div className="ndp-setting-item">
-        <label>占用上限</label>
-        <input className="ndp-input" type="number" min={128} max={12000} step={64} value={maxPromptChars} onChange={(e) => patch({ maxPromptChars: intValue(e.target.value, maxPromptChars) })} />
+        <label htmlFor="ndp-novelai-max-prompt-chars">占用上限</label>
+        <input id="ndp-novelai-max-prompt-chars" className="ndp-input" type="number" min={128} max={12000} step={64} value={maxPromptChars} onChange={(e) => patch({ maxPromptChars: intValue(e.target.value, maxPromptChars) })} />
       </div>
 
       <div className="ndp-setting-item">
-        <label>模型</label>
-        <select className="ndp-select" value={model} onChange={(e) => patch({ model: e.target.value })}>
+        <label htmlFor="ndp-novelai-model">模型</label>
+        <select id="ndp-novelai-model" className="ndp-select" value={model} onChange={(e) => patch({ model: e.target.value })}>
           {optionList(MODEL_OPTIONS, model).map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
       </div>
 
       <div className="ndp-setting-item">
-        <label>采样器</label>
-        <select className="ndp-select" value={sampler} onChange={(e) => patch({ sampler: e.target.value })}>
+        <label htmlFor="ndp-novelai-sampler">采样器</label>
+        <select id="ndp-novelai-sampler" className="ndp-select" value={sampler} onChange={(e) => patch({ sampler: e.target.value })}>
           {optionList(SAMPLER_OPTIONS, sampler).map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
       </div>
 
       <div className="ndp-setting-item">
-        <label>噪点表</label>
-        <select className="ndp-select" value={noiseSchedule} onChange={(e) => patch({ noiseSchedule: e.target.value })}>
+        <label htmlFor="ndp-novelai-noise-schedule">噪点表</label>
+        <select id="ndp-novelai-noise-schedule" className="ndp-select" value={noiseSchedule} onChange={(e) => patch({ noiseSchedule: e.target.value })}>
           {optionList(NOISE_SCHEDULE_OPTIONS, noiseSchedule).map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
       </div>
@@ -326,31 +326,31 @@ export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; sett
       <div className="ndp-setting-item">
         <label>尺寸</label>
         <div className="ndp-row">
-          <input className="ndp-input" type="number" min={64} max={4096} step={64} value={width} onChange={(e) => patch({ width: intValue(e.target.value, width) })} />
-          <input className="ndp-input" type="number" min={64} max={4096} step={64} value={height} onChange={(e) => patch({ height: intValue(e.target.value, height) })} />
+          <input aria-label="图片宽度" className="ndp-input" type="number" min={64} max={4096} step={64} value={width} onChange={(e) => patch({ width: intValue(e.target.value, width) })} />
+          <input aria-label="图片高度" className="ndp-input" type="number" min={64} max={4096} step={64} value={height} onChange={(e) => patch({ height: intValue(e.target.value, height) })} />
         </div>
       </div>
 
       <div className="ndp-setting-item">
-        <label>步数</label>
+        <label htmlFor="ndp-novelai-steps">步数</label>
         <div className="ndp-range-input">
-          <input type="range" min="1" max="80" step="1" value={steps} onChange={(e) => patch({ steps: intValue(e.target.value, steps) })} />
+          <input id="ndp-novelai-steps" type="range" min="1" max="80" step="1" value={steps} onChange={(e) => patch({ steps: intValue(e.target.value, steps) })} />
           <span>{steps}</span>
         </div>
       </div>
 
       <div className="ndp-setting-item">
-        <label>Prompt Guidance</label>
+        <label htmlFor="ndp-novelai-guidance">Prompt Guidance</label>
         <div className="ndp-range-input">
-          <input type="range" min="0" max="30" step="0.1" value={scale} onChange={(e) => patch({ scale: numberValue(e.target.value, scale) })} />
+          <input id="ndp-novelai-guidance" type="range" min="0" max="30" step="0.1" value={scale} onChange={(e) => patch({ scale: numberValue(e.target.value, scale) })} />
           <span>{scale.toFixed(1)}</span>
         </div>
       </div>
 
       <div className="ndp-setting-item">
-        <label>Prompt Guidance Rescale</label>
+        <label htmlFor="ndp-novelai-guidance-rescale">Prompt Guidance Rescale</label>
         <div className="ndp-range-input">
-          <input type="range" min="0" max="1" step="0.01" value={cfgRescale} onChange={(e) => patch({ cfgRescale: numberValue(e.target.value, cfgRescale) })} />
+          <input id="ndp-novelai-guidance-rescale" type="range" min="0" max="1" step="0.01" value={cfgRescale} onChange={(e) => patch({ cfgRescale: numberValue(e.target.value, cfgRescale) })} />
           <span>{cfgRescale.toFixed(2)}</span>
         </div>
       </div>
@@ -358,14 +358,14 @@ export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; sett
       <div className="ndp-setting-item">
         <label>张数 / 种子</label>
         <div className="ndp-row">
-          <input className="ndp-input" type="number" min={1} max={8} value={nSamples} onChange={(e) => patch({ nSamples: intValue(e.target.value, nSamples) })} />
-          <input className="ndp-input" type="number" min={-1} max={4294967295} value={seed} onChange={(e) => patch({ seed: intValue(e.target.value, seed) })} />
+          <input aria-label="生成张数" className="ndp-input" type="number" min={1} max={8} value={nSamples} onChange={(e) => patch({ nSamples: intValue(e.target.value, nSamples) })} />
+          <input aria-label="随机种子" className="ndp-input" type="number" min={-1} max={4294967295} value={seed} onChange={(e) => patch({ seed: intValue(e.target.value, seed) })} />
         </div>
       </div>
 
       <div className="ndp-setting-item">
-        <label>输出目录</label>
-        <input className="ndp-input" value={outputDir} onChange={(e) => patch({ outputDir: e.target.value })} />
+        <label htmlFor="ndp-novelai-output-dir">输出目录</label>
+        <input id="ndp-novelai-output-dir" className="ndp-input" value={outputDir} onChange={(e) => patch({ outputDir: e.target.value })} />
         <p className="ndp-setting-hint">相对应用数据目录，默认 generated-images。</p>
       </div>
     </div>
