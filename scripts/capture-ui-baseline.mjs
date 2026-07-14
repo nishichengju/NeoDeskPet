@@ -563,6 +563,9 @@ function installSettingsMock(page) {
           throw new Error('baseline TTS scan failed')
         },
         listAIModels: async () => ({ ok: false, models: [], error: 'baseline AI model list failed' }),
+        setSecret: async () => {
+          throw new Error('baseline secret save failed')
+        },
         openMemory: async () => undefined,
         closeCurrent: async () => undefined,
       },
@@ -781,7 +784,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifyAiModelErrors: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -1697,6 +1700,44 @@ async function runUiBaseline(browser) {
     }
 
     let settingsConfirmDialog = null
+    let settingsSecretSaveError = null
+    if (baseline.verifySecretSaveError) {
+      await page.getByRole('button', { name: 'API 连接', exact: true }).click()
+      const apiKeyInput = page.getByLabel('API Key', { exact: true })
+      await apiKeyInput.fill('baseline-secret')
+      await apiKeyInput.press('Tab')
+      const secretError = page.getByRole('alert').filter({ hasText: '密钥保存失败' })
+      await secretError.waitFor({ state: 'visible' })
+      settingsSecretSaveError = {
+        invalid: await apiKeyInput.getAttribute('aria-invalid'),
+        describedBy: await apiKeyInput.getAttribute('aria-describedby'),
+        errorId: await secretError.getAttribute('id'),
+        role: await secretError.getAttribute('role'),
+        live: await secretError.getAttribute('aria-live'),
+        atomic: await secretError.getAttribute('aria-atomic'),
+        globalSaveState: await page.locator('.ndp-settings-root').getAttribute('data-save-state'),
+      }
+      const secretScreenshotPath = path.join(outputDir, `${baseline.name}-secret-save-error.png`)
+      settingsSecretSaveError.screenshot = path.relative(projectRoot, secretScreenshotPath)
+      await page.screenshot({ path: secretScreenshotPath })
+      await apiKeyInput.fill('baseline-secret-retry')
+      settingsSecretSaveError.clearedOnEdit = await apiKeyInput.evaluate((element) => (
+        element.getAttribute('aria-invalid') === 'false'
+        && !element.hasAttribute('aria-describedby')
+        && !document.getElementById('ndp-secret-ai-main-error')
+      ))
+      if (settingsSecretSaveError.invalid !== 'true' || settingsSecretSaveError.describedBy !== 'ndp-secret-ai-main-error') {
+        failures.push('secret save error was not associated with the API Key input')
+      }
+      if (settingsSecretSaveError.errorId !== 'ndp-secret-ai-main-error' || settingsSecretSaveError.role !== 'alert' || settingsSecretSaveError.live !== 'assertive' || settingsSecretSaveError.atomic !== 'true') {
+        failures.push('secret save error live region is incomplete')
+      }
+      if (settingsSecretSaveError.globalSaveState !== 'idle') failures.push('secret save error was duplicated in the global save state')
+      if (!settingsSecretSaveError.clearedOnEdit) failures.push('secret save error did not clear after editing')
+      await page.getByRole('button', { name: 'Live2D', exact: true }).click()
+      await page.getByRole('heading', { name: 'Live2D 模型设置', exact: true }).waitFor({ state: 'visible' })
+    }
+
     let settingsAiModelErrors = null
     if (baseline.verifyAiModelErrors) {
       await page.getByRole('button', { name: 'API 连接', exact: true }).click()
@@ -1709,7 +1750,9 @@ async function runUiBaseline(browser) {
       await mainError.waitFor({ state: 'visible' })
       const main = {
         baseUrlDescribedBy: await baseUrlInput.getAttribute('aria-describedby'),
+        baseUrlInvalid: await baseUrlInput.getAttribute('aria-invalid'),
         modelDescribedBy: await modelInput.getAttribute('aria-describedby'),
+        modelInvalid: await modelInput.getAttribute('aria-invalid'),
         keyDescribedBy: await apiKeyInput.getAttribute('aria-describedby'),
         buttonDescribedBy: await fetchModelsButton.getAttribute('aria-describedby'),
         busy: await fetchModelsButton.getAttribute('aria-busy'),
@@ -1762,6 +1805,7 @@ async function runUiBaseline(browser) {
       if (mainDescriptionIds.some((value) => value !== 'ndp-ai-model-list-error')) {
         failures.push('main AI model error was not associated with the connection controls')
       }
+      if (main.baseUrlInvalid != null || main.modelInvalid != null) failures.push('joint AI model error marked a single field invalid')
       if (main.busy !== 'false') failures.push(`main AI model button busy state ended as ${main.busy}`)
       if (main.errorId !== 'ndp-ai-model-list-error' || main.role !== 'alert' || main.live !== 'assertive' || main.atomic !== 'true') {
         failures.push('main AI model error live region is incomplete')
@@ -1982,6 +2026,7 @@ async function runUiBaseline(browser) {
       settingsNavigation,
       settingsSearch,
       settingsTabs,
+      settingsSecretSaveError,
       settingsAiModelErrors,
       settingsResourceErrors,
       settingsMcpImport,

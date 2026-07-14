@@ -108,7 +108,11 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
             result = bound(...args)
           } catch (error) {
             if (sequence === saveSequenceRef.current) {
-              setSaveState({ state: 'error', message: error instanceof Error ? error.message : String(error) })
+              setSaveState(
+                property === 'setSecret'
+                  ? { state: 'idle', message: '' }
+                  : { state: 'error', message: error instanceof Error ? error.message : String(error) },
+              )
             }
             throw error
           }
@@ -124,7 +128,11 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
             },
             (error) => {
               if (sequence === saveSequenceRef.current) {
-                setSaveState({ state: 'error', message: error instanceof Error ? error.message : String(error) })
+                setSaveState(
+                  property === 'setSecret'
+                    ? { state: 'idle', message: '' }
+                    : { state: 'error', message: error instanceof Error ? error.message : String(error) },
+                )
               }
               throw error
             },

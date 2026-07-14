@@ -1378,3 +1378,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-model-list-error.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-compression-model-error.png`，错误分别位于主模型拉取按钮下方和高级压缩模型区内，未改变输入宽度、按钮排列或高级区布局。UI 报告中主错误的 Key/Base URL/model/button 描述关联均为 `ndp-ai-model-list-error`，压缩错误的 source/model/button 关联均为 `ndp-ai-compression-model-list-error`；两类 busy 最终为 false、`clearedOnEdit=true`、live-region 为 `alert/assertive/atomic`。配置档选择控件仅在实际选择“使用已保存 API 配置”时出现，代码已接入同一描述关联，当前基线使用默认主 API 来源覆盖其余联合路径。
+
+## P2-3：无障碍与交互一致性（第六十五批）
+
+- 验证日期：2026-07-14
+- 优化范围：Settings 密钥保存/清除失败的字段级错误、重复播报抑制和编辑恢复
+
+| 检查 | 结果 |
+| --- | --- |
+| 字段错误 | `SecretSettingInput` 失败时输入框 `aria-invalid=true`，通过 target 稳定 id 关联错误；清除按钮同步关联 |
+| 状态播报 | 字段错误为 atomic `alert/assertive`；`setSecret` 失败不再同时触发顶部全局 alert，保存状态回到 idle |
+| 编辑恢复 | 用户继续输入后局部错误、描述关联和 invalid 状态立即清除；失焦仍按原逻辑重新保存 |
+| 诊断日志 | 已处理的密钥失败保留 `console.warn`，不再作为未处理 runtime error 进入 UI 门禁 |
+| `npm test` | 85 个测试文件、363 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；Secret input chunk 1.27 kB、Settings chunk 15.46 kB、主 CSS 42.93 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，密钥脱敏、权限、持久化与媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；默认 Settings 场景真实触发 API Key 失焦保存失败并验证恢复，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-secret-save-error.png`，错误紧邻 API Key 输入和帮助文本，红色提示没有改变输入/清除按钮宽度或后续 Base URL 布局。UI 报告中的 `invalid=true`、`describedBy=ndp-secret-ai-main-error`、`role=alert`、`live=assertive`、`atomic=true`、`globalSaveState=idle`、`clearedOnEdit=true`。基线随后切换页面重挂组件再执行 AI 模型错误场景，避免未失焦草稿造成测试状态串扰；所有场景仍保持无 console error。

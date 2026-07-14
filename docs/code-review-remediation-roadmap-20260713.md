@@ -1128,6 +1128,13 @@ AI 与能力
 - UI baseline 模拟主模型和压缩模型列表失败，验证所有相关控件的描述 id、按钮 busy 结束态、两类 live-region 和编辑清理；两张错误态截图人工检查无布局回归。25 个场景全部 0 failure、0 console error、无溢出。
 - `npm test` 共 85 个测试文件、363 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续审计 Settings 中其他异步保存失败是否只写入控制台而没有用户可见反馈，优先选择可可靠模拟和恢复的窄边界。
 
+第六十五批进展（2026-07-14）：
+
+- `SecretSettingInput` 在保存或清除密钥失败时增加字段级错误：输入框设置 `aria-invalid=true`，通过按 target 稳定生成的 id 关联错误，错误使用 atomic `alert/assertive`；继续编辑时清除错误和 invalid 状态。清除按钮在失败后也关联同一错误。
+- Settings 全局保存代理对 `setSecret` 失败不再重复显示第二个 assertive 错误，而是回到 idle，由字段组件负责唯一播报；其他设置 mutation 的全局保存失败行为保持不变。已处理的密钥失败日志由 error 降为 warning，仍保留诊断信息且不再被运行时错误门禁误判。
+- 新增统一 `.ndp-setting-error` 颜色，浏览器基线实际输入密钥、失焦触发失败，验证字段 invalid/描述关联、局部 live-region、全局 idle 和编辑清理；错误态截图人工检查无布局回归。25 个场景全部 0 failure、0 console error、无溢出。
+- `npm test` 共 85 个测试文件、363 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批可继续审计 Tools/Persona 等设置 mutation 的 catch 分支，区分已有全局错误覆盖与真正缺失的局部恢复信息。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：
