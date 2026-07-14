@@ -256,9 +256,9 @@ export function AISettingsTab(props: {
           <h3>API 连接</h3>
 
       <div className="ndp-setting-item">
-        <label>已保存的 API 配置</label>
+        <label htmlFor="ndp-ai-profile">已保存的 API 配置</label>
         <div className="ndp-row">
-          <select className="ndp-select" value={activeAiProfileId ?? ''} onChange={(e) => void applyApiProfile(e.target.value)}>
+          <select id="ndp-ai-profile" className="ndp-select" value={activeAiProfileId ?? ''} onChange={(e) => void applyApiProfile(e.target.value)}>
             <option value="">（无）</option>
             {profiles.map((p) => (
               <option key={p.id} value={p.id}>
@@ -269,6 +269,7 @@ export function AISettingsTab(props: {
         </div>
         <div className="ndp-setting-actions">
           <input
+            aria-label="新配置名称"
             type="text"
             className="ndp-input"
             value={profileName}
@@ -289,8 +290,8 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>接口格式</label>
-        <select className="ndp-select" value={apiMode} onChange={(e) => switchApiMode(e.target.value as AIApiMode)}>
+        <label htmlFor="ndp-ai-api-mode">接口格式</label>
+        <select id="ndp-ai-api-mode" className="ndp-select" value={apiMode} onChange={(e) => switchApiMode(e.target.value as AIApiMode)}>
           <option value="openai-compatible">OpenAI 兼容（/chat/completions）</option>
           <option value="claude">Claude Messages（/v1/messages）</option>
         </select>
@@ -387,8 +388,9 @@ export function AISettingsTab(props: {
           <h3>视觉路由</h3>
 
       <div className="ndp-setting-item">
-        <label>视觉处理方式</label>
+        <label htmlFor="ndp-ai-vision-routing-mode">视觉处理方式</label>
         <select
+          id="ndp-ai-vision-routing-mode"
           className="ndp-select"
           value={visionRoutingMode}
           onChange={(e) => api?.setAISettings({ visionRoutingMode: e.target.value as AIVisionRoutingMode })}
@@ -404,8 +406,9 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>当前主模型的视觉能力</label>
+        <label htmlFor="ndp-ai-vision-capability">当前主模型的视觉能力</label>
         <select
+          id="ndp-ai-vision-capability"
           className="ndp-select"
           value={visionCapability}
           disabled={visionRoutingMode === 'off'}
@@ -421,8 +424,9 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>外挂视觉 API 配置</label>
+        <label htmlFor="ndp-ai-vision-profile">外挂视觉 API 配置</label>
         <select
+          id="ndp-ai-vision-profile"
           className="ndp-select"
           value={visionFallbackProfileId}
           disabled={visionRoutingMode === 'off' || visionRoutingMode === 'main-only'}
@@ -441,8 +445,9 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>外挂视觉模型覆盖</label>
+        <label htmlFor="ndp-ai-vision-model">外挂视觉模型覆盖</label>
         <input
+          id="ndp-ai-vision-model"
           type="text"
           className="ndp-input"
           value={visionFallbackModel}
@@ -469,8 +474,9 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>单次最多查看图片数：{visionMaxImagesPerLook}</label>
+        <label htmlFor="ndp-ai-vision-max-images">单次最多查看图片数：{visionMaxImagesPerLook}</label>
         <input
+          id="ndp-ai-vision-max-images"
           type="number"
           className="ndp-input"
           min={1}
@@ -505,8 +511,9 @@ export function AISettingsTab(props: {
       <h3>模型与生成</h3>
 
       <div className="ndp-setting-item">
-        <label>思考提供商</label>
+        <label htmlFor="ndp-ai-thinking-provider">思考提供商</label>
         <select
+          id="ndp-ai-thinking-provider"
           className="ndp-select"
           value={thinkingProvider}
           onChange={(e) => api?.setAISettings({ thinkingProvider: e.target.value as AIReasoningProvider })}
@@ -520,10 +527,11 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>思考强度（{providerDisplayName}）</label>
+        <label htmlFor="ndp-ai-thinking-effort">思考强度（{providerDisplayName}）</label>
         {selectedReasoningProvider === 'openai' ? (
           <>
             <select
+              id="ndp-ai-thinking-effort"
               className="ndp-select"
               value={openaiReasoningEffort}
               onChange={(e) => applyProviderThinkingLevel('openai', e.target.value as OpenAIReasoningEffort)}
@@ -543,6 +551,7 @@ export function AISettingsTab(props: {
         {selectedReasoningProvider === 'claude' ? (
           <>
             <select
+              id="ndp-ai-thinking-effort"
               className="ndp-select"
               value={claudeThinkingEffort}
               onChange={(e) => applyProviderThinkingLevel('claude', e.target.value as ClaudeThinkingEffort)}
@@ -560,6 +569,7 @@ export function AISettingsTab(props: {
         {selectedReasoningProvider === 'gemini' ? (
           <>
             <select
+              id="ndp-ai-thinking-effort"
               className="ndp-select"
               value={geminiThinkingEffort}
               onChange={(e) => applyProviderThinkingLevel('gemini', e.target.value as GeminiThinkingEffort)}
@@ -579,9 +589,10 @@ export function AISettingsTab(props: {
 
       {/* Temperature */}
       <div className="ndp-setting-item">
-        <label>温度 (Temperature)</label>
+        <label htmlFor="ndp-ai-temperature">温度 (Temperature)</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-ai-temperature"
             type="range"
             min="0"
             max="2"
@@ -596,9 +607,10 @@ export function AISettingsTab(props: {
 
       {/* Max Tokens */}
       <div className="ndp-setting-item">
-        <label>最大回复长度</label>
+        <label htmlFor="ndp-ai-max-tokens">最大回复长度</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-ai-max-tokens"
             type="range"
             min="1000"
             max="128000"
@@ -613,9 +625,10 @@ export function AISettingsTab(props: {
 
       {/* Max Context Tokens */}
       <div className="ndp-setting-item">
-        <label>最大上下文长度</label>
+        <label htmlFor="ndp-ai-max-context-tokens">最大上下文长度</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-ai-max-context-tokens"
             type="range"
             min="4000"
             max="1000000"
@@ -789,8 +802,9 @@ export function AISettingsTab(props: {
       <h3>Agent 设置</h3>
 
       <div className="ndp-setting-item">
-        <label>工具执行模式</label>
+        <label htmlFor="ndp-ai-tool-mode">工具执行模式</label>
         <select
+          id="ndp-ai-tool-mode"
           className="ndp-select"
           value={toolMode}
           onChange={(e) => api?.setOrchestratorSettings({ toolCallingMode: e.target.value as 'auto' | 'native' | 'text' })}
@@ -805,9 +819,10 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>Agent 最大回合数 (maxTurns)</label>
+        <label htmlFor="ndp-ai-agent-max-turns">Agent 最大回合数 (maxTurns)</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-ai-agent-max-turns"
             type="range"
             min="1"
             max="30"
@@ -848,8 +863,9 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>托管 Skill 目录（可选）</label>
+        <label htmlFor="ndp-ai-skill-managed-dir">托管 Skill 目录（可选）</label>
         <input
+          id="ndp-ai-skill-managed-dir"
           type="text"
           className="ndp-input"
           value={skillManagedDir}
@@ -970,8 +986,9 @@ export function AISettingsTab(props: {
 
       {/* System Prompt */}
       <div className="ndp-setting-item">
-        <label>系统提示词</label>
+        <label htmlFor="ndp-ai-system-prompt">系统提示词</label>
         <textarea
+          id="ndp-ai-system-prompt"
           className="ndp-textarea"
           value={systemPrompt}
           placeholder="在这里填写桌宠的人设（system prompt）"

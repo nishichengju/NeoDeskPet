@@ -1440,3 +1440,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-live2d-controls.png`、`settings-default-860x680-scale100-bubble-controls.png` 与 `settings-default-860x680-scale100-task-panel-controls.png`，新增标签关联未改变选择框、滑块、样式按钮网格或帮助文本布局。UI 报告中的计数分别为 Live2D 3、气泡 4、任务面板 2，并继续验证上一批语音控件 4/8 项。本轮收口 9 个缺名控件，默认视图剩余 65 个；下一批进入 API 连接、模型与生成、视觉和 Agent，仍需区分默认可见与条件展开控件。
+
+## P2-3：无障碍与交互一致性（第六十八批）
+
+- 验证日期：2026-07-14
+- 优化范围：API 连接、模型与生成、视觉和 Agent 设置中 19 个默认或互斥可见控件的程序化名称
+
+| 检查 | 结果 |
+| --- | --- |
+| API 连接 | 已保存配置、接口格式通过 `label/htmlFor` 关联；配置名称输入使用“新配置名称”独立名称，避免误归到配置下拉框 |
+| 模型与生成 | 思考提供商、三种互斥提供商的思考强度、温度、最大回复长度和最大上下文长度均有稳定名称 |
+| 视觉 | 视觉路由、主模型视觉能力、外挂配置、外挂模型覆盖和单次图片上限通过 `label/htmlFor` 关联 |
+| Agent | 工具执行模式、最大回合数、托管 Skill 目录和系统提示词通过 `label/htmlFor` 关联 |
+| 聚焦测试 | `settingsTabs` 共 10 个用例通过，覆盖 AI 四页静态 label/id 契约 |
+| `npm test` | 85 个测试文件、366 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；AI chunk 25.89 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，AI 代理、设置持久化、权限与媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；真实无障碍树定位 API 连接 3、当前模型与生成 5、视觉 5、Agent 4 项，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-connection-controls.png`、`settings-default-860x680-scale100-ai-generation-controls.png`、`settings-default-860x680-scale100-ai-vision-controls.png` 与 `settings-default-860x680-scale100-ai-agent-controls.png`，新增关联未改变输入宽度、滑块、禁用态或页面滚动布局。源码共处理 19 个控件；默认运行态只会渲染 OpenAI/Claude/Gemini 三种思考强度中的一个，因此 UI 报告实际定位 17 个当前可见控件，另外两条互斥分支由相同稳定 id 的静态契约覆盖。默认视图剩余 46 个缺名控件；高级上下文压缩和自定义工具 API 等条件区域仍保留到动态状态专项审计。

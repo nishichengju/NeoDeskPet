@@ -784,7 +784,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -1950,6 +1950,61 @@ async function runUiBaseline(browser) {
       }
     }
 
+    let settingsAiControlNames = null
+    if (baseline.verifySettingsAiControlNames) {
+      await page.getByRole('button', { name: 'API 连接', exact: true }).click()
+      const connectionControls = [
+        page.getByRole('combobox', { name: '已保存的 API 配置', exact: true }),
+        page.getByRole('textbox', { name: '新配置名称', exact: true }),
+        page.getByRole('combobox', { name: '接口格式', exact: true }),
+      ]
+      await Promise.all(connectionControls.map((control) => control.waitFor({ state: 'visible' })))
+      const connectionScreenshotPath = path.join(outputDir, `${baseline.name}-ai-connection-controls.png`)
+      await page.screenshot({ path: connectionScreenshotPath })
+
+      await page.getByRole('button', { name: '模型与生成', exact: true }).click()
+      const generationControls = [
+        page.getByRole('combobox', { name: '思考提供商', exact: true }),
+        page.getByRole('combobox', { name: /^思考强度（/ }),
+        page.getByRole('slider', { name: '温度 (Temperature)', exact: true }),
+        page.getByRole('slider', { name: '最大回复长度', exact: true }),
+        page.getByRole('slider', { name: '最大上下文长度', exact: true }),
+      ]
+      await Promise.all(generationControls.map((control) => control.waitFor({ state: 'visible' })))
+      const generationScreenshotPath = path.join(outputDir, `${baseline.name}-ai-generation-controls.png`)
+      await page.screenshot({ path: generationScreenshotPath })
+
+      await page.getByRole('button', { name: '视觉', exact: true }).click()
+      const visionControls = [
+        page.getByRole('combobox', { name: '视觉处理方式', exact: true }),
+        page.getByRole('combobox', { name: '当前主模型的视觉能力', exact: true }),
+        page.getByRole('combobox', { name: '外挂视觉 API 配置', exact: true }),
+        page.getByRole('textbox', { name: '外挂视觉模型覆盖', exact: true }),
+        page.getByRole('spinbutton', { name: /^单次最多查看图片数：/ }),
+      ]
+      await Promise.all(visionControls.map((control) => control.waitFor({ state: 'visible' })))
+      const visionScreenshotPath = path.join(outputDir, `${baseline.name}-ai-vision-controls.png`)
+      await page.screenshot({ path: visionScreenshotPath })
+
+      await page.getByRole('button', { name: 'Agent', exact: true }).click()
+      const agentControls = [
+        page.getByRole('combobox', { name: '工具执行模式', exact: true }),
+        page.getByRole('slider', { name: 'Agent 最大回合数 (maxTurns)', exact: true }),
+        page.getByRole('textbox', { name: '托管 Skill 目录（可选）', exact: true }),
+        page.getByRole('textbox', { name: '系统提示词', exact: true }),
+      ]
+      await Promise.all(agentControls.map((control) => control.waitFor({ state: 'visible' })))
+      const agentScreenshotPath = path.join(outputDir, `${baseline.name}-ai-agent-controls.png`)
+      await page.screenshot({ path: agentScreenshotPath })
+
+      settingsAiControlNames = {
+        connection: { count: connectionControls.length, screenshot: path.relative(projectRoot, connectionScreenshotPath) },
+        generation: { count: generationControls.length, screenshot: path.relative(projectRoot, generationScreenshotPath) },
+        vision: { count: visionControls.length, screenshot: path.relative(projectRoot, visionScreenshotPath) },
+        agent: { count: agentControls.length, screenshot: path.relative(projectRoot, agentScreenshotPath) },
+      }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2095,6 +2150,7 @@ async function runUiBaseline(browser) {
       settingsResourceErrors,
       settingsVoiceControlNames,
       settingsAppearanceControlNames,
+      settingsAiControlNames,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

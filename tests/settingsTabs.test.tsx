@@ -170,7 +170,28 @@ describe('settings tabs', () => {
       activeAiProfileId: undefined,
       view: 'generation',
     }))
+    const visionHtml = renderToStaticMarkup(createElement(AISettingsTab, {
+      api,
+      aiSettings: undefined,
+      orchestrator: undefined,
+      aiProfiles: undefined,
+      activeAiProfileId: undefined,
+      view: 'vision',
+    }))
+    const agentHtml = renderToStaticMarkup(createElement(AISettingsTab, {
+      api,
+      aiSettings: undefined,
+      orchestrator: undefined,
+      aiProfiles: undefined,
+      activeAiProfileId: undefined,
+      view: 'agent',
+    }))
 
+    expect(connectionHtml).toContain('<label for="ndp-ai-profile">已保存的 API 配置</label>')
+    expect(connectionHtml).toContain('id="ndp-ai-profile"')
+    expect(connectionHtml).toContain('aria-label="新配置名称"')
+    expect(connectionHtml).toContain('<label for="ndp-ai-api-mode">接口格式</label>')
+    expect(connectionHtml).toContain('id="ndp-ai-api-mode"')
     expect(connectionHtml).toContain('<label for="ndp-ai-base-url">API Base URL</label>')
     expect(connectionHtml).toContain('<label for="ndp-ai-model">模型名称</label>')
     expect(connectionHtml).toContain('aria-busy="false"')
@@ -178,5 +199,33 @@ describe('settings tabs', () => {
     expect(connectionHtml).toContain('aria-invalid="false"')
     expect(generationHtml).toContain('aria-label="压缩 API 来源"')
     expect(generationHtml).toContain('aria-label="压缩模型名称"')
+    expect(generationHtml).toContain('<label for="ndp-ai-thinking-provider">思考提供商</label>')
+    expect(generationHtml).toContain('id="ndp-ai-thinking-provider"')
+    expect(generationHtml).toContain('for="ndp-ai-thinking-effort"')
+    expect(generationHtml).toContain('id="ndp-ai-thinking-effort"')
+    expect(generationHtml).toContain('<label for="ndp-ai-temperature">温度 (Temperature)</label>')
+    expect(generationHtml).toContain('id="ndp-ai-temperature"')
+    expect(generationHtml).toContain('<label for="ndp-ai-max-tokens">最大回复长度</label>')
+    expect(generationHtml).toContain('id="ndp-ai-max-tokens"')
+    expect(generationHtml).toContain('<label for="ndp-ai-max-context-tokens">最大上下文长度</label>')
+    expect(generationHtml).toContain('id="ndp-ai-max-context-tokens"')
+    expect(visionHtml).toContain('<label for="ndp-ai-vision-routing-mode">视觉处理方式</label>')
+    expect(visionHtml).toContain('id="ndp-ai-vision-routing-mode"')
+    expect(visionHtml).toContain('<label for="ndp-ai-vision-capability">当前主模型的视觉能力</label>')
+    expect(visionHtml).toContain('id="ndp-ai-vision-capability"')
+    expect(visionHtml).toContain('<label for="ndp-ai-vision-profile">外挂视觉 API 配置</label>')
+    expect(visionHtml).toContain('id="ndp-ai-vision-profile"')
+    expect(visionHtml).toContain('<label for="ndp-ai-vision-model">外挂视觉模型覆盖</label>')
+    expect(visionHtml).toContain('id="ndp-ai-vision-model"')
+    expect(visionHtml).toContain('for="ndp-ai-vision-max-images"')
+    expect(visionHtml).toContain('id="ndp-ai-vision-max-images"')
+    expect(agentHtml).toContain('<label for="ndp-ai-tool-mode">工具执行模式</label>')
+    expect(agentHtml).toContain('id="ndp-ai-tool-mode"')
+    expect(agentHtml).toContain('<label for="ndp-ai-agent-max-turns">Agent 最大回合数 (maxTurns)</label>')
+    expect(agentHtml).toContain('id="ndp-ai-agent-max-turns"')
+    expect(agentHtml).toContain('<label for="ndp-ai-skill-managed-dir">托管 Skill 目录（可选）</label>')
+    expect(agentHtml).toContain('id="ndp-ai-skill-managed-dir"')
+    expect(agentHtml).toContain('<label for="ndp-ai-system-prompt">系统提示词</label>')
+    expect(agentHtml).toContain('id="ndp-ai-system-prompt"')
   })
 })

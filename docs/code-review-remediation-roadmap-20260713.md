@@ -1148,6 +1148,12 @@ AI 与能力
 - UI baseline 在默认 Settings 场景逐页进入 Live2D、气泡和任务面板，用 role + accessible name 定位 3/4/2 项，并为三个页面分别保留截图。25 个场景全部 0 failure、0 console error、无横向或纵向溢出；截图确认选择框、滑块、气泡样式按钮网格和帮助文本未发生布局回归。
 - `settingsTabs` 增至 10 个用例，全量为 85 个测试文件、366 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图还剩 65 个缺名控件，下一批处理 API 连接、模型与生成、视觉和 Agent；条件配置、折叠高级区域和动态配置档仍要展开后复审。
 
+第六十八批进展（2026-07-14）：
+
+- 完成 AI 四页 19 个默认或互斥可见控件的程序化名称：API 连接 3 项、模型与生成 7 项、视觉 5 项、Agent 4 项。单一视觉标签通过稳定 id 与 `label/htmlFor` 关联；配置名称输入单独命名为“新配置名称”，不会与“已保存的 API 配置”下拉框混淆。
+- OpenAI、Claude、Gemini 三种思考强度下拉互斥渲染并共享同一稳定 id；静态契约覆盖三条 JSX 分支，默认浏览器基线验证当前 OpenAI 分支。UI baseline 逐页按 role + accessible name 定位 API 连接 3、模型与生成 5、视觉 5、Agent 4 项，并分别保存截图；25 个场景全部 0 failure、0 console error、无溢出。
+- `settingsTabs` 保持 10 个用例但扩展 AI 四页断言，全量 85 个测试文件、366 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图还剩 46 个缺名控件，下一批处理 NovelAI；高级上下文压缩、自定义工具 API 和其他条件区域留到动态状态专项审计。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：
