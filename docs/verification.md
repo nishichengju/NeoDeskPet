@@ -1335,3 +1335,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-mcp-import-error.png`，错误文本位于导入框和操作按钮之间，未改变工具中心宽度、按钮排列或 MCP Server 列表布局。UI 报告中的 `invalid=true`、`describedBy=ndp-mcp-import-error`、`role=alert`、`live=assertive`、`atomic=true`、`clearedOnEdit=true`，该场景无 failure 或 console error。本批只处理用户可直接修正的 MCP JSON 校验错误；AI 模型列表、ASR 麦克风和 TTS 资源扫描属于异步资源错误，尚未与对应输入控件建立统一关联，留待下一批继续审计。
+
+## P2-3：无障碍与交互一致性（第六十三批）
+
+- 验证日期：2026-07-14
+- 优化范围：ASR 麦克风枚举与 TTS 本地资源扫描错误的控件关联、加载/无效状态和错误播报
+
+| 检查 | 结果 |
+| --- | --- |
+| ASR 控件关系 | “选择麦克风” label 与下拉框通过 id 关联；枚举期间暴露 `aria-busy`，错误同时描述下拉框和刷新按钮 |
+| TTS 控件关系 | 安装目录 label 与输入框通过 id 关联；扫描失败时目录输入 `aria-invalid=true`，目录及 GPT/SoVITS/参考音频控件共享错误描述 |
+| 状态播报 | ASR 与 TTS 错误均为 atomic `alert/assertive`；修改 TTS 安装目录后旧错误、描述关联和 invalid 状态立即清除 |
+| 聚焦测试 | `settingsTabs` 共 6 个用例通过，新增 ASR/TTS label 与初始状态静态契约 |
+| `npm test` | 85 个测试文件、362 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；ASR chunk 7.30 kB、TTS chunk 7.02 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，权限、持久化、语音、媒体 Range 与拒绝路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；默认 Settings 场景模拟麦克风权限拒绝和 TTS 扫描失败，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-asr-device-error.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-tts-scan-error.png`，ASR 错误位于设备帮助文本下方，TTS 错误位于资源配置末尾，均未挤压控件宽度或造成文字重叠。UI 报告中 ASR 的 select/button `describedBy` 均为 `ndp-asr-mic-error`、busy 最终为 false；TTS 的 `invalid=true`、目录与模型描述关联均为 `ndp-tts-options-error`、`clearedOnEdit=true`；两类错误均为 `alert/assertive/atomic`。AI 模型列表错误同时可能来自凭据、Base URL、配置档和模型服务，本批没有把它粗略绑定到模型名称字段，下一批单独设计联合错误反馈。

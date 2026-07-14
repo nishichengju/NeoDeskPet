@@ -3,9 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { getApi } from '../src/neoDeskPetApi'
 import { PersonaSettingsTab } from '../src/windows/settings/PersonaTab'
+import { AsrSettingsTab } from '../src/windows/settings/AsrTab'
 import { getSettingsTabTargetIndex } from '../src/windows/settings/settingsTabs'
 import { parseMcpImportText } from '../src/windows/settings/mcpImport'
 import { ToolsSettingsTab } from '../src/windows/settings/ToolsTab'
+import { TtsSettingsTab } from '../src/windows/settings/TtsTab'
 
 const api = {} as ReturnType<typeof getApi>
 
@@ -63,5 +65,21 @@ describe('settings tabs', () => {
       command: 'node',
     })
     expect(() => parseMcpImportText('{"mcpServers":{}}')).toThrow('未解析到任何 MCP Server')
+  })
+
+  it('associates the ASR microphone label with its device selector', () => {
+    const html = renderToStaticMarkup(createElement(AsrSettingsTab, { api, asrSettings: undefined }))
+
+    expect(html).toContain('<label for="ndp-asr-mic-device">选择麦克风</label>')
+    expect(html).toContain('id="ndp-asr-mic-device"')
+    expect(html).toContain('aria-busy="false"')
+  })
+
+  it('associates the TTS installation directory label and initial validity', () => {
+    const html = renderToStaticMarkup(createElement(TtsSettingsTab, { api, ttsSettings: undefined }))
+
+    expect(html).toContain('<label for="ndp-tts-root">GPT-SoVITS 安装目录（绝对路径）</label>')
+    expect(html).toContain('id="ndp-tts-root"')
+    expect(html).toContain('aria-invalid="false"')
   })
 })

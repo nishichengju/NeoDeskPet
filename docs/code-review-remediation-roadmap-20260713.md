@@ -1114,6 +1114,13 @@ AI 与能力
 - UI baseline 的默认 Settings 场景实际输入坏 JSON 并触发“覆盖导入”，验证 textarea 为 invalid、错误 id/描述关联正确、live-region 为 `alert/assertive/atomic`，继续输入后错误节点和描述关联均消失。错误态截图完成检查，25 个场景全部 0 failure、0 console error、无溢出。
 - `npm test` 共 85 个测试文件、360 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续处理 AI 模型列表、ASR 麦克风和 TTS 资源扫描等异步错误与对应控件的关联。
 
+第六十三批进展（2026-07-14）：
+
+- ASR 麦克风下拉框补齐 label/id 关联，枚举期间暴露 `aria-busy`；权限或设备枚举失败时，固定错误 id 同时通过 `aria-describedby` 关联下拉框和“刷新”按钮，并使用 atomic `alert/assertive`。该错误属于资源访问失败，不把当前麦克风值误标为格式无效。
+- TTS 安装目录补齐 label/id 关联；资源扫描失败时目录输入设置 `aria-invalid=true`，安装目录、GPT 模型、SoVITS 模型和参考音频控件通过固定 id 关联错误，错误使用 atomic `alert/assertive`。用户修改安装目录后立即清除旧错误和 invalid 状态，失焦时继续按原逻辑重新扫描。
+- UI baseline 在默认 Settings 场景模拟麦克风权限拒绝和 TTS 扫描失败，分别验证控件关联、ASR busy 结束态、TTS invalid/编辑清理和两类 live-region；两张错误态截图人工检查无布局回归。25 个场景全部 0 failure、0 console error、无溢出。
+- `npm test` 共 85 个测试文件、362 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续审计 AI 主模型与上下文压缩模型列表错误，重点避免把凭据、Base URL 和模型选择的联合失败错误归因给单一字段。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

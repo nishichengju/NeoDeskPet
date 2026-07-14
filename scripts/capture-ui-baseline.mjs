@@ -503,6 +503,15 @@ function installMemoryMock(page) {
 
 function installSettingsMock(page) {
   return page.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: async () => {
+          throw new Error('baseline microphone permission denied')
+        },
+        enumerateDevices: async () => [],
+      },
+    })
     const settings = {
       activePersonaId: 'default',
       aiProfiles: [],
@@ -550,6 +559,9 @@ function installSettingsMock(page) {
         onTasksChanged: () => off,
         getMcpState: async () => ({ servers: [], tools: [] }),
         onMcpChanged: () => off,
+        listTtsOptions: async () => {
+          throw new Error('baseline TTS scan failed')
+        },
         openMemory: async () => undefined,
         closeCurrent: async () => undefined,
       },
@@ -768,7 +780,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -1684,6 +1696,70 @@ async function runUiBaseline(browser) {
     }
 
     let settingsConfirmDialog = null
+    let settingsResourceErrors = null
+    if (baseline.verifySettingsResourceErrors) {
+      await page.getByRole('button', { name: '语音识别', exact: true }).click()
+      const micSelect = page.getByRole('combobox', { name: '选择麦克风' })
+      await micSelect.waitFor({ state: 'visible' })
+      const asrError = page.getByRole('alert').filter({ hasText: '刷新失败' })
+      await asrError.waitFor({ state: 'visible' })
+      const refreshButton = page.getByRole('button', { name: '刷新', exact: true })
+      const asr = {
+        selectDescribedBy: await micSelect.getAttribute('aria-describedby'),
+        buttonDescribedBy: await refreshButton.getAttribute('aria-describedby'),
+        busy: await micSelect.getAttribute('aria-busy'),
+        errorId: await asrError.getAttribute('id'),
+        role: await asrError.getAttribute('role'),
+        live: await asrError.getAttribute('aria-live'),
+        atomic: await asrError.getAttribute('aria-atomic'),
+      }
+      const asrScreenshotPath = path.join(outputDir, `${baseline.name}-asr-device-error.png`)
+      asr.screenshot = path.relative(projectRoot, asrScreenshotPath)
+      await page.screenshot({ path: asrScreenshotPath })
+
+      await page.getByRole('button', { name: '语音合成', exact: true }).click()
+      const ttsRoot = page.getByRole('textbox', { name: 'GPT-SoVITS 安装目录（绝对路径）' })
+      await ttsRoot.waitFor({ state: 'visible' })
+      const ttsError = page.getByRole('alert').filter({ hasText: '扫描失败' })
+      await ttsError.waitFor({ state: 'visible' })
+      await ttsError.scrollIntoViewIfNeeded()
+      const gptModel = page.locator('.ndp-setting-item').filter({ hasText: 'GPT 模型' }).getByRole('combobox')
+      const tts = {
+        invalid: await ttsRoot.getAttribute('aria-invalid'),
+        rootDescribedBy: await ttsRoot.getAttribute('aria-describedby'),
+        modelDescribedBy: await gptModel.getAttribute('aria-describedby'),
+        errorId: await ttsError.getAttribute('id'),
+        role: await ttsError.getAttribute('role'),
+        live: await ttsError.getAttribute('aria-live'),
+        atomic: await ttsError.getAttribute('aria-atomic'),
+      }
+      const ttsScreenshotPath = path.join(outputDir, `${baseline.name}-tts-scan-error.png`)
+      tts.screenshot = path.relative(projectRoot, ttsScreenshotPath)
+      await page.screenshot({ path: ttsScreenshotPath })
+      await ttsRoot.fill('G:\\baseline\\GPT-SoVITS')
+      tts.clearedOnEdit = await ttsRoot.evaluate((element) => (
+        element.getAttribute('aria-invalid') === 'false'
+        && !element.hasAttribute('aria-describedby')
+        && !document.getElementById('ndp-tts-options-error')
+      ))
+      settingsResourceErrors = { asr, tts }
+
+      if (asr.selectDescribedBy !== 'ndp-asr-mic-error' || asr.buttonDescribedBy !== 'ndp-asr-mic-error') {
+        failures.push('ASR device error was not associated with its controls')
+      }
+      if (asr.busy !== 'false') failures.push(`ASR device selector busy state ended as ${asr.busy}`)
+      if (asr.errorId !== 'ndp-asr-mic-error' || asr.role !== 'alert' || asr.live !== 'assertive' || asr.atomic !== 'true') {
+        failures.push('ASR device error live region is incomplete')
+      }
+      if (tts.invalid !== 'true' || tts.rootDescribedBy !== 'ndp-tts-options-error' || tts.modelDescribedBy !== 'ndp-tts-options-error') {
+        failures.push('TTS scan error was not associated with its resource controls')
+      }
+      if (tts.errorId !== 'ndp-tts-options-error' || tts.role !== 'alert' || tts.live !== 'assertive' || tts.atomic !== 'true') {
+        failures.push('TTS scan error live region is incomplete')
+      }
+      if (!tts.clearedOnEdit) failures.push('TTS scan error did not clear after editing the installation directory')
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -1824,6 +1900,7 @@ async function runUiBaseline(browser) {
       settingsNavigation,
       settingsSearch,
       settingsTabs,
+      settingsResourceErrors,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

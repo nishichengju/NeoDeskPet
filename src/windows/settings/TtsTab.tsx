@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AppSettings } from '../../../electron/types'
+import { getLiveRegionProps } from '../../components/liveRegion'
 import { getApi } from '../../neoDeskPetApi'
 
 export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSettings: AppSettings['tts'] | undefined }) {
@@ -29,6 +30,7 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
   >(null)
   const [optionsError, setOptionsError] = useState<string | null>(null)
   const lastOptionsRefreshAtRef = useRef(0)
+  const optionsErrorId = 'ndp-tts-options-error'
 
   const refreshOptions = useCallback(
     async (opts?: { force?: boolean }) => {
@@ -68,13 +70,19 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       <h3>TTS 语音</h3>
 
       <div className="ndp-setting-item">
-        <label>GPT-SoVITS 安装目录（绝对路径）</label>
+        <label htmlFor="ndp-tts-root">GPT-SoVITS 安装目录（绝对路径）</label>
         <input
+          id="ndp-tts-root"
           type="text"
           className="ndp-input"
           value={ttsRoot}
+          aria-describedby={optionsError ? optionsErrorId : undefined}
+          aria-invalid={Boolean(optionsError)}
           placeholder="留空则使用 APP_ROOT/GPT-SoVITS-v2_ProPlus"
-          onChange={(e) => api?.setTtsSettings({ ttsRoot: e.target.value })}
+          onChange={(e) => {
+            if (optionsError) setOptionsError(null)
+            api?.setTtsSettings({ ttsRoot: e.target.value })
+          }}
           onBlur={() => void refreshOptions({ force: true })}
         />
         <p className="ndp-setting-hint">
@@ -95,6 +103,7 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
         <select
           className="ndp-select"
           value={gptWeightsPath}
+          aria-describedby={optionsError ? optionsErrorId : undefined}
           onMouseDown={() => void refreshOptions()}
           onFocus={() => void refreshOptions()}
           onChange={(e) => api?.setTtsSettings({ gptWeightsPath: e.target.value })}
@@ -116,6 +125,7 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
         <select
           className="ndp-select"
           value={sovitsWeightsPath}
+          aria-describedby={optionsError ? optionsErrorId : undefined}
           onMouseDown={() => void refreshOptions()}
           onFocus={() => void refreshOptions()}
           onChange={(e) => api?.setTtsSettings({ sovitsWeightsPath: e.target.value })}
@@ -153,6 +163,7 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
         <select
           className="ndp-select"
           value={refAudioPath}
+          aria-describedby={optionsError ? optionsErrorId : undefined}
           onMouseDown={() => void refreshOptions()}
           onFocus={() => void refreshOptions()}
           onChange={(e) => onSelectRefAudio(e.target.value)}
@@ -261,7 +272,11 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       </div>
 
       {options?.ttsRoot ? <p className="ndp-setting-hint">扫描目录: {options.ttsRoot}</p> : null}
-      {optionsError ? <p className="ndp-setting-hint">扫描失败: {optionsError}</p> : null}
+      {optionsError ? (
+        <p id={optionsErrorId} className="ndp-setting-hint" {...getLiveRegionProps('assertive')}>
+          扫描失败: {optionsError}
+        </p>
+      ) : null}
     </div>
   )
 }

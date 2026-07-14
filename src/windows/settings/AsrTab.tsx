@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AppSettings } from '../../../electron/types'
+import { getLiveRegionProps } from '../../components/liveRegion'
 import { getApi } from '../../neoDeskPetApi'
 import {
   OPEN_TYPELESS_ASR_DEFAULT_WS_URL,
@@ -27,6 +28,7 @@ export function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSetti
   const [micDevices, setMicDevices] = useState<Array<{ deviceId: string; label: string }>>([])
   const [micLoading, setMicLoading] = useState(false)
   const [micError, setMicError] = useState<string | null>(null)
+  const micErrorId = 'ndp-asr-mic-error'
 
   const refreshMicDevices = useCallback(async () => {
     setMicLoading(true)
@@ -102,12 +104,15 @@ export function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>选择麦克风</label>
+        <label htmlFor="ndp-asr-mic-device">选择麦克风</label>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <select
+            id="ndp-asr-mic-device"
             className="ndp-select"
             style={{ flex: 1 }}
             value={micDeviceId}
+            aria-busy={micLoading}
+            aria-describedby={micError ? micErrorId : undefined}
             onMouseDown={() => refreshMicDevices()}
             onFocus={() => refreshMicDevices()}
             onChange={(e) => api?.setAsrSettings({ micDeviceId: e.target.value })}
@@ -119,14 +124,24 @@ export function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSetti
               </option>
             ))}
           </select>
-          <button className="ndp-btn" onClick={() => refreshMicDevices()} disabled={micLoading} type="button">
+          <button
+            className="ndp-btn"
+            onClick={() => refreshMicDevices()}
+            disabled={micLoading}
+            type="button"
+            aria-describedby={micError ? micErrorId : undefined}
+          >
             {micLoading ? '刷新中...' : '刷新'}
           </button>
         </div>
         <p className="ndp-setting-hint">
           如果下拉框为空或无法选择，先点一次“刷新”并允许麦克风权限；设备名称只有在授权后才会显示
         </p>
-        {micError ? <p className="ndp-setting-hint">刷新失败：{micError}</p> : null}
+        {micError ? (
+          <p id={micErrorId} className="ndp-setting-hint" {...getLiveRegionProps('assertive')}>
+            刷新失败：{micError}
+          </p>
+        ) : null}
       </div>
 
       <h3>启动方式</h3>
