@@ -1356,3 +1356,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-asr-device-error.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-tts-scan-error.png`，ASR 错误位于设备帮助文本下方，TTS 错误位于资源配置末尾，均未挤压控件宽度或造成文字重叠。UI 报告中 ASR 的 select/button `describedBy` 均为 `ndp-asr-mic-error`、busy 最终为 false；TTS 的 `invalid=true`、目录与模型描述关联均为 `ndp-tts-options-error`、`clearedOnEdit=true`；两类错误均为 `alert/assertive/atomic`。AI 模型列表错误同时可能来自凭据、Base URL、配置档和模型服务，本批没有把它粗略绑定到模型名称字段，下一批单独设计联合错误反馈。
+
+## P2-3：无障碍与交互一致性（第六十四批）
+
+- 验证日期：2026-07-14
+- 优化范围：AI 主模型与上下文压缩模型列表的联合配置错误关联、加载状态、错误播报和编辑清理
+
+| 检查 | 结果 |
+| --- | --- |
+| 主模型错误 | API Key、Base URL、模型名称和拉取按钮共享 `ndp-ai-model-list-error` 描述；按钮暴露 busy，错误为 `alert/assertive/atomic` |
+| 压缩模型错误 | API 来源、配置档、模型覆盖值和拉取按钮共享 `ndp-ai-compression-model-list-error` 描述；按钮暴露 busy，错误为 `alert/assertive/atomic` |
+| 联合错误语义 | 两类错误均不设置字段 `aria-invalid`，避免把 Key/Base URL/配置档/服务端的联合失败错误归因给单一输入 |
+| 编辑恢复 | 修改主 Base URL、模型、Key 或压缩来源/配置/模型后清除对应旧错误；原保存和重新拉取流程不变 |
+| 聚焦测试 | `settingsTabs` 共 7 个用例通过，新增 AI label/id、控件命名、初始 busy 和无 invalid 静态契约 |
+| `npm test` | 85 个测试文件、363 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；AI chunk 24.88 kB、Secret input chunk 0.88 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，凭据脱敏、权限、持久化与媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；默认 Settings 场景模拟主模型和压缩模型列表失败并验证编辑恢复，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-model-list-error.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-compression-model-error.png`，错误分别位于主模型拉取按钮下方和高级压缩模型区内，未改变输入宽度、按钮排列或高级区布局。UI 报告中主错误的 Key/Base URL/model/button 描述关联均为 `ndp-ai-model-list-error`，压缩错误的 source/model/button 关联均为 `ndp-ai-compression-model-list-error`；两类 busy 最终为 false、`clearedOnEdit=true`、live-region 为 `alert/assertive/atomic`。配置档选择控件仅在实际选择“使用已保存 API 配置”时出现，代码已接入同一描述关联，当前基线使用默认主 API 来源覆盖其余联合路径。

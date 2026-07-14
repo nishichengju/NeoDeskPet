@@ -562,6 +562,7 @@ function installSettingsMock(page) {
         listTtsOptions: async () => {
           throw new Error('baseline TTS scan failed')
         },
+        listAIModels: async () => ({ ok: false, models: [], error: 'baseline AI model list failed' }),
         openMemory: async () => undefined,
         closeCurrent: async () => undefined,
       },
@@ -780,7 +781,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifyAiModelErrors: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -1696,6 +1697,87 @@ async function runUiBaseline(browser) {
     }
 
     let settingsConfirmDialog = null
+    let settingsAiModelErrors = null
+    if (baseline.verifyAiModelErrors) {
+      await page.getByRole('button', { name: 'API 连接', exact: true }).click()
+      const baseUrlInput = page.getByRole('textbox', { name: 'API Base URL' })
+      const modelInput = page.getByRole('textbox', { name: '模型名称' })
+      const apiKeyInput = page.getByLabel('API Key', { exact: true })
+      const fetchModelsButton = page.getByRole('button', { name: '拉取模型列表', exact: true })
+      await fetchModelsButton.click()
+      const mainError = page.getByRole('alert').filter({ hasText: '模型列表加载失败' })
+      await mainError.waitFor({ state: 'visible' })
+      const main = {
+        baseUrlDescribedBy: await baseUrlInput.getAttribute('aria-describedby'),
+        modelDescribedBy: await modelInput.getAttribute('aria-describedby'),
+        keyDescribedBy: await apiKeyInput.getAttribute('aria-describedby'),
+        buttonDescribedBy: await fetchModelsButton.getAttribute('aria-describedby'),
+        busy: await fetchModelsButton.getAttribute('aria-busy'),
+        errorId: await mainError.getAttribute('id'),
+        role: await mainError.getAttribute('role'),
+        live: await mainError.getAttribute('aria-live'),
+        atomic: await mainError.getAttribute('aria-atomic'),
+      }
+      const mainScreenshotPath = path.join(outputDir, `${baseline.name}-ai-model-list-error.png`)
+      main.screenshot = path.relative(projectRoot, mainScreenshotPath)
+      await page.screenshot({ path: mainScreenshotPath })
+      await baseUrlInput.fill('https://baseline-ai.example/v1')
+      main.clearedOnEdit = await baseUrlInput.evaluate((element) => (
+        !element.hasAttribute('aria-describedby')
+        && !document.getElementById('ndp-ai-model-list-error')
+      ))
+
+      await page.getByRole('button', { name: '模型与生成', exact: true }).click()
+      const advanced = page.locator('.ndp-settings-advanced')
+      await advanced.locator('summary').click()
+      const compressionSource = page.getByRole('combobox', { name: '压缩 API 来源' })
+      const compressionModel = page.getByRole('textbox', { name: '压缩模型名称' })
+      const fetchCompressionButton = page.getByRole('button', { name: '拉取压缩模型列表', exact: true })
+      await fetchCompressionButton.click()
+      const compressionError = page.getByRole('alert').filter({ hasText: '压缩模型列表加载失败' })
+      await compressionError.waitFor({ state: 'visible' })
+      await compressionError.scrollIntoViewIfNeeded()
+      const compression = {
+        sourceDescribedBy: await compressionSource.getAttribute('aria-describedby'),
+        modelDescribedBy: await compressionModel.getAttribute('aria-describedby'),
+        buttonDescribedBy: await fetchCompressionButton.getAttribute('aria-describedby'),
+        busy: await fetchCompressionButton.getAttribute('aria-busy'),
+        errorId: await compressionError.getAttribute('id'),
+        role: await compressionError.getAttribute('role'),
+        live: await compressionError.getAttribute('aria-live'),
+        atomic: await compressionError.getAttribute('aria-atomic'),
+      }
+      const compressionScreenshotPath = path.join(outputDir, `${baseline.name}-ai-compression-model-error.png`)
+      compression.screenshot = path.relative(projectRoot, compressionScreenshotPath)
+      await page.screenshot({ path: compressionScreenshotPath })
+      await compressionModel.fill('baseline-compression-model')
+      compression.clearedOnEdit = await compressionModel.evaluate((element) => (
+        !element.hasAttribute('aria-describedby')
+        && !document.getElementById('ndp-ai-compression-model-list-error')
+      ))
+      await advanced.locator('summary').click()
+      settingsAiModelErrors = { main, compression }
+
+      const mainDescriptionIds = [main.baseUrlDescribedBy, main.modelDescribedBy, main.keyDescribedBy, main.buttonDescribedBy]
+      if (mainDescriptionIds.some((value) => value !== 'ndp-ai-model-list-error')) {
+        failures.push('main AI model error was not associated with the connection controls')
+      }
+      if (main.busy !== 'false') failures.push(`main AI model button busy state ended as ${main.busy}`)
+      if (main.errorId !== 'ndp-ai-model-list-error' || main.role !== 'alert' || main.live !== 'assertive' || main.atomic !== 'true') {
+        failures.push('main AI model error live region is incomplete')
+      }
+      if (!main.clearedOnEdit) failures.push('main AI model error did not clear after editing the Base URL')
+      const compressionDescriptionIds = [compression.sourceDescribedBy, compression.modelDescribedBy, compression.buttonDescribedBy]
+      if (compressionDescriptionIds.some((value) => value !== 'ndp-ai-compression-model-list-error')) {
+        failures.push('compression model error was not associated with its configuration controls')
+      }
+      if (compression.busy !== 'false') failures.push(`compression model button busy state ended as ${compression.busy}`)
+      if (compression.errorId !== 'ndp-ai-compression-model-list-error' || compression.role !== 'alert' || compression.live !== 'assertive' || compression.atomic !== 'true') {
+        failures.push('compression model error live region is incomplete')
+      }
+      if (!compression.clearedOnEdit) failures.push('compression model error did not clear after editing the model override')
+    }
+
     let settingsResourceErrors = null
     if (baseline.verifySettingsResourceErrors) {
       await page.getByRole('button', { name: '语音识别', exact: true }).click()
@@ -1900,6 +1982,7 @@ async function runUiBaseline(browser) {
       settingsNavigation,
       settingsSearch,
       settingsTabs,
+      settingsAiModelErrors,
       settingsResourceErrors,
       settingsMcpImport,
       settingsConfirmDialog,

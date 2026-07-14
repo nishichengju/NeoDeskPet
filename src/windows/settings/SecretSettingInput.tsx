@@ -8,10 +8,12 @@ type Props = {
   hasValue: boolean
   placeholder: string
   ariaLabel: string
+  ariaDescribedBy?: string
+  onEdit?: () => void
 }
 
 export function SecretSettingInput(props: Props) {
-  const { api, target, hasValue, placeholder, ariaLabel } = props
+  const { api, target, hasValue, placeholder, ariaLabel, ariaDescribedBy, onEdit } = props
   const [draft, setDraft] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -40,10 +42,12 @@ export function SecretSettingInput(props: Props) {
         className="ndp-input"
         type="password"
         aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
         value={draft}
         disabled={saving}
         placeholder={hasValue ? '已配置；输入新值可替换' : placeholder}
         onChange={(event) => {
+          onEdit?.()
           setDraft(event.target.value)
           setDirty(true)
         }}

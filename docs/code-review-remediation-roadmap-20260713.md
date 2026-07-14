@@ -1121,6 +1121,13 @@ AI 与能力
 - UI baseline 在默认 Settings 场景模拟麦克风权限拒绝和 TTS 扫描失败，分别验证控件关联、ASR busy 结束态、TTS invalid/编辑清理和两类 live-region；两张错误态截图人工检查无布局回归。25 个场景全部 0 failure、0 console error、无溢出。
 - `npm test` 共 85 个测试文件、362 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续审计 AI 主模型与上下文压缩模型列表错误，重点避免把凭据、Base URL 和模型选择的联合失败错误归因给单一字段。
 
+第六十四批进展（2026-07-14）：
+
+- AI 主模型列表错误通过固定 id 同时描述 API Key、Base URL、模型名称和“拉取模型列表”按钮；压缩模型列表错误描述压缩 API 来源、配置档、模型覆盖值和拉取按钮。两类按钮暴露 `aria-busy`，错误均使用 atomic `alert/assertive`，但不把任何单一字段设置为 `aria-invalid`，保留联合配置失败的真实语义。
+- Base URL、模型名、API Key、压缩来源、配置档或压缩模型发生编辑时，立即清除对应旧错误；切换主 API 配置继续清除主列表错误。`SecretSettingInput` 增加可选描述关联和编辑回调，不改变现有保存、清除或密钥脱敏行为。
+- UI baseline 模拟主模型和压缩模型列表失败，验证所有相关控件的描述 id、按钮 busy 结束态、两类 live-region 和编辑清理；两张错误态截图人工检查无布局回归。25 个场景全部 0 failure、0 console error、无溢出。
+- `npm test` 共 85 个测试文件、363 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续审计 Settings 中其他异步保存失败是否只写入控制台而没有用户可见反馈，优先选择可可靠模拟和恢复的窄边界。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

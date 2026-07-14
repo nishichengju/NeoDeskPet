@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { getApi } from '../src/neoDeskPetApi'
 import { PersonaSettingsTab } from '../src/windows/settings/PersonaTab'
 import { AsrSettingsTab } from '../src/windows/settings/AsrTab'
+import { AISettingsTab } from '../src/windows/settings/AiTab'
 import { getSettingsTabTargetIndex } from '../src/windows/settings/settingsTabs'
 import { parseMcpImportText } from '../src/windows/settings/mcpImport'
 import { ToolsSettingsTab } from '../src/windows/settings/ToolsTab'
@@ -81,5 +82,31 @@ describe('settings tabs', () => {
     expect(html).toContain('<label for="ndp-tts-root">GPT-SoVITS 安装目录（绝对路径）</label>')
     expect(html).toContain('id="ndp-tts-root"')
     expect(html).toContain('aria-invalid="false"')
+  })
+
+  it('names the AI model-list controls without marking joint errors as field validity', () => {
+    const connectionHtml = renderToStaticMarkup(createElement(AISettingsTab, {
+      api,
+      aiSettings: undefined,
+      orchestrator: undefined,
+      aiProfiles: undefined,
+      activeAiProfileId: undefined,
+      view: 'connection',
+    }))
+    const generationHtml = renderToStaticMarkup(createElement(AISettingsTab, {
+      api,
+      aiSettings: undefined,
+      orchestrator: undefined,
+      aiProfiles: undefined,
+      activeAiProfileId: undefined,
+      view: 'generation',
+    }))
+
+    expect(connectionHtml).toContain('<label for="ndp-ai-base-url">API Base URL</label>')
+    expect(connectionHtml).toContain('<label for="ndp-ai-model">模型名称</label>')
+    expect(connectionHtml).toContain('aria-busy="false"')
+    expect(connectionHtml).not.toContain('aria-invalid')
+    expect(generationHtml).toContain('aria-label="压缩 API 来源"')
+    expect(generationHtml).toContain('aria-label="压缩模型名称"')
   })
 })

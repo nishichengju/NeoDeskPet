@@ -13,6 +13,7 @@ import {
   resolveReasoningUiState,
   toLegacyThinkingEffortFromProviderLevel,
 } from '../../../electron/reasoningConfig'
+import { getLiveRegionProps } from '../../components/liveRegion'
 import { getApi } from '../../neoDeskPetApi'
 import { clampIntValue } from '../../utils/settingsHelpers'
 import { SecretSettingInput } from './SecretSettingInput'
@@ -84,6 +85,8 @@ export function AISettingsTab(props: {
   const [compressionModelOptions, setCompressionModelOptions] = useState<string[]>([])
   const [compressionModelsLoading, setCompressionModelsLoading] = useState(false)
   const [compressionModelsError, setCompressionModelsError] = useState('')
+  const modelsErrorId = 'ndp-ai-model-list-error'
+  const compressionModelsErrorId = 'ndp-ai-compression-model-list-error'
 
   useEffect(() => {
     setProfileName(activeProfile?.name ?? '')
@@ -105,6 +108,7 @@ export function AISettingsTab(props: {
 
   const applyApiProfile = async (id: string) => {
     if (!api || !id) return
+    setModelsError('')
     await api.applyAIProfile(id)
     await api.setAISettings({ visionCapability: 'auto' })
   }
@@ -303,6 +307,8 @@ export function AISettingsTab(props: {
           target="ai-main"
           hasValue={hasApiKey}
           ariaLabel="API Key"
+          ariaDescribedBy={modelsError ? modelsErrorId : undefined}
+          onEdit={() => setModelsError('')}
           placeholder={apiMode === 'claude' ? 'sk-ant-...' : 'sk-...'}
         />
         <p className="ndp-setting-hint">支持 OpenAI 兼容的 API</p>
@@ -310,29 +316,45 @@ export function AISettingsTab(props: {
 
       {/* Base URL */}
       <div className="ndp-setting-item">
-        <label>API Base URL</label>
+        <label htmlFor="ndp-ai-base-url">API Base URL</label>
         <input
+          id="ndp-ai-base-url"
           type="text"
           className="ndp-input"
           value={baseUrl}
+          aria-describedby={modelsError ? modelsErrorId : undefined}
           placeholder={apiMode === 'claude' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1'}
-          onChange={(e) => api?.setAISettings({ baseUrl: e.target.value, visionCapability: 'auto' })}
+          onChange={(e) => {
+            setModelsError('')
+            api?.setAISettings({ baseUrl: e.target.value, visionCapability: 'auto' })
+          }}
         />
         <p className="ndp-setting-hint">可配置代理或其他兼容 API 地址</p>
       </div>
 
       {/* Model */}
       <div className="ndp-setting-item">
-        <label>模型名称</label>
+        <label htmlFor="ndp-ai-model">模型名称</label>
         <input
+          id="ndp-ai-model"
           type="text"
           className="ndp-input"
           value={model}
+          aria-describedby={modelsError ? modelsErrorId : undefined}
           placeholder={apiMode === 'claude' ? 'claude-sonnet-4-5' : 'gpt-4o-mini'}
-          onChange={(e) => api?.setAISettings({ model: e.target.value, visionCapability: 'auto' })}
+          onChange={(e) => {
+            setModelsError('')
+            api?.setAISettings({ model: e.target.value, visionCapability: 'auto' })
+          }}
         />
         <div className="ndp-setting-actions">
-          <button className="ndp-btn" onClick={() => void fetchModelList()} disabled={modelsLoading}>
+          <button
+            className="ndp-btn"
+            onClick={() => void fetchModelList()}
+            disabled={modelsLoading}
+            aria-busy={modelsLoading}
+            aria-describedby={modelsError ? modelsErrorId : undefined}
+          >
             {modelsLoading ? '加载中...' : '拉取模型列表'}
           </button>
           {modelOptions.length > 0 ? (
@@ -349,7 +371,11 @@ export function AISettingsTab(props: {
             </select>
           ) : null}
         </div>
-        {modelsError ? <p className="ndp-setting-hint">{modelsError}</p> : null}
+        {modelsError ? (
+          <p id={modelsErrorId} className="ndp-setting-hint" {...getLiveRegionProps('assertive')}>
+            模型列表加载失败：{modelsError}
+          </p>
+        ) : null}
         <p className="ndp-setting-hint">可手动输入模型 ID，也可以先拉取后选择。</p>
       </div>
 
@@ -626,11 +652,14 @@ export function AISettingsTab(props: {
             className="ndp-select"
             value={autoContextCompressionApiSource}
             disabled={!autoContextCompressionEnabled}
-            onChange={(e) =>
+            aria-label="压缩 API 来源"
+            aria-describedby={compressionModelsError ? compressionModelsErrorId : undefined}
+            onChange={(e) => {
+              setCompressionModelsError('')
               api?.setAISettings({
                 autoContextCompressionApiSource: e.target.value === 'profile' ? 'profile' : 'main',
               })
-            }
+            }}
           >
             <option value="main">跟随主 API 配置</option>
             <option value="profile">使用已保存 API 配置</option>
@@ -640,7 +669,12 @@ export function AISettingsTab(props: {
               className="ndp-select"
               value={autoContextCompressionProfileId}
               disabled={!autoContextCompressionEnabled || profiles.length === 0}
-              onChange={(e) => api?.setAISettings({ autoContextCompressionProfileId: e.target.value })}
+              aria-label="压缩 API 配置"
+              aria-describedby={compressionModelsError ? compressionModelsErrorId : undefined}
+              onChange={(e) => {
+                setCompressionModelsError('')
+                api?.setAISettings({ autoContextCompressionProfileId: e.target.value })
+              }}
             >
               <option value="">请选择已保存配置</option>
               {profiles.map((p) => (
@@ -656,11 +690,22 @@ export function AISettingsTab(props: {
           className="ndp-input"
           value={autoContextCompressionModel}
           disabled={!autoContextCompressionEnabled}
+          aria-label="压缩模型名称"
+          aria-describedby={compressionModelsError ? compressionModelsErrorId : undefined}
           placeholder={compressionSourceModel || '留空=跟随所选压缩配置模型'}
-          onChange={(e) => api?.setAISettings({ autoContextCompressionModel: e.target.value })}
+          onChange={(e) => {
+            setCompressionModelsError('')
+            api?.setAISettings({ autoContextCompressionModel: e.target.value })
+          }}
         />
         <div className="ndp-setting-actions">
-          <button className="ndp-btn" onClick={() => void fetchCompressionModelList()} disabled={compressionModelsLoading || !autoContextCompressionEnabled}>
+          <button
+            className="ndp-btn"
+            onClick={() => void fetchCompressionModelList()}
+            disabled={compressionModelsLoading || !autoContextCompressionEnabled}
+            aria-busy={compressionModelsLoading}
+            aria-describedby={compressionModelsError ? compressionModelsErrorId : undefined}
+          >
             {compressionModelsLoading ? '加载中...' : '拉取压缩模型列表'}
           </button>
           {compressionModelOptions.length > 0 ? (
@@ -681,7 +726,11 @@ export function AISettingsTab(props: {
             </select>
           ) : null}
         </div>
-        {compressionModelsError ? <p className="ndp-setting-hint">{compressionModelsError}</p> : null}
+        {compressionModelsError ? (
+          <p id={compressionModelsErrorId} className="ndp-setting-hint" {...getLiveRegionProps('assertive')}>
+            压缩模型列表加载失败：{compressionModelsError}
+          </p>
+        ) : null}
         {autoContextCompressionApiSource === 'profile' && !compressionProfile ? (
           <p className="ndp-setting-hint">请选择一个已保存 API 配置，压缩才会使用该配置的 Key/Base URL/默认模型。</p>
         ) : null}
