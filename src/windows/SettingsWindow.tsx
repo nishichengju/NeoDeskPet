@@ -92,28 +92,50 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
 
   const trackedApi = useMemo(() => {
     if (!api) return null
-    const cached = new Map<PropertyKey, unknown>()
-    return new Proxy(api, {
-      get(target, property, receiver) {
-        const existing = cached.get(property)
-        if (existing) return existing
-        const value = Reflect.get(target, property, receiver)
-        if (typeof value !== 'function') return value
+    // Keep contextBridge calls on the original object; wrapping that proxy in another Proxy breaks input handlers.
+    const source = api as unknown as Record<PropertyKey, unknown>
+    const facade = Object.create(null) as Record<PropertyKey, unknown>
+    for (const property of Reflect.ownKeys(source)) {
+      const value = source[property]
+      if (typeof value !== 'function') {
+        facade[property] = value
+        continue
+      }
 
-        const bound = value.bind(target)
-        if (typeof property !== 'string' || !isSettingsMutation(property)) {
-          cached.set(property, bound)
-          return bound
+      const invoke = (...args: unknown[]) => (source[property] as (...callArgs: unknown[]) => unknown)(...args)
+      if (typeof property !== 'string' || !isSettingsMutation(property)) {
+        facade[property] = invoke
+        continue
+      }
+
+      facade[property] = (...args: unknown[]) => {
+        const sequence = ++saveSequenceRef.current
+        if (saveResetTimerRef.current != null) window.clearTimeout(saveResetTimerRef.current)
+        setSaveState({ state: 'saving', message: '保存中' })
+        let result: unknown
+        try {
+          result = invoke(...args)
+        } catch (error) {
+          if (sequence === saveSequenceRef.current) {
+            setSaveState(
+              property === 'setSecret'
+                ? { state: 'idle', message: '' }
+                : { state: 'error', message: error instanceof Error ? error.message : String(error) },
+            )
+          }
+          throw error
         }
-
-        const wrapped = (...args: unknown[]) => {
-          const sequence = ++saveSequenceRef.current
-          if (saveResetTimerRef.current != null) window.clearTimeout(saveResetTimerRef.current)
-          setSaveState({ state: 'saving', message: '保存中' })
-          let result: unknown
-          try {
-            result = bound(...args)
-          } catch (error) {
+        return Promise.resolve(result).then(
+          (resolved) => {
+            if (sequence === saveSequenceRef.current) {
+              setSaveState({ state: 'saved', message: '已保存' })
+              saveResetTimerRef.current = window.setTimeout(() => {
+                setSaveState({ state: 'idle', message: '' })
+              }, 1800)
+            }
+            return resolved
+          },
+          (error) => {
             if (sequence === saveSequenceRef.current) {
               setSaveState(
                 property === 'setSecret'
@@ -122,33 +144,11 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
               )
             }
             throw error
-          }
-          return Promise.resolve(result).then(
-            (resolved) => {
-              if (sequence === saveSequenceRef.current) {
-                setSaveState({ state: 'saved', message: '已保存' })
-                saveResetTimerRef.current = window.setTimeout(() => {
-                  setSaveState({ state: 'idle', message: '' })
-                }, 1800)
-              }
-              return resolved
-            },
-            (error) => {
-              if (sequence === saveSequenceRef.current) {
-                setSaveState(
-                  property === 'setSecret'
-                    ? { state: 'idle', message: '' }
-                    : { state: 'error', message: error instanceof Error ? error.message : String(error) },
-                )
-              }
-              throw error
-            },
-          )
-        }
-        cached.set(property, wrapped)
-        return wrapped
-      },
-    }) as typeof api
+          },
+        )
+      }
+    }
+    return facade as typeof api
   }, [api])
 
   useEffect(() => {

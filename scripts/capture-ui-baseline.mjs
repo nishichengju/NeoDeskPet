@@ -655,6 +655,18 @@ function installSettingsMock(page) {
           settingsChangedListener?.(settings)
           return settings
         },
+        setAISettings: async (patch) => {
+          await new Promise((resolve) => setTimeout(resolve, 120))
+          settings = { ...settings, ai: { ...settings.ai, ...patch } }
+          settingsChangedListener?.(settings)
+          return settings
+        },
+        setTtsSettings: async (patch) => {
+          await new Promise((resolve) => setTimeout(resolve, 120))
+          settings = { ...settings, tts: { ...settings.tts, ...patch } }
+          settingsChangedListener?.(settings)
+          return settings
+        },
         listPersonas: async () => [
           { id: 'default', name: '默认角色', updatedAt: Date.now() },
         ],

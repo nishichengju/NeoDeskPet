@@ -408,6 +408,41 @@ async function windowSize(page) {
   return page.evaluate(() => ({ width: window.outerWidth, height: window.outerHeight }))
 }
 
+async function waitForSettingsMatch(page, expected, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs
+  let current = null
+  while (Date.now() < deadline) {
+    current = await page.evaluate(() => window.neoDeskPet.getSettings())
+    if (Object.entries(expected).every(([key, value]) => current?.[key] === value)) return current
+    await page.waitForTimeout(100)
+  }
+  const actual = Object.fromEntries(Object.keys(expected).map((key) => [key, current?.[key]]))
+  throw new Error(`settings did not reach ${JSON.stringify(expected)}; current=${JSON.stringify(actual)}`)
+}
+
+async function windowLayering(app) {
+  return app.evaluate(({ BrowserWindow }) => {
+    const byRoute = new Map(
+      BrowserWindow.getAllWindows().map((window) => {
+        const route = new URL(window.webContents.getURL()).hash.replace(/^#\//, '')
+        return [route, window]
+      }),
+    )
+    const describe = (route) => {
+      const window = byRoute.get(route)
+      return window
+        ? { alwaysOnTop: window.isAlwaysOnTop(), focused: window.isFocused(), visible: window.isVisible() }
+        : null
+    }
+    return {
+      pet: describe('pet'),
+      chat: describe('chat'),
+      settings: describe('settings'),
+      memory: describe('memory'),
+    }
+  })
+}
+
 const executablePath = packagedExe && existsSync(packagedExe) ? packagedExe : electronExe
 const args = packagedExe && existsSync(packagedExe)
   ? [`--user-data-dir=${userDataDir}`]
@@ -425,26 +460,51 @@ try {
 
   const chat = await openWindow(app, pet, 'openChat', 'chat')
   const settings = await openWindow(app, chat, 'openSettings', 'settings', 'aiConnection')
-  const memory = await openWindow(app, settings, 'openMemory', 'memory')
+  await settings.evaluate(() => window.neoDeskPet.setAlwaysOnTop(true))
+  await settings.waitForTimeout(500)
+  const initialWindowLayering = await windowLayering(app)
+  assert(
+    !initialWindowLayering.pet?.alwaysOnTop || initialWindowLayering.chat?.alwaysOnTop,
+    'chat window can fall behind the always-on-top pet window',
+  )
+  assert(
+    !initialWindowLayering.pet?.alwaysOnTop || initialWindowLayering.settings?.alwaysOnTop,
+    'settings window can fall behind the always-on-top pet window',
+  )
+  await settings.locator('.ndp-settings-nav-item.active').filter({ hasText: 'API 连接' }).waitFor({ state: 'visible' })
+  const settingsNavigationOnCreate = await settings.locator('.ndp-settings-nav-item.active').textContent()
+  assert(settingsNavigationOnCreate?.trim() === 'API 连接', 'chat could not deep-link while creating the settings window')
+
+  const live2dNavigation = settings.locator('.ndp-settings-nav-item').filter({ hasText: 'Live2D' })
+  await live2dNavigation.click()
+  await settings.locator('.ndp-settings-nav-item.active').filter({ hasText: 'Live2D' }).waitFor({ state: 'visible' })
+  const live2dMouseTracking = settings.locator('.ndp-settings-content input[type="checkbox"]').first()
+  await live2dMouseTracking.click()
+  await waitForSettingsMatch(settings, { live2dMouseTrackingEnabled: false })
+  await live2dMouseTracking.click()
+  await waitForSettingsMatch(settings, { live2dMouseTrackingEnabled: true })
+
   const live2dModelSwitch = await settings.evaluate(async () => {
     const models = await window.neoDeskPet.scanModels()
     const target = models.find((model) => model.modelFile.includes('/Hiyori/'))
-    if (!target) return { modelCount: models.length, target: null, updated: null }
-    const updated = await window.neoDeskPet.setLive2dModel(target.id, target.modelFile)
-    return {
-      modelCount: models.length,
-      target,
-      updated: {
-        id: updated.live2dModelId,
-        file: updated.live2dModelFile,
-      },
-    }
+    return { modelCount: models.length, target }
   })
   assert(live2dModelSwitch.modelCount > 1, 'Live2D model scan did not return multiple models')
   assert(live2dModelSwitch.target, 'Hiyori Live2D model was not found in the packaged app')
+  await settings.locator('#ndp-live2d-model').selectOption(live2dModelSwitch.target.modelFile)
+  const selectedSettings = await waitForSettingsMatch(settings, {
+    live2dModelId: live2dModelSwitch.target.id,
+    live2dModelFile: live2dModelSwitch.target.modelFile,
+  })
+  const selectedLive2dModel = {
+    updated: {
+      id: selectedSettings.live2dModelId,
+      file: selectedSettings.live2dModelFile,
+    },
+  }
   assert(
-    live2dModelSwitch.updated?.id === live2dModelSwitch.target.id
-      && live2dModelSwitch.updated?.file === live2dModelSwitch.target.modelFile,
+    selectedLive2dModel.updated?.id === live2dModelSwitch.target.id
+      && selectedLive2dModel.updated?.file === live2dModelSwitch.target.modelFile,
     'Live2D model selection was not persisted',
   )
   await pet.waitForFunction((modelFile) => {
@@ -452,6 +512,13 @@ try {
     return root?.getAttribute('data-model-file') === modelFile
       && root?.getAttribute('data-model-loaded') === 'true'
   }, live2dModelSwitch.target.modelFile)
+
+  const memory = await openWindow(app, settings, 'openMemory', 'memory')
+  const managedWindowLayering = await windowLayering(app)
+  assert(
+    !managedWindowLayering.pet?.alwaysOnTop || managedWindowLayering.memory?.alwaysOnTop,
+    'memory window can fall behind the always-on-top pet window',
+  )
   let orb = app.windows().find((page) => page.url().endsWith('#/orb'))
   if (!orb) {
     const windowPromise = app.waitForEvent('window', { timeout: 30_000 })
@@ -488,9 +555,6 @@ try {
     )
   }
 
-  await settings.locator('.ndp-settings-nav-item.active').filter({ hasText: 'API 连接' }).waitFor({ state: 'visible' })
-  const settingsNavigationOnCreate = await settings.locator('.ndp-settings-nav-item.active').textContent()
-  assert(settingsNavigationOnCreate?.trim() === 'API 连接', 'chat could not deep-link while creating the settings window')
   await chat.evaluate(() => window.neoDeskPet.openSettings('persona'))
   await settings.locator('.ndp-settings-nav-item.active').filter({ hasText: '角色与长期记忆' }).waitFor({ state: 'visible' })
   const settingsNavigationOnReuse = await settings.locator('.ndp-settings-nav-item.active').textContent()
@@ -1702,6 +1766,14 @@ try {
     orb: orb.url(),
   }
 
+  await chat.evaluate(() => window.neoDeskPet.openSettings())
+  await settings.waitForTimeout(100)
+  const settingsLayeringBeforeClose = await windowLayering(app)
+  assert(settingsLayeringBeforeClose.settings?.focused, 'reopened settings window did not move above other app windows')
+  const settingsClosed = settings.waitForEvent('close')
+  await settings.locator('.ndp-settings-header .ndp-btn-close').click()
+  await settingsClosed
+
   await app.close()
   app = undefined
 
@@ -1819,7 +1891,8 @@ try {
       onCreate: settingsNavigationOnCreate?.trim() ?? '',
       onReuse: settingsNavigationOnReuse?.trim() ?? '',
     },
-    live2dModelSwitch,
+    windowLayering: managedWindowLayering,
+    live2dModelSwitch: { ...live2dModelSwitch, ...selectedLive2dModel },
     chatPersistence: {
       sessionId: chatPersistenceBeforeRestart.sessionId,
       beforeRestart: chatPersistenceBeforeRestart.loaded,

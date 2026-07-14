@@ -82,18 +82,11 @@ function clampPetBounds(bounds: WindowBounds): WindowBounds {
 
 function applyWindowAlwaysOnTop(win: BrowserWindow, value: boolean): void {
   try {
-    if (!value) {
-      win.setAlwaysOnTop(false)
-      return
-    }
-    // 使用较低层级的 always-on-top，避免遮挡 Windows 任务栏（taskbar 通常维持更高顶层）。
-    win.setAlwaysOnTop(true, 'floating')
+    // Electron's explicit "floating" level is not reliable on Windows. The
+    // platform default keeps the window topmost without overriding the taskbar.
+    win.setAlwaysOnTop(value)
   } catch {
-    try {
-      win.setAlwaysOnTop(value)
-    } catch {
-      // ignore
-    }
+    // ignore
   }
 }
 
@@ -347,11 +340,11 @@ export class WindowManager {
     const focus = opts?.focus ?? show
 
     if (this.chatWindow && !this.chatWindow.isDestroyed()) {
-      if (show) this.chatWindow.show()
-      if (focus) this.chatWindow.focus()
+      if (show) this.presentManagedWindow(this.chatWindow, focus)
       return this.chatWindow
     }
 
+    const settings = getSettings()
     const bounds = getBounds('chat')
     const minimum = getEffectiveMinimumSize('chat', bounds)
     const win = new BrowserWindow({
@@ -362,6 +355,7 @@ export class WindowManager {
       icon: APP_ICON_PATH,
       show,
       frame: false,
+      alwaysOnTop: settings.alwaysOnTop,
       autoHideMenuBar: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
@@ -397,10 +391,12 @@ export class WindowManager {
     })
 
     this.attachPersistHandlers(win, 'chat')
+    this.attachManagedWindowInputHandlers(win)
     this.loadWindow(win, 'chat')
     this.chatWindow = win
+    applyWindowAlwaysOnTop(win, settings.alwaysOnTop)
 
-    if (show && focus) win.focus()
+    if (show) this.presentManagedWindow(win, focus)
 
     win.on('closed', () => {
       this.chatWindow = null
@@ -411,11 +407,11 @@ export class WindowManager {
 
   ensureSettingsWindow(): BrowserWindow {
     if (this.settingsWindow && !this.settingsWindow.isDestroyed()) {
-      this.settingsWindow.show()
-      this.settingsWindow.focus()
+      this.presentManagedWindow(this.settingsWindow, true)
       return this.settingsWindow
     }
 
+    const settings = getSettings()
     const bounds = getBounds('settings')
     const minimum = getEffectiveMinimumSize('settings', bounds)
     const win = new BrowserWindow({
@@ -426,6 +422,7 @@ export class WindowManager {
       icon: APP_ICON_PATH,
       show: true,
       frame: false,
+      alwaysOnTop: settings.alwaysOnTop,
       autoHideMenuBar: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
@@ -437,8 +434,11 @@ export class WindowManager {
     })
 
     this.attachPersistHandlers(win, 'settings')
+    this.attachManagedWindowInputHandlers(win)
     this.loadWindow(win, 'settings')
     this.settingsWindow = win
+    applyWindowAlwaysOnTop(win, settings.alwaysOnTop)
+    this.presentManagedWindow(win, true)
 
     win.on('closed', () => {
       this.settingsWindow = null
@@ -449,11 +449,11 @@ export class WindowManager {
 
   ensureMemoryWindow(): BrowserWindow {
     if (this.memoryWindow && !this.memoryWindow.isDestroyed()) {
-      this.memoryWindow.show()
-      this.memoryWindow.focus()
+      this.presentManagedWindow(this.memoryWindow, true)
       return this.memoryWindow
     }
 
+    const settings = getSettings()
     const bounds = getBounds('memory')
     const minimum = getEffectiveMinimumSize('memory', bounds)
     const win = new BrowserWindow({
@@ -464,6 +464,7 @@ export class WindowManager {
       icon: APP_ICON_PATH,
       show: true,
       frame: false,
+      alwaysOnTop: settings.alwaysOnTop,
       autoHideMenuBar: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
@@ -475,8 +476,11 @@ export class WindowManager {
     })
 
     this.attachPersistHandlers(win, 'memory')
+    this.attachManagedWindowInputHandlers(win)
     this.loadWindow(win, 'memory')
     this.memoryWindow = win
+    applyWindowAlwaysOnTop(win, settings.alwaysOnTop)
+    this.presentManagedWindow(win, true)
 
     win.on('closed', () => {
       this.memoryWindow = null
@@ -1034,11 +1038,26 @@ export class WindowManager {
   setAlwaysOnTop(value: boolean): void {
     setSettings({ alwaysOnTop: value })
     const pet = this.getPetWindow()
+    const chat = this.getChatWindow()
+    const settings = this.getSettingsWindow()
+    const memory = this.getMemoryWindow()
     const orb = this.getOrbWindow()
     const orbMenu = this.orbMenuWindow && !this.orbMenuWindow.isDestroyed() ? this.orbMenuWindow : null
     if (pet) applyWindowAlwaysOnTop(pet, value)
     if (orb) applyWindowAlwaysOnTop(orb, value)
     if (orbMenu) applyWindowAlwaysOnTop(orbMenu, value)
+    if (chat) applyWindowAlwaysOnTop(chat, value)
+    if (settings) applyWindowAlwaysOnTop(settings, value)
+    if (memory) applyWindowAlwaysOnTop(memory, value)
+
+    const focused = BrowserWindow.getFocusedWindow()
+    if (focused && (focused === chat || focused === settings || focused === memory)) {
+      try {
+        focused.moveTop()
+      } catch {
+        // ignore
+      }
+    }
   }
 
   setClickThrough(value: boolean): void {
@@ -1076,6 +1095,12 @@ export class WindowManager {
   private applyPetClickThrough(enabled: boolean): void {
     const pet = this.getPetWindow()
     if (!pet) return
+
+    if (this.hasFocusedManagedWindow()) {
+      this.petIgnoreMouseEvents = true
+      pet.setIgnoreMouseEvents(true, { forward: true })
+      return
+    }
 
     if (!enabled) {
       if (this.petClickThroughWatchdog) {
@@ -1134,7 +1159,8 @@ export class WindowManager {
 
     const settings = getSettings()
     const nextIgnore =
-      Boolean(settings.clickThrough) && !this.petModelHover && !this.petOverlayHover && !this.petDragging
+      this.hasFocusedManagedWindow()
+      || (Boolean(settings.clickThrough) && !this.petModelHover && !this.petOverlayHover && !this.petDragging)
     if (nextIgnore === this.petIgnoreMouseEvents) return
     this.petIgnoreMouseEvents = nextIgnore
     pet.setIgnoreMouseEvents(nextIgnore, { forward: true })
@@ -1162,6 +1188,36 @@ export class WindowManager {
     const newY = Math.round(bottomY - newHeight)
 
     pet.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight })
+  }
+
+  private presentManagedWindow(win: BrowserWindow, focus: boolean): void {
+    if (win.isDestroyed()) return
+    applyWindowAlwaysOnTop(win, getSettings().alwaysOnTop)
+    win.show()
+    if (!focus) return
+    win.focus()
+    try {
+      win.moveTop()
+    } catch {
+      // ignore
+    }
+    this.applyPetClickThrough(getSettings().clickThrough)
+  }
+
+  private hasFocusedManagedWindow(): boolean {
+    return [this.chatWindow, this.settingsWindow, this.memoryWindow].some(
+      (window) => window && !window.isDestroyed() && window.isFocused(),
+    )
+  }
+
+  private attachManagedWindowInputHandlers(win: BrowserWindow): void {
+    const syncPetMouseCapture = () => {
+      setTimeout(() => this.applyPetClickThrough(getSettings().clickThrough), 0)
+    }
+    win.on('focus', () => this.applyPetClickThrough(getSettings().clickThrough))
+    win.on('blur', syncPetMouseCapture)
+    win.on('hide', syncPetMouseCapture)
+    win.on('closed', syncPetMouseCapture)
   }
 
   private attachPersistHandlers(win: BrowserWindow, type: WindowType): void {
