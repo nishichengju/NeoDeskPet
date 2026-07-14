@@ -50,6 +50,10 @@ describe('settings tabs', () => {
     expect(html).toContain('aria-selected="true"')
     expect(html).toContain('role="tabpanel"')
     expect(html).toContain('aria-labelledby="ndp-tools-tab-builtin"')
+    expect(html).toContain('aria-label="工具总开关"')
+    expect(html).toContain('aria-label="搜索工具"')
+    expect(html).toContain('aria-label="browser 分组开关"')
+    expect(html).toContain('aria-label="browser.fetch 工具开关"')
   })
 
   it('associates Live2D model and appearance controls with their labels', () => {
@@ -98,6 +102,10 @@ describe('settings tabs', () => {
 
   it('names NovelAI prompt and generation controls', () => {
     const html = renderToStaticMarkup(createElement(NovelAISettingsTab, { api, settings: undefined }))
+    const cloudQueueHtml = renderToStaticMarkup(createElement(NovelAISettingsTab, {
+      api,
+      settings: { cloudQueueEnabled: true } as Parameters<typeof NovelAISettingsTab>[0]['settings'],
+    }))
 
     expect(html).toContain('<label for="ndp-novelai-endpoint">Endpoint</label>')
     expect(html).toContain('id="ndp-novelai-endpoint"')
@@ -119,6 +127,11 @@ describe('settings tabs', () => {
     expect(html).toContain('aria-label="生成张数"')
     expect(html).toContain('aria-label="随机种子"')
     expect(html).toContain('id="ndp-novelai-output-dir"')
+    expect(cloudQueueHtml).toContain('<label for="ndp-novelai-cloud-queue-url">队列服务地址</label>')
+    expect(cloudQueueHtml).toContain('id="ndp-novelai-cloud-queue-user-id"')
+    expect(cloudQueueHtml).toContain('id="ndp-novelai-cloud-queue-greeting"')
+    expect(cloudQueueHtml).toContain('aria-label="队列轮询间隔"')
+    expect(cloudQueueHtml).toContain('aria-label="队列最长等待时间"')
   })
 
   it('distinguishes chat RGBA sliders and numeric inputs', () => {
@@ -224,7 +237,7 @@ describe('settings tabs', () => {
     const agentHtml = renderToStaticMarkup(createElement(AISettingsTab, {
       api,
       aiSettings: undefined,
-      orchestrator: undefined,
+      orchestrator: { toolUseCustomAi: true } as Parameters<typeof AISettingsTab>[0]['orchestrator'],
       aiProfiles: undefined,
       activeAiProfileId: undefined,
       view: 'agent',
@@ -242,6 +255,10 @@ describe('settings tabs', () => {
     expect(connectionHtml).toContain('aria-invalid="false"')
     expect(generationHtml).toContain('aria-label="压缩 API 来源"')
     expect(generationHtml).toContain('aria-label="压缩模型名称"')
+    expect(generationHtml).toContain('<label for="ndp-ai-compression-threshold">上下文压缩触发阈值（占最大上下文百分比）</label>')
+    expect(generationHtml).toContain('id="ndp-ai-compression-threshold"')
+    expect(generationHtml).toContain('<label for="ndp-ai-compression-target">上下文压缩目标占比（压缩后尽量降到）</label>')
+    expect(generationHtml).toContain('id="ndp-ai-compression-target"')
     expect(generationHtml).toContain('<label for="ndp-ai-thinking-provider">思考提供商</label>')
     expect(generationHtml).toContain('id="ndp-ai-thinking-provider"')
     expect(generationHtml).toContain('for="ndp-ai-thinking-effort"')
@@ -270,5 +287,11 @@ describe('settings tabs', () => {
     expect(agentHtml).toContain('id="ndp-ai-skill-managed-dir"')
     expect(agentHtml).toContain('<label for="ndp-ai-system-prompt">系统提示词</label>')
     expect(agentHtml).toContain('id="ndp-ai-system-prompt"')
+    expect(agentHtml).toContain('<label for="ndp-ai-tool-base-url">工具 API Base URL</label>')
+    expect(agentHtml).toContain('id="ndp-ai-tool-base-url"')
+    expect(agentHtml).toContain('id="ndp-ai-tool-model"')
+    expect(agentHtml).toContain('id="ndp-ai-tool-temperature"')
+    expect(agentHtml).toContain('id="ndp-ai-tool-max-tokens"')
+    expect(agentHtml).toContain('id="ndp-ai-tool-timeout"')
   })
 })

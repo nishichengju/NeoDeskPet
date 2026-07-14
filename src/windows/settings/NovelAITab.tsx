@@ -238,22 +238,22 @@ export function NovelAISettingsTab(props: { api: ReturnType<typeof getApi>; sett
       {cloudQueueEnabled && (
         <>
           <div className="ndp-setting-item">
-            <label>队列服务地址</label>
-            <input className="ndp-input" value={cloudQueueUrl} onChange={(e) => patch({ cloudQueueUrl: e.target.value })} />
+            <label htmlFor="ndp-novelai-cloud-queue-url">队列服务地址</label>
+            <input id="ndp-novelai-cloud-queue-url" className="ndp-input" value={cloudQueueUrl} onChange={(e) => patch({ cloudQueueUrl: e.target.value })} />
           </div>
           <div className="ndp-setting-item">
-            <label>队列用户 ID</label>
-            <input className="ndp-input" value={cloudQueueUserId} placeholder="留空自动生成" onChange={(e) => patch({ cloudQueueUserId: e.target.value })} />
+            <label htmlFor="ndp-novelai-cloud-queue-user-id">队列用户 ID</label>
+            <input id="ndp-novelai-cloud-queue-user-id" className="ndp-input" value={cloudQueueUserId} placeholder="留空自动生成" onChange={(e) => patch({ cloudQueueUserId: e.target.value })} />
           </div>
           <div className="ndp-setting-item">
-            <label>队列个性语</label>
-            <input className="ndp-input" value={cloudQueueGreeting} maxLength={15} placeholder="最多 15 字" onChange={(e) => patch({ cloudQueueGreeting: e.target.value })} />
+            <label htmlFor="ndp-novelai-cloud-queue-greeting">队列个性语</label>
+            <input id="ndp-novelai-cloud-queue-greeting" className="ndp-input" value={cloudQueueGreeting} maxLength={15} placeholder="最多 15 字" onChange={(e) => patch({ cloudQueueGreeting: e.target.value })} />
           </div>
           <div className="ndp-setting-item">
             <label>队列轮询/等待</label>
             <div className="ndp-row">
-              <input className="ndp-input" type="number" min={500} max={10000} step={100} value={cloudQueuePollIntervalMs} onChange={(e) => patch({ cloudQueuePollIntervalMs: intValue(e.target.value, cloudQueuePollIntervalMs) })} />
-              <input className="ndp-input" type="number" min={15000} max={1800000} step={1000} value={cloudQueueTimeoutMs} onChange={(e) => patch({ cloudQueueTimeoutMs: intValue(e.target.value, cloudQueueTimeoutMs) })} />
+              <input aria-label="队列轮询间隔" className="ndp-input" type="number" min={500} max={10000} step={100} value={cloudQueuePollIntervalMs} onChange={(e) => patch({ cloudQueuePollIntervalMs: intValue(e.target.value, cloudQueuePollIntervalMs) })} />
+              <input aria-label="队列最长等待时间" className="ndp-input" type="number" min={15000} max={1800000} step={1000} value={cloudQueueTimeoutMs} onChange={(e) => patch({ cloudQueueTimeoutMs: intValue(e.target.value, cloudQueueTimeoutMs) })} />
             </div>
             <p className="ndp-setting-hint">左侧是轮询间隔 ms，右侧是最长排队等待 ms。</p>
           </div>

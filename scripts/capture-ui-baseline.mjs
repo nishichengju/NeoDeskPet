@@ -514,8 +514,52 @@ function installSettingsMock(page) {
     })
     const settings = {
       activePersonaId: 'default',
-      aiProfiles: [],
-      activeAiProfileId: '',
+      aiProfiles: [
+        {
+          id: 'baseline-profile',
+          name: '基线配置',
+          apiMode: 'openai-compatible',
+          hasApiKey: true,
+          baseUrl: 'https://example.test/v1',
+          model: 'baseline-model',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ],
+      activeAiProfileId: 'baseline-profile',
+      ai: {
+        baseUrl: 'https://example.test/v1',
+        model: 'baseline-model',
+        autoContextCompressionEnabled: true,
+        autoContextCompressionApiSource: 'profile',
+        autoContextCompressionProfileId: 'baseline-profile',
+      },
+      orchestrator: {
+        toolUseCustomAi: true,
+      },
+      novelai: {
+        cloudQueueEnabled: true,
+      },
+      tools: {
+        enabled: true,
+        groups: {},
+        tools: {},
+      },
+      mcp: {
+        enabled: true,
+        servers: [
+          {
+            id: 'baseline',
+            enabled: true,
+            label: '基线 MCP',
+            transport: 'stdio',
+            command: 'node',
+            args: ['baseline-server.mjs'],
+            cwd: '',
+            env: {},
+          },
+        ],
+      },
       worldBook: {
         enabled: true,
         activeTagIds: [],
@@ -557,12 +601,39 @@ function installSettingsMock(page) {
         listMemory: async () => ({ total: 0, items: [] }),
         listTasks: async () => ({ items: [] }),
         onTasksChanged: () => off,
-        getMcpState: async () => ({ servers: [], tools: [] }),
+        getMcpState: async () => ({
+          enabled: true,
+          servers: [
+            {
+              id: 'baseline',
+              enabled: true,
+              label: '基线 MCP',
+              transport: 'stdio',
+              command: 'node',
+              args: ['baseline-server.mjs'],
+              status: 'connected',
+              tools: [
+                {
+                  serverId: 'baseline',
+                  toolName: 'mcp.baseline.echo',
+                  callName: 'echo',
+                  name: 'echo',
+                  description: '基线 MCP 工具',
+                  inputSchema: { type: 'object' },
+                },
+              ],
+              updatedAt: Date.now(),
+            },
+          ],
+          updatedAt: Date.now(),
+        }),
         onMcpChanged: () => off,
         listTtsOptions: async () => {
           throw new Error('baseline TTS scan failed')
         },
-        listAIModels: async () => ({ ok: false, models: [], error: 'baseline AI model list failed' }),
+        listAIModels: async () => window.__settingsModelListSucceeds
+          ? ({ ok: true, models: ['baseline-model', 'baseline-compression-model'] })
+          : ({ ok: false, models: [], error: 'baseline AI model list failed' }),
         setSecret: async () => {
           throw new Error('baseline secret save failed')
         },
@@ -784,7 +855,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifySettingsChatUiControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifySettingsChatUiControlNames: true, verifySettingsConditionalControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -2066,6 +2137,109 @@ async function runUiBaseline(browser) {
       }
     }
 
+    let settingsConditionalControlNames = null
+    if (baseline.verifySettingsConditionalControlNames) {
+      await page.getByRole('button', { name: '模型与生成', exact: true }).click()
+      await page.getByText('高级：上下文压缩', { exact: true }).click()
+      await page.evaluate(() => {
+        window.__settingsModelListSucceeds = true
+      })
+      await page.getByRole('button', { name: '拉取压缩模型列表', exact: true }).click()
+      const compressionControls = [
+        page.getByRole('checkbox', { name: '自动压缩上下文（超过阈值先摘要旧对话）', exact: true }),
+        page.getByRole('combobox', { name: '压缩 API 来源', exact: true }),
+        page.getByRole('combobox', { name: '压缩 API 配置', exact: true }),
+        page.getByRole('textbox', { name: '压缩模型名称', exact: true }),
+        page.getByRole('combobox', { name: '压缩模型列表', exact: true }),
+        page.getByRole('slider', { name: '上下文压缩触发阈值（占最大上下文百分比）', exact: true }),
+        page.getByRole('slider', { name: '上下文压缩目标占比（压缩后尽量降到）', exact: true }),
+      ]
+      await Promise.all(compressionControls.map((control) => control.waitFor({ state: 'visible' })))
+      const compressionScreenshotPath = path.join(outputDir, `${baseline.name}-ai-compression-controls.png`)
+      await page.screenshot({ path: compressionScreenshotPath })
+
+      await page.getByRole('button', { name: 'Agent', exact: true }).click()
+      const customAgentControls = [
+        page.getByRole('checkbox', { name: '工具/Agent 使用单独的 API', exact: true }),
+        page.getByRole('textbox', { name: '工具 API Key', exact: true }),
+        page.getByRole('textbox', { name: '工具 API Base URL', exact: true }),
+        page.getByRole('textbox', { name: '工具模型名称', exact: true }),
+        page.getByRole('slider', { name: '工具温度 (Temperature)', exact: true }),
+        page.getByRole('slider', { name: '工具最大输出 (maxTokens)', exact: true }),
+        page.getByRole('spinbutton', { name: '工具超时 (ms)', exact: true }),
+      ]
+      await Promise.all(customAgentControls.map((control) => control.waitFor({ state: 'visible' })))
+      await customAgentControls.at(-1).scrollIntoViewIfNeeded()
+      const customAgentScreenshotPath = path.join(outputDir, `${baseline.name}-ai-custom-agent-controls.png`)
+      await page.screenshot({ path: customAgentScreenshotPath })
+
+      await page.getByRole('button', { name: '生图', exact: true }).click()
+      const novelAiQueueControls = [
+        page.getByRole('checkbox', { name: '启用云端队列', exact: true }),
+        page.getByRole('textbox', { name: '队列服务地址', exact: true }),
+        page.getByRole('textbox', { name: '队列用户 ID', exact: true }),
+        page.getByRole('textbox', { name: '队列个性语', exact: true }),
+        page.getByRole('spinbutton', { name: '队列轮询间隔', exact: true }),
+        page.getByRole('spinbutton', { name: '队列最长等待时间', exact: true }),
+      ]
+      await Promise.all(novelAiQueueControls.map((control) => control.waitFor({ state: 'visible' })))
+      const novelAiQueueScreenshotPath = path.join(outputDir, `${baseline.name}-novelai-queue-controls.png`)
+      await page.screenshot({ path: novelAiQueueScreenshotPath })
+
+      await page.getByRole('button', { name: '工具中心', exact: true }).click()
+      const builtinToolControls = [
+        page.getByRole('checkbox', { name: '工具总开关', exact: true }),
+        page.getByRole('textbox', { name: '搜索工具', exact: true }),
+        page.getByRole('checkbox', { name: 'browser 分组开关', exact: true }),
+      ]
+      await page.getByText('browser', { exact: true }).click()
+      builtinToolControls.push(page.getByRole('checkbox', { name: 'browser.fetch 工具开关', exact: true }))
+      await Promise.all(builtinToolControls.map((control) => control.waitFor({ state: 'visible' })))
+
+      const toolsTablist = page.getByRole('tablist', { name: '工具中心设置' })
+      await toolsTablist.getByRole('tab', { name: 'MCP', exact: true }).click()
+      const mcpControls = [
+        page.getByRole('checkbox', { name: 'MCP 总开关', exact: true }),
+        page.getByRole('checkbox', { name: 'baseline MCP Server 开关', exact: true }),
+      ]
+      await page.getByText('基线 MCP', { exact: true }).click()
+      mcpControls.push(
+        page.getByRole('textbox', { name: 'baseline Server ID', exact: true }),
+        page.getByRole('textbox', { name: 'baseline 显示名称', exact: true }),
+        page.getByRole('textbox', { name: 'baseline command', exact: true }),
+        page.getByRole('textbox', { name: 'baseline args', exact: true }),
+        page.getByRole('textbox', { name: 'baseline cwd', exact: true }),
+        page.getByRole('textbox', { name: 'baseline env', exact: true }),
+        page.getByRole('checkbox', { name: 'mcp.baseline 工具分组开关', exact: true }),
+      )
+      await page.getByText('tools（1/1）', { exact: true }).click()
+      mcpControls.push(page.getByRole('checkbox', { name: 'mcp.baseline.echo 工具开关', exact: true }))
+      await Promise.all(mcpControls.map((control) => control.waitFor({ state: 'visible' })))
+      await mcpControls.at(-1).scrollIntoViewIfNeeded()
+      const toolsScreenshotPath = path.join(outputDir, `${baseline.name}-tools-conditional-controls.png`)
+      await page.screenshot({ path: toolsScreenshotPath })
+
+      settingsConditionalControlNames = {
+        compression: {
+          count: compressionControls.length,
+          screenshot: path.relative(projectRoot, compressionScreenshotPath),
+        },
+        customAgent: {
+          count: customAgentControls.length,
+          screenshot: path.relative(projectRoot, customAgentScreenshotPath),
+        },
+        novelAiQueue: {
+          count: novelAiQueueControls.length,
+          screenshot: path.relative(projectRoot, novelAiQueueScreenshotPath),
+        },
+        tools: {
+          builtinCount: builtinToolControls.length,
+          mcpCount: mcpControls.length,
+          screenshot: path.relative(projectRoot, toolsScreenshotPath),
+        },
+      }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2214,6 +2388,7 @@ async function runUiBaseline(browser) {
       settingsAiControlNames,
       settingsNovelAiControlNames,
       settingsChatUiControlNames,
+      settingsConditionalControlNames,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

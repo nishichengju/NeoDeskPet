@@ -1166,6 +1166,12 @@ AI 与能力
 - UI baseline 进入“聊天界面”页面并按 role + accessible name 定位全部 26 项，在背景与气泡参数区域分别保留截图；25 个场景全部 0 failure、0 console error、无横向或纵向溢出。截图确认三组 RGBA 行、数字输入、滑块和页面滚动布局无回归。
 - `settingsTabs` 增至 12 个用例，全量 85 个测试文件、368 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。Chat UI chunk 为 6.18 kB；默认视图最初 86 个缺名项已累计收口 84 个，仅剩工具中心 2 项，Persona、Tools/MCP、NovelAI 云端队列、AI 高级上下文压缩和 Agent 自定义工具 API 等条件区域仍需动态状态专项审计。
 
+第七十一批进展（2026-07-14）：
+
+- 完成 AI、NovelAI 与 Tools/MCP 条件状态的 27 类程序化名称边界。AI 高级压缩补齐模型列表、触发阈值和目标占比，独立 Agent API 补齐 Base URL、模型、温度、最大输出与超时；NovelAI 云端队列补齐服务地址、用户 ID、个性语以及可区分的轮询/等待数字输入。
+- 工具中心补齐默认视图的工具总开关与搜索框，并为内置分组、内置工具、MCP 总开关、Server 开关、六类 Server 编辑字段、Server 工具分组和 MCP 工具生成带动态 id/name 的明确名称。UI baseline 使用一个真实配置形状的 MCP Server 和工具展开验证，避免只覆盖空列表。
+- UI baseline 实际定位高级压缩 7 项、独立 Agent API 7 项、NovelAI 队列 6 项、内置工具 4 项和 MCP 10 项，共 34 个当前可见条件控件；25 个场景全部 0 failure、0 console error、无溢出，四张展开态截图人工检查无布局回归。`settingsTabs` 12 个用例和全量 85 个测试文件、368 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 全部通过。AI、Tools、NovelAI chunk 分别为 26.34、20.34、12.40 kB；下一批集中展开 Persona 六个子标签及其嵌套条件状态。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

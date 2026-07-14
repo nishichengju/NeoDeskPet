@@ -726,6 +726,7 @@ export function AISettingsTab(props: {
               className="ndp-select"
               value={autoContextCompressionModel}
               disabled={!autoContextCompressionEnabled}
+              aria-label="压缩模型列表"
               onChange={(e) => api?.setAISettings({ autoContextCompressionModel: e.target.value })}
             >
               <option value="">
@@ -754,9 +755,10 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>上下文压缩触发阈值（占最大上下文百分比）</label>
+        <label htmlFor="ndp-ai-compression-threshold">上下文压缩触发阈值（占最大上下文百分比）</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-ai-compression-threshold"
             type="range"
             min="50"
             max="99"
@@ -771,9 +773,10 @@ export function AISettingsTab(props: {
       </div>
 
       <div className="ndp-setting-item">
-        <label>上下文压缩目标占比（压缩后尽量降到）</label>
+        <label htmlFor="ndp-ai-compression-target">上下文压缩目标占比（压缩后尽量降到）</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-ai-compression-target"
             type="range"
             min="35"
             max="95"
@@ -915,8 +918,9 @@ export function AISettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>工具 API Base URL</label>
+            <label htmlFor="ndp-ai-tool-base-url">工具 API Base URL</label>
             <input
+              id="ndp-ai-tool-base-url"
               type="text"
               className="ndp-input"
               value={toolAiBaseUrl}
@@ -929,8 +933,9 @@ export function AISettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>工具模型名称</label>
+            <label htmlFor="ndp-ai-tool-model">工具模型名称</label>
             <input
+              id="ndp-ai-tool-model"
               type="text"
               className="ndp-input"
               value={toolAiModel}
@@ -940,9 +945,10 @@ export function AISettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>工具温度 (Temperature)</label>
+            <label htmlFor="ndp-ai-tool-temperature">工具温度 (Temperature)</label>
             <div className="ndp-range-input">
               <input
+                id="ndp-ai-tool-temperature"
                 type="range"
                 min="0"
                 max="2"
@@ -955,9 +961,10 @@ export function AISettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>工具最大输出 (maxTokens)</label>
+            <label htmlFor="ndp-ai-tool-max-tokens">工具最大输出 (maxTokens)</label>
             <div className="ndp-range-input">
               <input
+                id="ndp-ai-tool-max-tokens"
                 type="range"
                 min="128"
                 max="8192"
@@ -970,8 +977,9 @@ export function AISettingsTab(props: {
           </div>
 
           <div className="ndp-setting-item">
-            <label>工具超时 (ms)</label>
+            <label htmlFor="ndp-ai-tool-timeout">工具超时 (ms)</label>
             <input
+              id="ndp-ai-tool-timeout"
               type="number"
               className="ndp-input"
               value={toolAiTimeoutMs}

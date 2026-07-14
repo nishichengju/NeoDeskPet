@@ -356,6 +356,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
         <label>工具总开关</label>
         <div className="ndp-row">
           <input
+            aria-label="工具总开关"
             type="checkbox"
             checked={effectiveToolSettings.enabled}
             onChange={(e) => onToggleGlobal(e.currentTarget.checked)}
@@ -392,6 +393,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
             <label>搜索</label>
             <div className="ndp-row">
               <input
+                aria-label="搜索工具"
                 className="ndp-input"
                 value={query}
                 onChange={(e) => setQuery(e.currentTarget.value)}
@@ -422,6 +424,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                     <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
                       <label className="ndp-toolcenter-toggle" title="分组开关（可覆盖总开关以外的默认）">
                         <input
+                          aria-label={`${groupId} 分组开关`}
                           type="checkbox"
                           checked={groupEffective}
                           onChange={(e) => onToggleGroup(groupId, e.currentTarget.checked)}
@@ -464,6 +467,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                               <div className="ndp-toolcenter-tool-actions" onClick={(e) => e.stopPropagation()}>
                                 <label className="ndp-toolcenter-toggle">
                                   <input
+                                    aria-label={`${d.name} 工具开关`}
                                     type="checkbox"
                                     checked={toolEnabled}
                                     onChange={(e) => onToggleTool(d.name, e.currentTarget.checked)}
@@ -532,6 +536,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
             <label>MCP 总开关</label>
             <div className="ndp-row">
               <input
+                aria-label="MCP 总开关"
                 type="checkbox"
                 checked={mcpEnabled}
                 onChange={(e) => void updateMcpSettings({ enabled: e.currentTarget.checked })}
@@ -637,6 +642,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                     <div className="ndp-toolcenter-group-actions" onClick={(e) => e.stopPropagation()}>
                       <label className="ndp-toolcenter-toggle" title="MCP Server 开关（关闭会断开连接并隐藏工具）">
                         <input
+                          aria-label={`${cfgId} MCP Server 开关`}
                           type="checkbox"
                           checked={cfg.enabled !== false}
                           onChange={(e) => updateMcpServer(idx, { enabled: e.currentTarget.checked })}
@@ -655,6 +661,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                       <label>Server ID（mcp.&lt;serverId&gt;.*）</label>
                       <div className="ndp-row">
                         <input
+                          aria-label={`${cfgId} Server ID`}
                           className="ndp-input"
                           defaultValue={cfgId}
                           placeholder="例如：local-tools"
@@ -669,6 +676,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                       <label>label（可选）</label>
                       <div className="ndp-row">
                         <input
+                          aria-label={`${cfgId} 显示名称`}
                           className="ndp-input"
                           defaultValue={cfg.label ?? ''}
                           placeholder="显示名称"
@@ -683,6 +691,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                       <label>command</label>
                       <div className="ndp-row">
                         <input
+                          aria-label={`${cfgId} command`}
                           className="ndp-input"
                           defaultValue={cfg.command ?? ''}
                           placeholder="例如：node"
@@ -695,6 +704,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                     <div className="ndp-setting-item">
                       <label>args（每行一个）</label>
                       <textarea
+                        aria-label={`${cfgId} args`}
                         className="ndp-input ndp-textarea"
                         defaultValue={formatArgsText(cfg.args)}
                         placeholder="例如：path/to/server.js"
@@ -707,6 +717,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                       <label>cwd（可选）</label>
                       <div className="ndp-row">
                         <input
+                          aria-label={`${cfgId} cwd`}
                           className="ndp-input"
                           defaultValue={cfg.cwd ?? ''}
                           placeholder="工作目录（空=默认）"
@@ -719,6 +730,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                     <div className="ndp-setting-item">
                       <label>env（KEY=VALUE，每行一个，可选）</label>
                       <textarea
+                        aria-label={`${cfgId} env`}
                         className="ndp-input ndp-textarea"
                         defaultValue={formatEnvText(cfg.env)}
                         placeholder={'# 例如：\nOPENAI_API_KEY=xxxx\nHTTP_PROXY=http://127.0.0.1:7890'}
@@ -732,6 +744,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                       <div className="ndp-row">
                         <label className="ndp-toolcenter-toggle" title="分组开关（可覆盖总开关以外的默认）">
                           <input
+                            aria-label={`${groupId} 工具分组开关`}
                             type="checkbox"
                             checked={groupEffective}
                             onChange={(e) => onToggleGroup(groupId, e.currentTarget.checked)}
@@ -782,6 +795,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
                                   <div className="ndp-toolcenter-tool-actions" onClick={(e) => e.stopPropagation()}>
                                     <label className="ndp-toolcenter-toggle">
                                       <input
+                                        aria-label={`${t.toolName} 工具开关`}
                                         type="checkbox"
                                         checked={toolEnabled}
                                         onChange={(e) => onToggleTool(t.toolName, e.currentTarget.checked)}

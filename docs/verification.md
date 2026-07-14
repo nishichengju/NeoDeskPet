@@ -1501,3 +1501,23 @@
 | `npm run ui:baseline` | 25 个场景通过；真实无障碍树按 role + name 定位 26 项，0 failure、0 console error、无溢出 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-chat-ui-background-controls.png` 与 `settings-default-860x680-scale100-chat-ui-bubble-controls.png`，三组 RGBA 行、成对滑块/数字输入、背景透明度与气泡圆角没有出现标签重叠、宽度变化或滚动异常。默认视图最初 86 个缺名控件已累计收口 84 个，仅剩工具中心 2 项；Persona 子标签、Tools/MCP 动态编辑内容、NovelAI 云端队列、AI 高级上下文压缩和 Agent 自定义工具 API 等条件区域仍留到动态状态专项审计。
+
+## P2-3：无障碍与交互一致性（第七十一批）
+
+- 验证日期：2026-07-14
+- 优化范围：AI 高级压缩与独立 Agent API、NovelAI 云端队列、Tools/MCP 动态配置的程序化名称
+
+| 检查 | 结果 |
+| --- | --- |
+| AI 条件控件 | 压缩模型列表、触发阈值、目标占比，以及工具 Base URL、模型、温度、最大输出和超时共 8 类新增关联；浏览器连同既有开关、配置和密钥输入实际定位 7+7 项 |
+| NovelAI 队列 | 服务地址、用户 ID、个性语通过稳定 id 关联；轮询间隔和最长等待时间分别命名，浏览器连同队列开关定位 6 项 |
+| Tools 默认与动态内容 | 工具总开关、搜索、内置分组/工具、MCP 总开关、Server 开关、Server ID/显示名称/command/args/cwd/env、Server 分组和 MCP 工具均有可区分名称 |
+| 聚焦测试 | `settingsTabs` 共 12 个用例通过，扩展 Tools 默认控件、NovelAI 队列、AI 高级压缩和独立 Agent API 静态契约 |
+| `npm test` | 85 个测试文件、368 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；AI、Tools、NovelAI chunk 分别为 26.34、20.34、12.40 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，MCP/Agent/设置持久化、密钥隔离、权限与媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；高级压缩 7、独立 Agent API 7、NovelAI 队列 6、内置工具 4、MCP 10 项按 role + name 定位，0 failure、0 console error、无溢出 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-ai-compression-controls.png`、`settings-default-860x680-scale100-ai-custom-agent-controls.png`、`settings-default-860x680-scale100-novelai-queue-controls.png` 与 `settings-default-860x680-scale100-tools-conditional-controls.png`，展开后的选择框、长文本输入、成对数值输入、滑块和 MCP Server 编辑器没有出现重叠、宽度变化或异常横向滚动。默认视图最初 86 个缺名控件已全部收口；Persona 六个子标签及其嵌套条件状态仍需下一批逐页展开，之后再用全 Settings 自动门禁证明没有遗漏。
