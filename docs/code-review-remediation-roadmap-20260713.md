@@ -1135,6 +1135,13 @@ AI 与能力
 - 新增统一 `.ndp-setting-error` 颜色，浏览器基线实际输入密钥、失焦触发失败，验证字段 invalid/描述关联、局部 live-region、全局 idle 和编辑清理；错误态截图人工检查无布局回归。25 个场景全部 0 failure、0 console error、无溢出。
 - `npm test` 共 85 个测试文件、363 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批可继续审计 Tools/Persona 等设置 mutation 的 catch 分支，区分已有全局错误覆盖与真正缺失的局部恢复信息。
 
+第六十六批进展（2026-07-14）：
+
+- 对 Settings 的 14 个主页面进行真实 DOM 可见表单控件审计，在修正审计脚本自身误报后确认默认视图有 86 个控件缺少程序化名称。本批先完成语音边界：ASR 的 WebSocket 地址、采集方式、热词替换规则和语气词列表，以及 TTS 的 GPT/SoVITS 模型、语速、参考音频、参考音频文本、播放文本和两种分句停顿输入。
+- 单一控件统一通过稳定 id 与 `label/htmlFor` 建立关联；同一视觉标签下的分句停顿 range 与 number 分别使用“分句停顿滑块”和“分句停顿毫秒”，避免辅助技术遇到两个无法区分的同名控件。没有改变字段值、保存时机、扫描行为、错误状态或视觉样式。
+- UI baseline 在默认 Settings 场景真实进入语音识别和语音合成页面，用 role + accessible name 定位 ASR 4 项与 TTS 8 项；25 个场景全部 0 failure、0 console error、无横向或纵向溢出。ASR/TTS 错误态截图人工检查无布局回归，既有资源错误关联仍然通过。
+- `settingsTabs` 7 个用例、全量 85 个测试文件和 363 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图还剩 74 个缺名控件，下一批优先处理 Live2D、气泡和任务面板；Persona 子标签、Tools 动态内容等必须展开条件状态后重新审计，不能以默认视图“未发现”代替完成。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

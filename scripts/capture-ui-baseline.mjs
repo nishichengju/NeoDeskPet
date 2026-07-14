@@ -784,7 +784,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -1886,6 +1886,32 @@ async function runUiBaseline(browser) {
       if (!tts.clearedOnEdit) failures.push('TTS scan error did not clear after editing the installation directory')
     }
 
+    let settingsVoiceControlNames = null
+    if (baseline.verifySettingsVoiceControlNames) {
+      await page.getByRole('button', { name: '语音识别', exact: true }).click()
+      const asrControls = [
+        page.getByRole('textbox', { name: 'WebSocket 地址', exact: true }),
+        page.getByRole('combobox', { name: '采集方式', exact: true }),
+        page.getByRole('textbox', { name: '热词替换规则（逐行）', exact: true }),
+        page.getByRole('textbox', { name: '语气词列表（逗号/换行分隔）', exact: true }),
+      ]
+      await Promise.all(asrControls.map((control) => control.waitFor({ state: 'visible' })))
+
+      await page.getByRole('button', { name: '语音合成', exact: true }).click()
+      const ttsControls = [
+        page.getByRole('combobox', { name: 'GPT 模型', exact: true }),
+        page.getByRole('combobox', { name: 'SoVITS 模型', exact: true }),
+        page.getByRole('slider', { name: '语速', exact: true }),
+        page.getByRole('combobox', { name: '参考音频', exact: true }),
+        page.getByRole('textbox', { name: '参考音频文本（自动从文件名解析，可编辑）', exact: true }),
+        page.getByRole('combobox', { name: 'TTS 播放文本', exact: true }),
+        page.getByRole('slider', { name: '分句停顿滑块', exact: true }),
+        page.getByRole('spinbutton', { name: '分句停顿毫秒', exact: true }),
+      ]
+      await Promise.all(ttsControls.map((control) => control.waitFor({ state: 'visible' })))
+      settingsVoiceControlNames = { asr: asrControls.length, tts: ttsControls.length }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2029,6 +2055,7 @@ async function runUiBaseline(browser) {
       settingsSecretSaveError,
       settingsAiModelErrors,
       settingsResourceErrors,
+      settingsVoiceControlNames,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

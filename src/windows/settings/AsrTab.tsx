@@ -80,8 +80,14 @@ export function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>WebSocket 地址</label>
-        <input type="text" className="ndp-input" value={wsUrl} onChange={(e) => api?.setAsrSettings({ wsUrl: e.target.value })} />
+        <label htmlFor="ndp-asr-ws-url">WebSocket 地址</label>
+        <input
+          id="ndp-asr-ws-url"
+          type="text"
+          className="ndp-input"
+          value={wsUrl}
+          onChange={(e) => api?.setAsrSettings({ wsUrl: e.target.value })}
+        />
         <p className="ndp-setting-hint">示例：{OPEN_TYPELESS_ASR_DEFAULT_WS_URL}（OpenTypeless 实时识别 ws）</p>
         <p className="ndp-setting-hint">端口不是固定的，可改成如 `ws://127.0.0.1:9000/demo/ws/realtime`；自动托管会按该端口启动本地 API。</p>
         {usingOpenTypelessWs ? (
@@ -90,8 +96,9 @@ export function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>采集方式</label>
+        <label htmlFor="ndp-asr-capture-backend">采集方式</label>
         <select
+          id="ndp-asr-capture-backend"
           className="ndp-select"
           value={captureBackend}
           onChange={(e) => api?.setAsrSettings({ captureBackend: e.target.value as AppSettings['asr']['captureBackend'] })}
@@ -195,8 +202,9 @@ export function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSetti
       <h3>本地文本规则（OpenTypeless 风格）</h3>
 
       <div className="ndp-setting-item">
-        <label>热词替换规则（逐行）</label>
+        <label htmlFor="ndp-asr-replace-rules">热词替换规则（逐行）</label>
         <textarea
+          id="ndp-asr-replace-rules"
           className="ndp-textarea"
           rows={5}
           value={replaceRules}
@@ -207,8 +215,9 @@ export function AsrSettingsTab(props: { api: ReturnType<typeof getApi>; asrSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>语气词列表（逗号/换行分隔）</label>
+        <label htmlFor="ndp-asr-filler-words">语气词列表（逗号/换行分隔）</label>
         <textarea
+          id="ndp-asr-filler-words"
           className="ndp-textarea"
           rows={3}
           value={fillerWords}

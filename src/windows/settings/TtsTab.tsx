@@ -99,8 +99,9 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>GPT 模型</label>
+        <label htmlFor="ndp-tts-gpt-model">GPT 模型</label>
         <select
+          id="ndp-tts-gpt-model"
           className="ndp-select"
           value={gptWeightsPath}
           aria-describedby={optionsError ? optionsErrorId : undefined}
@@ -121,8 +122,9 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>SoVITS 模型</label>
+        <label htmlFor="ndp-tts-sovits-model">SoVITS 模型</label>
         <select
+          id="ndp-tts-sovits-model"
           className="ndp-select"
           value={sovitsWeightsPath}
           aria-describedby={optionsError ? optionsErrorId : undefined}
@@ -144,9 +146,10 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>语速</label>
+        <label htmlFor="ndp-tts-speed">语速</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-tts-speed"
             type="range"
             min="0.5"
             max="2"
@@ -159,8 +162,9 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>参考音频</label>
+        <label htmlFor="ndp-tts-ref-audio">参考音频</label>
         <select
+          id="ndp-tts-ref-audio"
           className="ndp-select"
           value={refAudioPath}
           aria-describedby={optionsError ? optionsErrorId : undefined}
@@ -179,8 +183,9 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>参考音频文本（自动从文件名解析，可编辑）</label>
+        <label htmlFor="ndp-tts-prompt-text">参考音频文本（自动从文件名解析，可编辑）</label>
         <textarea
+          id="ndp-tts-prompt-text"
           className="ndp-textarea"
           value={promptText}
           rows={3}
@@ -204,8 +209,9 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
       </div>
 
       <div className="ndp-setting-item">
-        <label>TTS 播放文本</label>
+        <label htmlFor="ndp-tts-playback-text-mode">TTS 播放文本</label>
         <select
+          id="ndp-tts-playback-text-mode"
           className="ndp-select"
           value={playbackTextMode}
           onChange={(e) =>
@@ -251,6 +257,7 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
         <label>分句停顿（ms）</label>
         <div className="ndp-range-input">
           <input
+            aria-label="分句停顿滑块"
             type="range"
             min="0"
             max="60000"
@@ -259,6 +266,7 @@ export function TtsSettingsTab(props: { api: ReturnType<typeof getApi>; ttsSetti
             onChange={(e) => api?.setTtsSettings({ pauseMs: parseInt(e.target.value) })}
           />
           <input
+            aria-label="分句停顿毫秒"
             className="ndp-input"
             style={{ width: 96 }}
             type="number"

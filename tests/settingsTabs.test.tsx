@@ -68,20 +68,42 @@ describe('settings tabs', () => {
     expect(() => parseMcpImportText('{"mcpServers":{}}')).toThrow('未解析到任何 MCP Server')
   })
 
-  it('associates the ASR microphone label with its device selector', () => {
+  it('associates ASR field labels with their controls', () => {
     const html = renderToStaticMarkup(createElement(AsrSettingsTab, { api, asrSettings: undefined }))
 
+    expect(html).toContain('<label for="ndp-asr-ws-url">WebSocket 地址</label>')
+    expect(html).toContain('id="ndp-asr-ws-url"')
+    expect(html).toContain('<label for="ndp-asr-capture-backend">采集方式</label>')
+    expect(html).toContain('id="ndp-asr-capture-backend"')
     expect(html).toContain('<label for="ndp-asr-mic-device">选择麦克风</label>')
     expect(html).toContain('id="ndp-asr-mic-device"')
     expect(html).toContain('aria-busy="false"')
+    expect(html).toContain('<label for="ndp-asr-replace-rules">热词替换规则（逐行）</label>')
+    expect(html).toContain('id="ndp-asr-replace-rules"')
+    expect(html).toContain('<label for="ndp-asr-filler-words">语气词列表（逗号/换行分隔）</label>')
+    expect(html).toContain('id="ndp-asr-filler-words"')
   })
 
-  it('associates the TTS installation directory label and initial validity', () => {
+  it('names TTS fields and paired pause controls', () => {
     const html = renderToStaticMarkup(createElement(TtsSettingsTab, { api, ttsSettings: undefined }))
 
     expect(html).toContain('<label for="ndp-tts-root">GPT-SoVITS 安装目录（绝对路径）</label>')
     expect(html).toContain('id="ndp-tts-root"')
     expect(html).toContain('aria-invalid="false"')
+    expect(html).toContain('<label for="ndp-tts-gpt-model">GPT 模型</label>')
+    expect(html).toContain('id="ndp-tts-gpt-model"')
+    expect(html).toContain('<label for="ndp-tts-sovits-model">SoVITS 模型</label>')
+    expect(html).toContain('id="ndp-tts-sovits-model"')
+    expect(html).toContain('<label for="ndp-tts-speed">语速</label>')
+    expect(html).toContain('id="ndp-tts-speed"')
+    expect(html).toContain('<label for="ndp-tts-ref-audio">参考音频</label>')
+    expect(html).toContain('id="ndp-tts-ref-audio"')
+    expect(html).toContain('<label for="ndp-tts-prompt-text">参考音频文本（自动从文件名解析，可编辑）</label>')
+    expect(html).toContain('id="ndp-tts-prompt-text"')
+    expect(html).toContain('<label for="ndp-tts-playback-text-mode">TTS 播放文本</label>')
+    expect(html).toContain('id="ndp-tts-playback-text-mode"')
+    expect(html).toContain('aria-label="分句停顿滑块"')
+    expect(html).toContain('aria-label="分句停顿毫秒"')
   })
 
   it('names the AI model-list controls without marking joint errors as field validity', () => {

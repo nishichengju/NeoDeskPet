@@ -1399,3 +1399,23 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-secret-save-error.png`，错误紧邻 API Key 输入和帮助文本，红色提示没有改变输入/清除按钮宽度或后续 Base URL 布局。UI 报告中的 `invalid=true`、`describedBy=ndp-secret-ai-main-error`、`role=alert`、`live=assertive`、`atomic=true`、`globalSaveState=idle`、`clearedOnEdit=true`。基线随后切换页面重挂组件再执行 AI 模型错误场景，避免未失焦草稿造成测试状态串扰；所有场景仍保持无 console error。
+
+## P2-3：无障碍与交互一致性（第六十六批）
+
+- 验证日期：2026-07-14
+- 优化范围：语音合成与语音识别设置中 12 个可见表单控件的程序化名称
+
+| 检查 | 结果 |
+| --- | --- |
+| ASR 控件命名 | WebSocket 地址、采集方式、热词替换规则和语气词列表通过 `label/htmlFor` 与稳定 id 关联 |
+| TTS 控件命名 | GPT 模型、SoVITS 模型、语速、参考音频、参考音频文本和播放文本通过 `label/htmlFor` 关联；分句停顿滑块与数值框分别命名，避免同名歧义 |
+| 聚焦测试 | `settingsTabs` 共 7 个用例通过，覆盖新增 label/id 和双控件 `aria-label` 静态契约 |
+| `npm test` | 85 个测试文件、363 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；TTS chunk 7.39 kB、ASR chunk 7.52 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 `runtimeErrors` 为空，权限、持久化、语音代理与本地媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；真实无障碍树按 role + name 定位 ASR 4 项、TTS 8 项，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-asr-device-error.png` 与 `artifacts/ui-baseline/settings-default-860x680-scale100-tts-scan-error.png`，新增关联不改变控件尺寸、表单排列或错误提示位置。UI 报告中的 `settingsVoiceControlNames={asr:4,tts:8}`，并继续保留上一批资源错误的描述关联、invalid 状态和编辑恢复门禁。本轮真实 DOM 审计最初发现 86 个缺少程序化名称的可见控件，本批收口其中 12 个；其余 74 个仍需按页面分批处理，动态子标签和条件控件还必须展开后复审。
