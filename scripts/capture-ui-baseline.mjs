@@ -536,6 +536,10 @@ function installSettingsMock(page) {
         scanModels: async () => [],
         listPersonas: async () => [],
         listMemory: async () => ({ total: 0, items: [] }),
+        listTasks: async () => ({ items: [] }),
+        onTasksChanged: () => off,
+        getMcpState: async () => ({ servers: [], tools: [] }),
+        onMcpChanged: () => off,
         openMemory: async () => undefined,
         closeCurrent: async () => undefined,
       },
@@ -755,6 +759,7 @@ const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
   { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
   { name: 'orb-bar-560x80-scale100', route: 'orb', width: 560, height: 80, scale: 1, mockOrbState: 'bar' },
@@ -789,6 +794,7 @@ async function runUiBaseline(browser) {
     const context = await browser.newContext({
       viewport: { width: baseline.width, height: baseline.height },
       deviceScaleFactor: baseline.scale,
+      reducedMotion: baseline.reducedMotion ? 'reduce' : 'no-preference',
     })
     const page = await context.newPage()
     const consoleErrors = []
@@ -861,6 +867,31 @@ async function runUiBaseline(browser) {
     })
 
     const failures = []
+    let reducedMotion = null
+    if (baseline.verifyReducedMotion) {
+      reducedMotion = await page.evaluate(() => {
+        const probe = document.createElement('button')
+        probe.className = 'ndp-tab-btn ndp-setting-search-hit'
+        document.body.appendChild(probe)
+        const style = getComputedStyle(probe)
+        const result = {
+          animationDuration: style.animationDuration,
+          animationIterationCount: style.animationIterationCount,
+          transitionDuration: style.transitionDuration,
+        }
+        probe.remove()
+        return result
+      })
+      const durationToMs = (value) => {
+        const first = String(value).split(',')[0]?.trim() ?? ''
+        const amount = Number.parseFloat(first)
+        if (!Number.isFinite(amount)) return Number.POSITIVE_INFINITY
+        return first.endsWith('ms') ? amount : amount * 1000
+      }
+      if (durationToMs(reducedMotion.animationDuration) > 1) failures.push('reduced motion animation duration exceeds 1ms')
+      if (durationToMs(reducedMotion.transitionDuration) > 1) failures.push('reduced motion transition duration exceeds 1ms')
+      if (reducedMotion.animationIterationCount !== '1') failures.push('reduced motion animation still repeats')
+    }
     if (metrics.horizontalOverflow) failures.push('body has horizontal overflow')
     const expectedRouteChunk = {
       pet: 'PetWindowEntry-',
@@ -1505,6 +1536,7 @@ async function runUiBaseline(browser) {
     }
 
     let settingsSearch = null
+    let settingsTabs = null
     if (baseline.verifySettingsSearch) {
       await page.evaluate(() => window.__navigateSettings?.('aiConnection'))
       await page.getByRole('heading', { name: 'API 连接', exact: true }).waitFor({ state: 'visible' })
@@ -1561,12 +1593,36 @@ async function runUiBaseline(browser) {
         failures.push(`deep settings search opened subtab ${settingsSearch.deepSearch.activeSubTab || 'nothing'}`)
       }
       if (!settingsSearch.deepSearch.highlighted) failures.push('deep settings search did not highlight the vector section')
+
+      const personaTablist = page.getByRole('tablist', { name: '角色与长期记忆设置' })
+      const textVectorTab = personaTablist.getByRole('tab', { name: '文本向量', exact: true })
+      await textVectorTab.focus()
+      await page.keyboard.press('ArrowRight')
+      const multimodalTab = personaTablist.getByRole('tab', { name: '多模态向量', exact: true })
+      const personaArrow = await multimodalTab.evaluate((element) => element === document.activeElement && element.getAttribute('aria-selected') === 'true')
+      await page.keyboard.press('Home')
+      const personaHome = await personaTablist.getByRole('tab', { name: '角色', exact: true }).evaluate((element) => element === document.activeElement && element.getAttribute('aria-selected') === 'true')
+      await page.keyboard.press('End')
+      const personaEnd = await personaTablist.getByRole('tab', { name: '管理', exact: true }).evaluate((element) => element === document.activeElement && element.getAttribute('aria-selected') === 'true')
+
+      await page.getByRole('button', { name: '工具中心', exact: true }).click()
+      const toolsTablist = page.getByRole('tablist', { name: '工具中心设置' })
+      await toolsTablist.waitFor({ state: 'visible' })
+      const builtinTab = toolsTablist.getByRole('tab', { name: '内置工具', exact: true })
+      await builtinTab.focus()
+      await page.keyboard.press('ArrowRight')
+      const toolsArrow = await toolsTablist.getByRole('tab', { name: 'MCP', exact: true }).evaluate((element) => element === document.activeElement && element.getAttribute('aria-selected') === 'true')
+      await page.keyboard.press('ArrowRight')
+      const toolsWrap = await builtinTab.evaluate((element) => element === document.activeElement && element.getAttribute('aria-selected') === 'true')
+      settingsTabs = { personaArrow, personaHome, personaEnd, toolsArrow, toolsWrap }
+      if (Object.values(settingsTabs).some((value) => !value)) failures.push('settings tabs keyboard navigation or focus state failed')
     }
 
     let settingsConfirmDialog = null
     if (baseline.verifyConfirmDialog) {
       await page.getByRole('button', { name: '设定库', exact: true }).click()
       const deleteButton = page.getByRole('button', { name: '删除', exact: true })
+      await deleteButton.waitFor({ state: 'visible' })
       await deleteButton.click()
       const dialog = page.getByRole('dialog')
       await dialog.waitFor({ state: 'visible' })
@@ -1662,9 +1718,11 @@ async function runUiBaseline(browser) {
       toolCard,
       settingsNavigation,
       settingsSearch,
+      settingsTabs,
       settingsConfirmDialog,
       aiSplit,
       settingsLazyAssets,
+      reducedMotion,
       consoleErrors,
       failures,
     })

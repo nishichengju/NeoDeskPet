@@ -1,14 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { AppSettings, Persona, PersonaSummary } from '../../../electron/types'
 import { getApi } from '../../neoDeskPetApi'
 import { SecretSettingInput } from './SecretSettingInput'
 import type { SettingsConfirmAction } from './settingsConfirm'
+import { getSettingsTabTargetIndex } from './settingsTabs'
+
+const PERSONA_SUB_TABS = [
+  { id: 'persona', label: '角色' },
+  { id: 'memory', label: '记忆' },
+  { id: 'recall', label: '召回' },
+  { id: 'textVector', label: '文本向量' },
+  { id: 'mmVector', label: '多模态向量' },
+  { id: 'manage', label: '管理' },
+] as const
+
+type PersonaSubTab = (typeof PERSONA_SUB_TABS)[number]['id']
 
 export function PersonaSettingsTab(props: {
   api: ReturnType<typeof getApi>
   settings: AppSettings | null
   confirmAction?: SettingsConfirmAction
-  requestedSubTab?: 'persona' | 'memory' | 'recall' | 'textVector' | 'mmVector' | 'manage'
+  requestedSubTab?: PersonaSubTab
 }) {
   const { api, settings, confirmAction, requestedSubTab } = props
   const activePersonaId = settings?.activePersonaId ?? 'default'
@@ -58,7 +70,7 @@ export function PersonaSettingsTab(props: {
   const [currentPersona, setCurrentPersona] = useState<Persona | null>(null)
   const [draftName, setDraftName] = useState('')
   const [draftPrompt, setDraftPrompt] = useState('')
-  const [subTab, setSubTab] = useState<'persona' | 'memory' | 'recall' | 'textVector' | 'mmVector' | 'manage'>('persona')
+  const [subTab, setSubTab] = useState<PersonaSubTab>('persona')
   const [memScope, setMemScope] = useState<'persona' | 'shared' | 'all'>('persona')
   const [memRole, setMemRole] = useState<'all' | 'user' | 'assistant' | 'note'>('all')
   const [memQuery, setMemQuery] = useState('')
@@ -251,28 +263,40 @@ export function PersonaSettingsTab(props: {
     )
   }
 
+  const onSubTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    const targetIndex = getSettingsTabTargetIndex(currentIndex, PERSONA_SUB_TABS.length, event.key)
+    if (targetIndex == null) return
+    event.preventDefault()
+    const target = PERSONA_SUB_TABS[targetIndex]
+    setSubTab(target.id)
+    event.currentTarget.parentElement
+      ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+      .item(targetIndex)
+      .focus()
+  }
+
   return (
     <div className="ndp-settings-section">
-      <div className="ndp-settings-subtabs">
-        <button className={`ndp-tab-btn ${subTab === 'persona' ? 'active' : ''}`} onClick={() => setSubTab('persona')}>
-          角色
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'memory' ? 'active' : ''}`} onClick={() => setSubTab('memory')}>
-          记忆
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'recall' ? 'active' : ''}`} onClick={() => setSubTab('recall')}>
-          召回
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'textVector' ? 'active' : ''}`} onClick={() => setSubTab('textVector')}>
-          文本向量
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'mmVector' ? 'active' : ''}`} onClick={() => setSubTab('mmVector')}>
-          多模态向量
-        </button>
-        <button className={`ndp-tab-btn ${subTab === 'manage' ? 'active' : ''}`} onClick={() => setSubTab('manage')}>
-          管理
-        </button>
+      <div className="ndp-settings-subtabs" role="tablist" aria-label="角色与长期记忆设置">
+        {PERSONA_SUB_TABS.map((tab, index) => (
+          <button
+            key={tab.id}
+            id={`ndp-persona-tab-${tab.id}`}
+            type="button"
+            role="tab"
+            aria-controls="ndp-persona-tabpanel"
+            aria-selected={subTab === tab.id}
+            tabIndex={subTab === tab.id ? 0 : -1}
+            className={`ndp-tab-btn ${subTab === tab.id ? 'active' : ''}`}
+            onClick={() => setSubTab(tab.id)}
+            onKeyDown={(event) => onSubTabKeyDown(event, index)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
+
+      <div id="ndp-persona-tabpanel" role="tabpanel" aria-labelledby={`ndp-persona-tab-${subTab}`}>
 
       {subTab === 'persona' ? (
         <>
@@ -945,6 +969,7 @@ export function PersonaSettingsTab(props: {
           </div>
         </>
       ) : null}
+      </div>
     </div>
   )
 }

@@ -1253,3 +1253,25 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/chat-compact-420x560-scale100-clear-confirm.png`、`artifacts/ui-baseline/settings-default-860x680-scale100-confirm.png`、`artifacts/ui-baseline/chat-image-viewer-720x620-scale100-open.png` 与 `artifacts/ui-baseline/orb-image-viewer-560x720-scale100-open.png`，焦点轮廓位于预期危险动作或关闭/重置工具上，弹窗尺寸、遮罩、按钮排列和图片舞台没有新增错位。UI 报告中 Settings、Chat 图片和 Orb 图片的 `initialFocus`、`forwardWrap`、`backwardWrap`、`returnFocus` 全为 `true`；Chat 清空确认框同样通过运行时断言。当前实现按应用现有弹窗层级处理单一 modal，尚未建立嵌套弹窗栈，也未对背景区域统一设置 `inert`；共享 selector 覆盖现有 button/link/form/tabindex 控件，但未扩展到 `contenteditable` 等当前未使用类型。下一批继续补 Settings/Chat tabs 的 tablist/tab/tabpanel 语义和 `prefers-reduced-motion`。
+
+## P2-3：无障碍与交互一致性（第五十九批）
+
+- 验证日期：2026-07-14
+- 优化范围：Settings 角色/记忆与工具中心子标签语义、键盘导航和系统减少动效支持
+
+| 检查 | 结果 |
+| --- | --- |
+| 标签页语义 | 六个角色/记忆子页与两个工具中心子页增加命名 `tablist`、`tab`、`tabpanel`、`aria-selected`、`aria-controls`、`aria-labelledby` 和 roving `tabIndex` |
+| 键盘行为 | Left/Right 循环切换，Home/End 定位首尾；选中态、焦点和当前 panel 标题关联同步更新 |
+| Reduced motion | `prefers-reduced-motion: reduce` 下全局动画与过渡缩短为 `0.01ms`、重复次数降为 1、平滑滚动关闭；业务状态机和最终布局不变 |
+| 聚焦测试 | `settingsTabs` 与 `settingsNavigation` 共 2 个文件、12 个用例通过；覆盖循环计算、Home/End、两组静态 ARIA 契约和既有搜索导航 |
+| Renderer bundle | `settingsTabs` 共享 chunk 0.14 kB；主 chunk 146.34 kB、Settings 15.28 kB、Persona 22.76 kB、Tools 19.81 kB、主 CSS 42.89 kB |
+| `npm test` | 84 个测试文件、356 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 runtimeErrors 为空，安全、持久化、媒体 Range 与拒绝路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；新增 reduced-motion Settings 场景，computed animation/transition 均不超过 1ms且迭代次数为 1；两组标签页方向键/Home/End、焦点和选中态全部通过，0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100.png` 与 `artifacts/ui-baseline/settings-reduced-motion-860x680-scale100.png`，标签按钮尺寸、换行、内容区宽度和 reduced-motion 最终画面无视觉回归。Chat 主窗口本轮审计未发现真正的 tab widget，因此没有为普通按钮或会话列表误加 tab 角色。当前 reduced-motion 采用应用级统一媒体查询，能覆盖 App、SpeechBubble 与 Orb 已加载样式；Live2D 模型自身的内部物理和眨眼由模型运行时控制，尚未跟随系统设置暂停。下一批继续统一 toast、错误提示和保存状态的 live-region 播报。

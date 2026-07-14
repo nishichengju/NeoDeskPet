@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type {
   AppSettings,
   McpServerConfig,
@@ -7,6 +7,14 @@ import type {
 } from '../../../electron/types'
 import { getBuiltinToolDefinitions, getToolGroupId, isToolEnabled } from '../../../electron/toolRegistry'
 import { getApi } from '../../neoDeskPetApi'
+import { getSettingsTabTargetIndex } from './settingsTabs'
+
+const TOOL_SUB_TABS = [
+  { id: 'builtin', label: '内置工具' },
+  { id: 'mcp', label: 'MCP' },
+] as const
+
+type ToolSubTab = (typeof TOOL_SUB_TABS)[number]['id']
 
 export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settings: AppSettings | null }) {
   const { api, settings } = props
@@ -15,7 +23,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
 
   const [query, setQuery] = useState('')
   const [tasks, setTasks] = useState<TaskRecord[]>([])
-  const [subTab, setSubTab] = useState<'builtin' | 'mcp'>('builtin')
+  const [subTab, setSubTab] = useState<ToolSubTab>('builtin')
   const [mcpState, setMcpState] = useState<McpStateSnapshot | null>(null)
 
   useEffect(() => {
@@ -406,6 +414,18 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
     setMcpImportText(buildMcpExportText(mcpServers))
   }, [buildMcpExportText, mcpServers])
 
+  const onSubTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+    const targetIndex = getSettingsTabTargetIndex(currentIndex, TOOL_SUB_TABS.length, event.key)
+    if (targetIndex == null) return
+    event.preventDefault()
+    const target = TOOL_SUB_TABS[targetIndex]
+    setSubTab(target.id)
+    event.currentTarget.parentElement
+      ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+      .item(targetIndex)
+      .focus()
+  }
+
   return (
     <div className="ndp-settings-section">
       <h3>工具中心</h3>
@@ -423,14 +443,26 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
         </div>
       </div>
 
-      <div className="ndp-toolcenter-subtabs">
-        <button className={`ndp-btn ${subTab === 'builtin' ? 'active' : ''}`} onClick={() => setSubTab('builtin')}>
-          内置工具
-        </button>
-        <button className={`ndp-btn ${subTab === 'mcp' ? 'active' : ''}`} onClick={() => setSubTab('mcp')}>
-          MCP
-        </button>
+      <div className="ndp-toolcenter-subtabs" role="tablist" aria-label="工具中心设置">
+        {TOOL_SUB_TABS.map((tab, index) => (
+          <button
+            key={tab.id}
+            id={`ndp-tools-tab-${tab.id}`}
+            type="button"
+            role="tab"
+            aria-controls="ndp-tools-tabpanel"
+            aria-selected={subTab === tab.id}
+            tabIndex={subTab === tab.id ? 0 : -1}
+            className={`ndp-btn ${subTab === tab.id ? 'active' : ''}`}
+            onClick={() => setSubTab(tab.id)}
+            onKeyDown={(event) => onSubTabKeyDown(event, index)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
+
+      <div id="ndp-tools-tabpanel" role="tabpanel" aria-labelledby={`ndp-tools-tab-${subTab}`}>
 
       {subTab === 'builtin' ? (
         <>
@@ -859,6 +891,7 @@ export function ToolsSettingsTab(props: { api: ReturnType<typeof getApi>; settin
           </div>
         </>
       )}
+      </div>
     </div>
   )
 }

@@ -1086,6 +1086,13 @@ AI 与能力
 - UI baseline 对四类界面增加真实键盘门禁：确认初始焦点，验证末项 Tab 到首项及 Shift+Tab 返回，按 Esc 后确认弹窗消失并回到触发按钮；Orb 查看器在焦点位于弹窗内时直接按 D 完成 `1/2 → 2/2`。24 个场景全部 0 failure、0 console error、无横向或纵向溢出，报告中的查看器和 Settings 四项焦点字段均为 `true`。
 - 3 个聚焦测试文件共 6 个用例通过；全量 `npm test` 为 83 个测试文件、353 个用例。TypeScript、lint、三项脚本语法检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。共享 hook chunk 为 1.39 kB，主 chunk 146.34 kB、Chat 126.42 kB、Settings 15.25 kB、Orb 50.17 kB。下一批继续补 tabs 语义与 reduced motion，之后再统一 toast、错误和保存状态播报。
 
+第五十九批进展（2026-07-14）：
+
+- Settings 的“角色与长期记忆”六个子页和“工具中心”两个子页改为标准 tablist/tab/tabpanel 结构，补齐选中态、控件关联和 roving `tabIndex`；共享 0.14 kB 纯函数统一 Left/Right 循环与 Home/End 首尾定位，键盘切换后焦点、选中态和 panel 标题关联同步更新。
+- `App.css` 增加 `prefers-reduced-motion: reduce`，把应用动画和过渡压缩到 `0.01ms`、迭代限制为 1 并关闭平滑滚动，不改变最终样式或 Orb 状态机计时。Chat 审计未发现真正 tab widget，因此没有误用 tab 角色。
+- UI baseline 增至 25 个场景，新增 reduced-motion Settings 场景并读取 computed style；动画/过渡均不超过 1ms且不再重复。默认 Settings 场景实际验证角色子页 ArrowRight/Home/End 与工具中心 ArrowRight/循环，所有焦点和 `aria-selected` 断言为 true。
+- `npm test` 共 84 个测试文件、356 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。主 chunk 146.34 kB、Settings 15.28 kB、Persona 22.76 kB、Tools 19.81 kB、主 CSS 42.89 kB。下一批统一 toast、错误提示和保存状态的 live-region 播报。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：
