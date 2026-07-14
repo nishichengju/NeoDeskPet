@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { getApi } from '../src/neoDeskPetApi'
 import { BubbleSettingsTab } from '../src/windows/settings/BubbleTab'
+import { ChatUiSettingsTab } from '../src/windows/settings/ChatUiTab'
 import { Live2DSettingsTab } from '../src/windows/settings/Live2DTab'
 import { NovelAISettingsTab } from '../src/windows/settings/NovelAITab'
 import { PersonaSettingsTab } from '../src/windows/settings/PersonaTab'
@@ -118,6 +119,22 @@ describe('settings tabs', () => {
     expect(html).toContain('aria-label="生成张数"')
     expect(html).toContain('aria-label="随机种子"')
     expect(html).toContain('id="ndp-novelai-output-dir"')
+  })
+
+  it('distinguishes chat RGBA sliders and numeric inputs', () => {
+    const html = renderToStaticMarkup(createElement(ChatUiSettingsTab, { api, chatUi: undefined }))
+    const groups = ['聊天背景', '用户气泡', '助手气泡']
+    const channels = ['红色', '绿色', '蓝色', '透明度']
+
+    for (const group of groups) {
+      for (const channel of channels) {
+        expect(html).toContain(`aria-label="${group}${channel}滑块"`)
+        expect(html).toContain(`aria-label="${group}${channel}数值"`)
+      }
+    }
+    expect(html).toContain('aria-label="背景图片透明度"')
+    expect(html).toContain('<label for="ndp-chat-ui-bubble-radius">气泡圆角</label>')
+    expect(html).toContain('id="ndp-chat-ui-bubble-radius"')
   })
 
   it('parses supported MCP import formats and rejects empty server sets', () => {

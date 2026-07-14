@@ -47,6 +47,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
     onChange: (next: string) => void
   }) => {
     const rgba = parseRgba(opts.value, { r: 20, g: 20, b: 24, a: 0.45 })
+    const accessibleLabel = opts.label.replace(/\s+RGBA$/i, '')
 
     const set = (next: Partial<typeof rgba>) => {
       const safe: Partial<typeof rgba> = {}
@@ -68,6 +69,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
           <div className="ndp-rgba-row">
             <span className="ndp-rgba-key">R</span>
             <input
+              aria-label={`${accessibleLabel}红色滑块`}
               type="range"
               min="0"
               max="255"
@@ -76,6 +78,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
               onChange={(e) => set({ r: Number(e.target.value) })}
             />
             <input
+              aria-label={`${accessibleLabel}红色数值`}
               className="ndp-rgba-input"
               type="number"
               min="0"
@@ -88,6 +91,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
           <div className="ndp-rgba-row">
             <span className="ndp-rgba-key">G</span>
             <input
+              aria-label={`${accessibleLabel}绿色滑块`}
               type="range"
               min="0"
               max="255"
@@ -96,6 +100,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
               onChange={(e) => set({ g: Number(e.target.value) })}
             />
             <input
+              aria-label={`${accessibleLabel}绿色数值`}
               className="ndp-rgba-input"
               type="number"
               min="0"
@@ -108,6 +113,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
           <div className="ndp-rgba-row">
             <span className="ndp-rgba-key">B</span>
             <input
+              aria-label={`${accessibleLabel}蓝色滑块`}
               type="range"
               min="0"
               max="255"
@@ -116,6 +122,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
               onChange={(e) => set({ b: Number(e.target.value) })}
             />
             <input
+              aria-label={`${accessibleLabel}蓝色数值`}
               className="ndp-rgba-input"
               type="number"
               min="0"
@@ -128,6 +135,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
           <div className="ndp-rgba-row">
             <span className="ndp-rgba-key">A</span>
             <input
+              aria-label={`${accessibleLabel}透明度滑块`}
               type="range"
               min="0"
               max="1"
@@ -136,6 +144,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
               onChange={(e) => set({ a: Number(e.target.value) })}
             />
             <input
+              aria-label={`${accessibleLabel}透明度数值`}
               className="ndp-rgba-input"
               type="number"
               min="0"
@@ -200,6 +209,7 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
         />
         <div className="ndp-range-input">
           <input
+            aria-label="背景图片透明度"
             type="range"
             min="0"
             max="1"
@@ -225,9 +235,10 @@ export function ChatUiSettingsTab(props: { api: ReturnType<typeof getApi>; chatU
       })}
 
       <div className="ndp-setting-item">
-        <label>气泡圆角</label>
+        <label htmlFor="ndp-chat-ui-bubble-radius">气泡圆角</label>
         <div className="ndp-range-input">
           <input
+            id="ndp-chat-ui-bubble-radius"
             type="range"
             min="6"
             max="24"

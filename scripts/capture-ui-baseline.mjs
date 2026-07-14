@@ -784,7 +784,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifySettingsChatUiControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -2041,6 +2041,31 @@ async function runUiBaseline(browser) {
       }
     }
 
+    let settingsChatUiControlNames = null
+    if (baseline.verifySettingsChatUiControlNames) {
+      await page.getByRole('button', { name: '聊天界面', exact: true }).click()
+      const chatUiControls = []
+      for (const group of ['聊天背景', '用户气泡', '助手气泡']) {
+        for (const channel of ['红色', '绿色', '蓝色', '透明度']) {
+          chatUiControls.push(page.getByRole('slider', { name: `${group}${channel}滑块`, exact: true }))
+          chatUiControls.push(page.getByRole('spinbutton', { name: `${group}${channel}数值`, exact: true }))
+        }
+      }
+      chatUiControls.push(page.getByRole('slider', { name: '背景图片透明度', exact: true }))
+      chatUiControls.push(page.getByRole('slider', { name: '气泡圆角', exact: true }))
+      await Promise.all(chatUiControls.map((control) => control.waitFor({ state: 'visible' })))
+      const backgroundScreenshotPath = path.join(outputDir, `${baseline.name}-chat-ui-background-controls.png`)
+      await page.screenshot({ path: backgroundScreenshotPath })
+      await chatUiControls.at(-1).scrollIntoViewIfNeeded()
+      const bubbleScreenshotPath = path.join(outputDir, `${baseline.name}-chat-ui-bubble-controls.png`)
+      await page.screenshot({ path: bubbleScreenshotPath })
+      settingsChatUiControlNames = {
+        count: chatUiControls.length,
+        backgroundScreenshot: path.relative(projectRoot, backgroundScreenshotPath),
+        bubbleScreenshot: path.relative(projectRoot, bubbleScreenshotPath),
+      }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2188,6 +2213,7 @@ async function runUiBaseline(browser) {
       settingsAppearanceControlNames,
       settingsAiControlNames,
       settingsNovelAiControlNames,
+      settingsChatUiControlNames,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

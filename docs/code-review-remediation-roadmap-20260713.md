@@ -1160,6 +1160,12 @@ AI 与能力
 - UI baseline 进入“生图”页面并按 role + accessible name 定位全部 18 项，分别在提示词区和生成参数区保留截图；25 个场景全部 0 failure、0 console error、无横向或纵向溢出。截图确认预设行、文本域、成对数字输入和滑块布局无回归。
 - `settingsTabs` 增至 11 个用例，全量 85 个测试文件、367 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。默认视图最初 86 个缺名项已累计收口 58 个，剩余聊天界面 26 项与工具中心 2 项；NovelAI 云端队列的 5 个条件控件留到动态状态专项审计。
 
+第七十批进展（2026-07-14）：
+
+- 完成聊天界面默认视图 26 个控件的程序化名称。聊天背景、用户气泡和助手气泡三组 RGBA 编辑器共 24 项，分别为每个颜色通道的滑块与数值输入提供互不重复的明确名称；背景图片透明度滑块单独命名，气泡圆角通过稳定 id 与 `label/htmlFor` 关联。
+- UI baseline 进入“聊天界面”页面并按 role + accessible name 定位全部 26 项，在背景与气泡参数区域分别保留截图；25 个场景全部 0 failure、0 console error、无横向或纵向溢出。截图确认三组 RGBA 行、数字输入、滑块和页面滚动布局无回归。
+- `settingsTabs` 增至 12 个用例，全量 85 个测试文件、368 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。Chat UI chunk 为 6.18 kB；默认视图最初 86 个缺名项已累计收口 84 个，仅剩工具中心 2 项，Persona、Tools/MCP、NovelAI 云端队列、AI 高级上下文压缩和 Agent 自定义工具 API 等条件区域仍需动态状态专项审计。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：
