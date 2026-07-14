@@ -1078,6 +1078,14 @@ AI 与能力
 - 4 个聚焦测试文件共 15 个用例通过，新增头像、Chat 图片、Orb 图片/视频和工具图片的元素类型与 accessible name 断言。UI baseline 的 Chat 图片与 Orb 工具图片场景改为先聚焦按钮、再按 Enter 打开查看器；Orb 查看器随后聚焦“下一张”按钮并按 Enter 完成 `1/2 → 2/2`，24 个场景全部 0 failure、0 console error、无横向或纵向溢出。
 - renderer 主 chunk 保持 146.30 kB；Chat 为 126.04 kB、Orb 为 49.83 kB，主 CSS 42.69 kB、Orb CSS 37.44 kB。`npm test` 共 82 个测试文件、352 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查和 IPC/媒体 smoke 均通过。下一批处理图片查看器与确认对话框的初始焦点、焦点循环、关闭后焦点恢复和 backdrop 语义。
 
+第五十八批进展（2026-07-14）：
+
+- 新增 `src/hooks/useDialogFocus.ts`，统一记录弹窗打开前焦点、下一帧初始聚焦、Tab/Shift+Tab 首尾循环、Esc 关闭和卸载后焦点恢复；关闭回调通过 ref 保持最新值，effect 不随每次 render 重建。cleanup 只在捕获的弹窗节点已卸载后恢复焦点，兼容 React StrictMode 的 effect 检查。
+- Chat 清空确认框接入共享 hook，默认聚焦危险动作“清空对话”，关闭后显式返回顶部“更多”按钮；Settings 通用确认框默认聚焦当前确认动作，并自动返回发起删除等操作的原按钮。两者原确认结果、backdrop 点击和业务异步流程保持不变。
+- Chat 与 Orb 图片查看器 shell 增加标准 modal dialog 语义、标题关联和可编程聚焦，默认聚焦“关闭”；缩小、放大、上一张、下一张补齐 accessible name。原方向键、A/D、滚轮缩放、拖动、双击/1:1 重置和 backdrop 关闭继续保留。
+- UI baseline 对四类界面增加真实键盘门禁：确认初始焦点，验证末项 Tab 到首项及 Shift+Tab 返回，按 Esc 后确认弹窗消失并回到触发按钮；Orb 查看器在焦点位于弹窗内时直接按 D 完成 `1/2 → 2/2`。24 个场景全部 0 failure、0 console error、无横向或纵向溢出，报告中的查看器和 Settings 四项焦点字段均为 `true`。
+- 3 个聚焦测试文件共 6 个用例通过；全量 `npm test` 为 83 个测试文件、353 个用例。TypeScript、lint、三项脚本语法检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。共享 hook chunk 为 1.39 kB，主 chunk 146.34 kB、Chat 126.42 kB、Settings 15.25 kB、Orb 50.17 kB。下一批继续补 tabs 语义与 reduced motion，之后再统一 toast、错误和保存状态播报。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：

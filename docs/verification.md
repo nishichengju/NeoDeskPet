@@ -1227,3 +1227,29 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/chat-image-viewer-720x620-scale100.png`、`artifacts/ui-baseline/orb-image-viewer-560x720-scale100.png` 与 `artifacts/ui-baseline/orb-image-viewer-560x720-scale100-open.png`，按钮 reset 未引入默认边框、额外 padding 或卡片尺寸变化。Chat 图片仍保留图片本体和“查看”文字按钮两条入口；Orb 视频 controls 不再与整卡点击竞争，用户可通过底部文件名按钮打开独立媒体。当前尚未实现图片查看器/确认对话框的初始焦点、focus trap、关闭后焦点恢复或 backdrop dialog 语义；Orb 查看器从新图片按钮打开后，全局 A/D 快捷键在焦点仍留于弹窗外时不稳定，本批 UI 门禁改为聚焦查看器原生“下一张”按钮并按 Enter，下一批随焦点管理统一解决。
+
+## P2-3：无障碍与交互一致性（第五十八批）
+
+- 验证日期：2026-07-14
+- 优化范围：Chat/Settings 确认框与 Chat/Orb 图片查看器的初始焦点、Tab 循环、Esc 关闭、关闭后焦点恢复和 dialog 语义
+
+| 检查 | 结果 |
+| --- | --- |
+| 共享焦点管理 | 新增 `useDialogFocus`；打开时记录触发控件并在下一帧聚焦指定按钮，Tab/Shift+Tab 在可见可用控件首尾循环，Esc 调用最新关闭回调，卸载后以 microtask 恢复焦点；StrictMode cleanup 不会把焦点错误拉回仍挂载的弹窗外 |
+| 接入范围 | Chat 清空确认框初始聚焦“清空对话”并显式返回“更多”；Settings 通用确认框初始聚焦确认动作并返回原触发按钮；Chat/Orb 图片查看器初始聚焦“关闭”，关闭后返回对应图片附件按钮 |
+| Dialog 语义 | Chat/Orb 图片查看器 shell 增加 `role="dialog"`、`aria-modal="true"`、标题关联和可编程聚焦；缩小、放大、上一张、下一张按钮补齐 accessible name |
+| 聚焦测试 | `dialogFocus`、`imageViewer`、`orbImageViewer` 共 3 个测试文件、6 个用例通过；覆盖焦点边界计算、dialog 语义和查看器按钮名称 |
+| Renderer bundle | 共享 `useDialogFocus` chunk 1.39 kB；主 chunk 146.34 kB、Chat 126.42 kB、Settings 15.25 kB、Orb 50.17 kB |
+| `npm test` | 83 个测试文件、353 个用例通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过，共享焦点 hook、动态 chunk、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Pet/Chat/Settings/Memory/Orb preload 与运行正常，五类窗口 `runtimeErrors` 全为空；权限、持久化、聊天/任务/Memory/Agent/MCP/TTS/ASR 和重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 24 个场景通过；四类目标界面均验证初始焦点、正反向 Tab 循环、Esc 关闭与焦点恢复，Orb 在弹窗内直接按 D 完成 `1/2 → 2/2`；0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+人工检查 `artifacts/ui-baseline/chat-compact-420x560-scale100-clear-confirm.png`、`artifacts/ui-baseline/settings-default-860x680-scale100-confirm.png`、`artifacts/ui-baseline/chat-image-viewer-720x620-scale100-open.png` 与 `artifacts/ui-baseline/orb-image-viewer-560x720-scale100-open.png`，焦点轮廓位于预期危险动作或关闭/重置工具上，弹窗尺寸、遮罩、按钮排列和图片舞台没有新增错位。UI 报告中 Settings、Chat 图片和 Orb 图片的 `initialFocus`、`forwardWrap`、`backwardWrap`、`returnFocus` 全为 `true`；Chat 清空确认框同样通过运行时断言。当前实现按应用现有弹窗层级处理单一 modal，尚未建立嵌套弹窗栈，也未对背景区域统一设置 `inert`；共享 selector 覆盖现有 button/link/form/tabindex 控件，但未扩展到 `contenteditable` 等当前未使用类型。下一批继续补 Settings/Chat tabs 的 tablist/tab/tabpanel 语义和 `prefers-reduced-motion`。

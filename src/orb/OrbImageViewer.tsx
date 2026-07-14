@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState, type WheelEvent as ReactWheelEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type WheelEvent as ReactWheelEvent } from 'react'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { applyOrbImageViewerWheelScale, moveOrbImageViewerIndex } from './orbImageViewerUtils'
 
 export type OrbImageViewerItem = {
@@ -15,7 +16,16 @@ export type OrbImageViewerProps = {
 
 export function OrbImageViewer({ items, index, onIndexChange, onClose }: OrbImageViewerProps) {
   const [scale, setScale] = useState(1)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const item = items[index]
+
+  useDialogFocus({
+    active: Boolean(item),
+    containerRef: dialogRef,
+    initialFocusRef: closeButtonRef,
+    onEscape: onClose,
+  })
 
   useEffect(() => {
     setScale(1)
@@ -32,11 +42,6 @@ export function OrbImageViewer({ items, index, onIndexChange, onClose }: OrbImag
   useEffect(() => {
     if (!item) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onClose()
-        return
-      }
       if (event.key === 'ArrowLeft' || event.key === 'a' || event.key === 'A') {
         event.preventDefault()
         move(-1)
@@ -49,7 +54,7 @@ export function OrbImageViewer({ items, index, onIndexChange, onClose }: OrbImag
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [item, move, onClose])
+  }, [item, move])
 
   if (!item) return null
 
@@ -59,26 +64,35 @@ export function OrbImageViewer({ items, index, onIndexChange, onClose }: OrbImag
 
   return (
     <div className="ndp-orbimg-viewer" data-orb-nodrag="true" onClick={onClose}>
-      <div className="ndp-orbimg-viewer-shell" data-orb-nodrag="true" onClick={(event) => event.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="ndp-orbimg-viewer-shell"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ndp-orb-image-viewer-title"
+        tabIndex={-1}
+        data-orb-nodrag="true"
+        onClick={(event) => event.stopPropagation()}
+      >
         <div className="ndp-orbimg-viewer-toolbar" data-orb-nodrag="true">
-          <div className="ndp-orbimg-viewer-title" title={item.title}>
+          <div id="ndp-orb-image-viewer-title" className="ndp-orbimg-viewer-title" title={item.title}>
             {item.title || `图片 ${index + 1}`}
           </div>
           <div className="ndp-orbimg-viewer-meta">
             {index + 1}/{items.length}
           </div>
           <div className="ndp-orbimg-viewer-tools">
-            <button className="ndp-orbimg-viewer-btn" onClick={() => setScale(1)} title="重置缩放" data-orb-nodrag="true">
+            <button type="button" className="ndp-orbimg-viewer-btn" onClick={() => setScale(1)} title="重置缩放" data-orb-nodrag="true">
               1:1
             </button>
-            <button className="ndp-orbimg-viewer-btn" onClick={onClose} title="关闭" data-orb-nodrag="true">
+            <button ref={closeButtonRef} type="button" className="ndp-orbimg-viewer-btn" onClick={onClose} title="关闭" data-orb-nodrag="true">
               关闭
             </button>
           </div>
         </div>
         <div className="ndp-orbimg-viewer-stage" data-orb-nodrag="true" onWheel={onWheel}>
           {items.length > 1 ? (
-            <button className="ndp-orbimg-viewer-nav" onClick={() => move(-1)} title="上一张" data-orb-nodrag="true">
+            <button type="button" className="ndp-orbimg-viewer-nav" aria-label="上一张图片" onClick={() => move(-1)} title="上一张" data-orb-nodrag="true">
               ◀
             </button>
           ) : (
@@ -91,7 +105,7 @@ export function OrbImageViewer({ items, index, onIndexChange, onClose }: OrbImag
             style={{ transform: `scale(${scale})` }}
           />
           {items.length > 1 ? (
-            <button className="ndp-orbimg-viewer-nav" onClick={() => move(1)} title="下一张" data-orb-nodrag="true">
+            <button type="button" className="ndp-orbimg-viewer-nav" aria-label="下一张图片" onClick={() => move(1)} title="下一张" data-orb-nodrag="true">
               ▶
             </button>
           ) : (

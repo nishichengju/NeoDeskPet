@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useDialogFocus } from '../../hooks/useDialogFocus'
 
 export type ImageViewerItem = {
   src: string
@@ -16,7 +17,16 @@ export function ImageViewer({ items, index, onIndexChange, onClose }: ImageViewe
   const [scale, setScale] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const dragRef = useRef<{ pointerId: number; x: number; y: number; ox: number; oy: number } | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const item = items[index]
+
+  useDialogFocus({
+    active: Boolean(item),
+    containerRef: dialogRef,
+    initialFocusRef: closeButtonRef,
+    onEscape: onClose,
+  })
 
   useEffect(() => {
     setScale(1)
@@ -25,7 +35,6 @@ export function ImageViewer({ items, index, onIndexChange, onClose }: ImageViewe
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
       if (event.key === 'ArrowLeft') onIndexChange(Math.max(0, index - 1))
       if (event.key === 'ArrowRight') onIndexChange(Math.min(items.length - 1, index + 1))
     }
@@ -42,15 +51,22 @@ export function ImageViewer({ items, index, onIndexChange, onClose }: ImageViewe
 
   return (
     <div className="ndp-image-viewer" onMouseDown={(event) => event.stopPropagation()}>
-      <div className="ndp-image-viewer-shell">
+      <div
+        ref={dialogRef}
+        className="ndp-image-viewer-shell"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ndp-image-viewer-title"
+        tabIndex={-1}
+      >
         <div className="ndp-image-viewer-toolbar">
-          <div className="ndp-image-viewer-title" title={item.title}>{item.title}</div>
+          <div id="ndp-image-viewer-title" className="ndp-image-viewer-title" title={item.title}>{item.title}</div>
           <div className="ndp-image-viewer-meta">{index + 1} / {items.length} · {Math.round(scale * 100)}%</div>
           <div className="ndp-image-viewer-tools">
-            <button className="ndp-image-viewer-btn" onClick={() => setScale((value) => Math.max(0.2, Number((value - 0.2).toFixed(2))))}>-</button>
-            <button className="ndp-image-viewer-btn" onClick={reset}>重置</button>
-            <button className="ndp-image-viewer-btn" onClick={() => setScale((value) => Math.min(8, Number((value + 0.2).toFixed(2))))}>+</button>
-            <button className="ndp-image-viewer-btn" onClick={onClose}>关闭</button>
+            <button type="button" className="ndp-image-viewer-btn" aria-label="缩小图片" onClick={() => setScale((value) => Math.max(0.2, Number((value - 0.2).toFixed(2))))}>-</button>
+            <button type="button" className="ndp-image-viewer-btn" onClick={reset}>重置</button>
+            <button type="button" className="ndp-image-viewer-btn" aria-label="放大图片" onClick={() => setScale((value) => Math.min(8, Number((value + 0.2).toFixed(2))))}>+</button>
+            <button ref={closeButtonRef} type="button" className="ndp-image-viewer-btn" onClick={onClose}>关闭</button>
           </div>
         </div>
         <div
@@ -61,7 +77,7 @@ export function ImageViewer({ items, index, onIndexChange, onClose }: ImageViewe
             setScale((value) => Math.max(0.2, Math.min(8, Number((value + delta).toFixed(2)))))
           }}
         >
-          <button className="ndp-image-viewer-nav" disabled={index <= 0} onClick={() => onIndexChange(Math.max(0, index - 1))}>‹</button>
+          <button type="button" className="ndp-image-viewer-nav" aria-label="上一张图片" disabled={index <= 0} onClick={() => onIndexChange(Math.max(0, index - 1))}>‹</button>
           <div
             className="ndp-image-viewer-canvas"
             onDoubleClick={reset}
@@ -96,7 +112,9 @@ export function ImageViewer({ items, index, onIndexChange, onClose }: ImageViewe
             />
           </div>
           <button
+            type="button"
             className="ndp-image-viewer-nav"
+            aria-label="下一张图片"
             disabled={index >= items.length - 1}
             onClick={() => onIndexChange(Math.min(items.length - 1, index + 1))}
           >

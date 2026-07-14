@@ -33,6 +33,9 @@ describe('OrbImageViewer', () => {
     expect(html).toContain('One')
     expect(html).toContain('1/1')
     expect(html).toContain('scale(1)')
+    expect(html).toContain('role="dialog"')
+    expect(html).toContain('aria-modal="true"')
+    expect(html).toContain('aria-labelledby="ndp-orb-image-viewer-title"')
     expect(html).not.toContain('ndp-orbimg-viewer-nav')
   })
 
@@ -55,5 +58,7 @@ describe('OrbImageViewer', () => {
     expect(html.match(/ndp-orbimg-viewer-nav/g)).toHaveLength(2)
     expect(html).toContain('title="上一张"')
     expect(html).toContain('title="下一张"')
+    expect(html).toContain('aria-label="上一张图片"')
+    expect(html).toContain('aria-label="下一张图片"')
   })
 })

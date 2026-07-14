@@ -1,6 +1,7 @@
 import type { AppSettings } from '../../electron/types'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getAvailableModels, parseModelMetadata, scanAvailableModels, type Live2DModelInfo } from '../live2d/live2dModels'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { getApi } from '../neoDeskPetApi'
 import type { SettingsConfirmAction, SettingsConfirmOptions } from './settings/settingsConfirm'
 import {
@@ -60,6 +61,7 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
   const saveResetTimerRef = useRef<number | null>(null)
   const confirmationResolverRef = useRef<((value: boolean) => void) | null>(null)
   const confirmButtonRef = useRef<HTMLButtonElement>(null)
+  const confirmationDialogRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLElement>(null)
 
   const petScale = settings?.petScale ?? 1.0
@@ -258,15 +260,12 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
     resolve?.(value)
   }, [])
 
-  useEffect(() => {
-    if (!confirmation) return
-    confirmButtonRef.current?.focus()
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') settleConfirmation(false)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [confirmation, settleConfirmation])
+  useDialogFocus({
+    active: Boolean(confirmation),
+    containerRef: confirmationDialogRef,
+    initialFocusRef: confirmButtonRef,
+    onEscape: () => settleConfirmation(false),
+  })
 
   const renderActiveView = () => {
     if (activeView === 'live2d') {
@@ -432,10 +431,12 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
       {confirmation ? (
         <div className="ndp-settings-dialog-backdrop" onMouseDown={() => settleConfirmation(false)}>
           <div
+            ref={confirmationDialogRef}
             className="ndp-settings-dialog"
             role="dialog"
             aria-modal="true"
             aria-labelledby="ndp-settings-dialog-title"
+            tabIndex={-1}
             onMouseDown={(event) => event.stopPropagation()}
           >
             <h2 id="ndp-settings-dialog-title">{confirmation.title}</h2>

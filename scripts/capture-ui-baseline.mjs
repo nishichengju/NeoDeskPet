@@ -1081,11 +1081,24 @@ async function runUiBaseline(browser) {
       await page.getByRole('menuitem', { name: '清空当前对话' }).click()
       const clearDialog = page.getByRole('dialog', { name: '清空当前对话' })
       await clearDialog.waitFor({ state: 'visible' })
+      const clearConfirmButton = clearDialog.getByRole('button', { name: '清空对话', exact: true })
+      const clearCancelButton = clearDialog.getByRole('button', { name: '取消', exact: true })
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === '清空对话')
+      const clearInitialFocus = await clearConfirmButton.evaluate((element) => element === document.activeElement)
+      await page.keyboard.press('Tab')
+      const clearForwardWrap = await clearCancelButton.evaluate((element) => element === document.activeElement)
+      await page.keyboard.press('Shift+Tab')
+      const clearBackwardWrap = await clearConfirmButton.evaluate((element) => element === document.activeElement)
       const clearDialogScreenshotPath = path.join(outputDir, `${baseline.name}-clear-confirm.png`)
       const clearDialogScreenshot = path.relative(projectRoot, clearDialogScreenshotPath)
       await page.screenshot({ path: clearDialogScreenshotPath })
       await page.keyboard.press('Escape')
       if (!(await clearDialog.isHidden().catch(() => false))) failures.push('chat clear confirmation did not close with Escape')
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '更多')
+      const clearReturnFocus = await page.getByRole('button', { name: '更多' }).evaluate((element) => element === document.activeElement)
+      if (!clearInitialFocus) failures.push('chat clear confirmation did not focus the destructive action initially')
+      if (!clearForwardWrap || !clearBackwardWrap) failures.push('chat clear confirmation did not wrap Tab focus')
+      if (!clearReturnFocus) failures.push('chat clear confirmation did not restore focus to More')
 
       await page.getByRole('button', { name: '更多' }).click()
       await page.getByRole('menuitem', { name: '清空当前对话' }).click()
@@ -1172,11 +1185,23 @@ async function runUiBaseline(browser) {
       await page.keyboard.press('Enter')
       const viewer = page.locator('.ndp-image-viewer')
       await viewer.waitFor({ state: 'visible' })
+      const viewerDialog = viewer.getByRole('dialog')
+      const viewerCloseButton = viewerDialog.getByRole('button', { name: '关闭', exact: true })
+      const viewerFirstButton = viewerDialog.getByRole('button', { name: '缩小图片' })
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === '关闭')
+      const initialFocus = await viewerCloseButton.evaluate((element) => element === document.activeElement)
+      await page.keyboard.press('Tab')
+      const forwardWrap = await viewerFirstButton.evaluate((element) => element === document.activeElement)
+      await page.keyboard.press('Shift+Tab')
+      const backwardWrap = await viewerCloseButton.evaluate((element) => element === document.activeElement)
       imageViewer = await viewer.evaluate((element) => ({
         meta: element.querySelector('.ndp-image-viewer-meta')?.textContent?.trim() ?? '',
         title: element.querySelector('.ndp-image-viewer-title')?.textContent?.trim() ?? '',
         horizontalOverflow: element.scrollWidth > element.clientWidth,
       }))
+      imageViewer.initialFocus = initialFocus
+      imageViewer.forwardWrap = forwardWrap
+      imageViewer.backwardWrap = backwardWrap
       const viewerScreenshotPath = path.join(outputDir, `${baseline.name}-open.png`)
       imageViewer.screenshot = path.relative(projectRoot, viewerScreenshotPath)
       await page.screenshot({ path: viewerScreenshotPath })
@@ -1185,8 +1210,13 @@ async function runUiBaseline(browser) {
       }
       if (!imageViewer.title) failures.push('image viewer title is missing')
       if (imageViewer.horizontalOverflow) failures.push('image viewer has horizontal overflow')
+      if (!initialFocus) failures.push('image viewer did not focus Close initially')
+      if (!forwardWrap || !backwardWrap) failures.push('image viewer did not wrap Tab focus')
       await page.keyboard.press('Escape')
       if (!(await viewer.isHidden().catch(() => false))) failures.push('image viewer did not close with Escape')
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '查看图片附件 1')
+      imageViewer.returnFocus = await messageImageButton.evaluate((element) => element === document.activeElement)
+      if (!imageViewer.returnFocus) failures.push('image viewer did not restore focus to its attachment')
     }
 
     let orbImageViewer = null
@@ -1197,6 +1227,10 @@ async function runUiBaseline(browser) {
       await page.keyboard.press('Enter')
       const viewer = page.locator('.ndp-orbimg-viewer')
       await viewer.waitFor({ state: 'visible' })
+      const viewerDialog = viewer.getByRole('dialog')
+      const closeButton = viewerDialog.getByRole('button', { name: '关闭', exact: true })
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === '关闭')
+      const initialFocus = await closeButton.evaluate((element) => element === document.activeElement)
       const readViewerState = () => viewer.evaluate((element) => {
         const image = element.querySelector('.ndp-orbimg-viewer-img')
         return {
@@ -1209,10 +1243,14 @@ async function runUiBaseline(browser) {
       })
       const initial = await readViewerState()
       const nextImageButton = viewer.locator('.ndp-orbimg-viewer-nav').nth(1)
-      await nextImageButton.focus()
-      await page.keyboard.press('Enter')
+      await page.keyboard.press('d')
       await page.waitForFunction(() => document.querySelector('.ndp-orbimg-viewer-meta')?.textContent?.trim() === '2/2')
       const afterNext = await readViewerState()
+      await nextImageButton.focus()
+      await page.keyboard.press('Tab')
+      const forwardWrap = await viewerDialog.getByRole('button', { name: '1:1' }).evaluate((element) => element === document.activeElement)
+      await page.keyboard.press('Shift+Tab')
+      const backwardWrap = await nextImageButton.evaluate((element) => element === document.activeElement)
       await viewer.locator('.ndp-orbimg-viewer-stage').dispatchEvent('wheel', { deltaY: -100 })
       await page.waitForFunction(() => {
         const transform = document.querySelector('.ndp-orbimg-viewer-img')?.style?.transform ?? ''
@@ -1228,6 +1266,9 @@ async function runUiBaseline(browser) {
         afterNext,
         afterZoom,
         afterReset,
+        initialFocus,
+        forwardWrap,
+        backwardWrap,
         screenshot: path.relative(projectRoot, viewerScreenshotPath),
       }
       if (initial.meta !== '1/2') failures.push(`orb image viewer initial meta is ${initial.meta || 'missing'}`)
@@ -1237,8 +1278,13 @@ async function runUiBaseline(browser) {
       if (afterZoom.transform === 'scale(1)') failures.push('orb image viewer did not zoom with the wheel')
       if (afterReset.transform !== 'scale(1)') failures.push(`orb image viewer reset transform is ${afterReset.transform || 'missing'}`)
       if (initial.horizontalOverflow || afterNext.horizontalOverflow) failures.push('orb image viewer has horizontal overflow')
+      if (!initialFocus) failures.push('orb image viewer did not focus Close initially')
+      if (!forwardWrap || !backwardWrap) failures.push('orb image viewer did not wrap Tab focus')
       await page.keyboard.press('Escape')
       if (!(await viewer.isHidden().catch(() => false))) failures.push('orb image viewer did not close with Escape')
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '查看工具图片 1')
+      orbImageViewer.returnFocus = await attachment.evaluate((element) => element === document.activeElement)
+      if (!orbImageViewer.returnFocus) failures.push('orb image viewer did not restore focus to its attachment')
     }
 
     let orbMessageMenu = null
@@ -1520,21 +1566,41 @@ async function runUiBaseline(browser) {
     let settingsConfirmDialog = null
     if (baseline.verifyConfirmDialog) {
       await page.getByRole('button', { name: '设定库', exact: true }).click()
-      await page.getByRole('button', { name: '删除', exact: true }).click()
+      const deleteButton = page.getByRole('button', { name: '删除', exact: true })
+      await deleteButton.click()
       const dialog = page.getByRole('dialog')
       await dialog.waitFor({ state: 'visible' })
+      const confirmButton = dialog.getByRole('button', { name: '删除设定', exact: true })
+      const cancelButton = dialog.getByRole('button', { name: '取消', exact: true })
+      await page.waitForFunction(() => (
+        document.activeElement?.closest('[role="dialog"]')?.getAttribute('aria-labelledby') === 'ndp-settings-dialog-title'
+        && document.activeElement?.textContent?.trim() === '删除设定'
+      ))
+      const initialFocus = await confirmButton.evaluate((element) => element === document.activeElement)
+      await page.keyboard.press('Tab')
+      const forwardWrap = await cancelButton.evaluate((element) => element === document.activeElement)
+      await page.keyboard.press('Shift+Tab')
+      const backwardWrap = await confirmButton.evaluate((element) => element === document.activeElement)
       const dialogScreenshotPath = path.join(outputDir, `${baseline.name}-confirm.png`)
       const dialogScreenshot = path.relative(projectRoot, dialogScreenshotPath)
       await page.screenshot({ path: dialogScreenshotPath })
       settingsConfirmDialog = {
         title: await dialog.getByRole('heading').textContent(),
+        initialFocus,
+        forwardWrap,
+        backwardWrap,
         screenshot: dialogScreenshot,
       }
       await page.keyboard.press('Escape')
       const dismissed = await dialog.isHidden().catch(() => false)
       settingsConfirmDialog.dismissedWithEscape = dismissed
+      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === '删除')
+      settingsConfirmDialog.returnFocus = await deleteButton.evaluate((element) => element === document.activeElement)
       if (settingsConfirmDialog.title?.trim() !== '删除设定') failures.push('settings confirmation dialog has the wrong title')
       if (!dismissed) failures.push('settings confirmation dialog did not close with Escape')
+      if (!initialFocus) failures.push('settings confirmation dialog did not focus the confirm action initially')
+      if (!forwardWrap || !backwardWrap) failures.push('settings confirmation dialog did not wrap Tab focus')
+      if (!settingsConfirmDialog.returnFocus) failures.push('settings confirmation dialog did not restore focus to Delete')
     }
 
     let aiSplit = null

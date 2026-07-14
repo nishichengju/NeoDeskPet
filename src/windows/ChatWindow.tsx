@@ -3,6 +3,7 @@
 import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolRegistry'
 import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useProgressiveMessageWindow } from '../hooks/useProgressiveMessageWindow'
 import { resolveLocalMediaDataUrl, resolveLocalMediaUrl } from '../services/localMediaCache'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
@@ -111,6 +112,8 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
   const assistantAvatarInputRef = useRef<HTMLInputElement>(null)
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null)
   const confirmClearButtonRef = useRef<HTMLButtonElement>(null)
+  const confirmClearDialogRef = useRef<HTMLDivElement>(null)
+  const moreMenuButtonRef = useRef<HTMLButtonElement>(null)
   const plannerPendingRef = useRef(false)
   const bubblePreviewLastSigRef = useRef<string>('')
   const bubblePreviewSendDebugAtRef = useRef(0)
@@ -1863,15 +1866,13 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
     el.style.height = `${el.scrollHeight}px`
   }, [editingMessageId, editingMessageContent])
 
-  useEffect(() => {
-    if (!confirmClearOpen) return
-    confirmClearButtonRef.current?.focus()
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setConfirmClearOpen(false)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [confirmClearOpen])
+  useDialogFocus({
+    active: confirmClearOpen,
+    containerRef: confirmClearDialogRef,
+    initialFocusRef: confirmClearButtonRef,
+    returnFocusRef: moreMenuButtonRef,
+    onEscape: () => setConfirmClearOpen(false),
+  })
 
   const send = useCallback(async (override?: {
     text?: string
@@ -3461,6 +3462,8 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
           </button>
           <div className="ndp-chat-menu-anchor">
             <button
+              ref={moreMenuButtonRef}
+              type="button"
               className="ndp-chat-icon-button"
               onClick={() => setShowMoreMenu((value) => !value)}
               title="更多"
@@ -3705,10 +3708,12 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       {confirmClearOpen ? (
         <div className="ndp-dialog-backdrop" onMouseDown={() => setConfirmClearOpen(false)}>
           <div
+            ref={confirmClearDialogRef}
             className="ndp-dialog"
             role="dialog"
             aria-modal="true"
             aria-labelledby="ndp-clear-chat-dialog-title"
+            tabIndex={-1}
             onMouseDown={(event) => event.stopPropagation()}
           >
             <h2 id="ndp-clear-chat-dialog-title">清空当前对话</h2>
