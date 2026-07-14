@@ -1564,3 +1564,23 @@
 | `npm run ui:baseline` | 25 个场景通过；0 failure、0 console error、无横向或纵向溢出，控件命名与文本对比度门禁均通过 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-bubble-controls.png`，导航标签和气泡样式说明提高亮度后仍保持清晰的信息层级，没有出现文字遮挡、布局变化或异常滚动。P2-3 的键盘操作、焦点管理、语义标签、reduced motion、live-region、错误关联、Settings 控件命名和文本对比度均已完成；强制修复路线图至此收口，P3 仅作为可选产品增强候选保留。
+
+## 回归修复：Live2D 模型选择与即时切换
+
+- 验证日期：2026-07-14
+- 问题：模型下拉框首次点击会闪退，需要快速再次点击；部分模型切换后没有反应
+
+| 检查 | 结果 |
+| --- | --- |
+| 下拉框交互 | 移除 `mousedown` / `focus` 自动重扫；进入 Live2D 页面时扫描，手动更新改用独立“重新扫描”按钮 |
+| 刷新稳定性 | 已有模型时刷新不再禁用下拉框或替换选项，当前列表在扫描期间保持可用 |
+| 模型唯一性 | 选项值改用唯一 `modelFile`；扫描器保留中文目录名生成模型 ID，避免多个中文模型得到空值或重复 ID |
+| 设置回写 | 选择模型后同时持久化 `live2dModelId` 与 `live2dModelFile`，并广播到 Pet 窗口 |
+| 元数据竞态 | 快速连续切换时，旧模型的异步元数据结果不会覆盖新选择 |
+| 聚焦测试 | Live2D 设置、扫描器和 Settings IPC 测试通过；全量为 86 个测试文件、372 个用例 |
+| `npm run ui:baseline` | 25 个场景通过；聚焦前后扫描次数均为 3，中文模型“灵小狗”一次选中并保存，0 failure、0 console error、无溢出 |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` | 隔离用户目录扫描到 7 个随包模型，切换到 Hiyori 后设置持久化，Pet 完成新模型加载；五类窗口 `runtimeErrors` 为空 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-live2d-controls.png`，模型下拉框与重新扫描按钮在默认设置窗口内无重叠或异常换行，切换后的模型路径、物理和表情信息正确更新。

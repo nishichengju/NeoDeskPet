@@ -8,6 +8,10 @@ import * as path from 'path'
 import { app } from 'electron'
 import type { ScannedModel } from './types'
 
+export function createLive2dModelId(folderName: string): string {
+  return folderName.normalize('NFKC').trim().toLocaleLowerCase().replace(/\s+/g, '_')
+}
+
 /**
  * Get the live2d directory path
  * In development: public/live2d
@@ -71,7 +75,7 @@ export function scanLive2dModels(): ScannedModel[] {
 
       if (modelFileName) {
         const model: ScannedModel = {
-          id: folderName.toLowerCase().replace(/[^a-z0-9]/g, '_'),
+          id: createLive2dModelId(folderName),
           name: folderName,
           path: `/live2d/${folderName}`,
           modelFile: `/live2d/${folderName}/${modelFileName}`,

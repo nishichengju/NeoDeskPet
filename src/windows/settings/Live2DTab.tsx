@@ -6,7 +6,7 @@ export function Live2DSettingsTab(props: {
   api: ReturnType<typeof getApi>
   petScale: number
   petOpacity: number
-  live2dModelId: string
+  live2dModelFile: string
   live2dMouseTrackingEnabled: boolean
   live2dIdleSwayEnabled: boolean
   availableModels: Live2DModelInfo[]
@@ -18,7 +18,7 @@ export function Live2DSettingsTab(props: {
     api,
     petScale,
     petOpacity,
-    live2dModelId,
+    live2dModelFile,
     live2dMouseTrackingEnabled,
     live2dIdleSwayEnabled,
     availableModels,
@@ -27,8 +27,10 @@ export function Live2DSettingsTab(props: {
     refreshModels,
   } = props
   const triggerRefresh = useCallback(() => {
-    void refreshModels()
+    void refreshModels({ force: true })
   }, [refreshModels])
+  const hasCurrentModel = availableModels.some((model) => model.modelFile === live2dModelFile)
+  const selectedModelFile = hasCurrentModel ? live2dModelFile : ''
 
   return (
     <div className="ndp-settings-section">
@@ -37,34 +39,44 @@ export function Live2DSettingsTab(props: {
       {/* Model Selection */}
       <div className="ndp-setting-item">
         <label htmlFor="ndp-live2d-model">选择模型</label>
-        <select
-          id="ndp-live2d-model"
-          className="ndp-select"
-          value={live2dModelId}
-          onMouseDown={triggerRefresh}
-          onFocus={triggerRefresh}
-          onChange={(e) => {
-            const selectedModel = availableModels.find((m) => m.id === e.target.value)
-            if (selectedModel) {
-              api?.setLive2dModel(selectedModel.id, selectedModel.modelFile)
-            }
-          }}
-          disabled={isLoadingModels}
-        >
-          {isLoadingModels ? (
-            <option value="">扫描模型中...</option>
-          ) : availableModels.length === 0 ? (
-            <option value="">未找到模型</option>
-          ) : (
-            availableModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))
-          )}
-        </select>
+        <div className="ndp-row">
+          <select
+            id="ndp-live2d-model"
+            className="ndp-select"
+            value={selectedModelFile}
+            onChange={(e) => {
+              const selectedModel = availableModels.find((model) => model.modelFile === e.target.value)
+              if (selectedModel) {
+                void api?.setLive2dModel(selectedModel.id, selectedModel.modelFile)
+              }
+            }}
+            disabled={isLoadingModels && availableModels.length === 0}
+          >
+            {!hasCurrentModel && live2dModelFile && availableModels.length > 0 && (
+              <option value="">当前模型未在扫描结果中</option>
+            )}
+            {availableModels.length === 0 ? (
+              <option value="">{isLoadingModels ? '扫描模型中...' : '未找到模型'}</option>
+            ) : (
+              availableModels.map((model) => (
+                <option key={model.modelFile} value={model.modelFile}>
+                  {model.name}
+                </option>
+              ))
+            )}
+          </select>
+          <button
+            type="button"
+            className="ndp-btn"
+            onClick={triggerRefresh}
+            disabled={isLoadingModels}
+            aria-label="重新扫描 Live2D 模型"
+          >
+            重新扫描
+          </button>
+        </div>
         <p className="ndp-setting-hint">
-          {isLoadingModels ? '正在扫描 live2d 目录...' : `共 ${availableModels.length} 个模型可用`}
+          {isLoadingModels ? '正在扫描 live2d 目录，当前列表仍可使用...' : `共 ${availableModels.length} 个模型可用`}
         </p>
       </div>
 

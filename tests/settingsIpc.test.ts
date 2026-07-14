@@ -87,6 +87,22 @@ describe('settings IPC registration', () => {
     expect(harness.broadcastSettingsChanged).toHaveBeenCalledTimes(1)
   })
 
+  it('persists the selected Live2D model file and broadcasts it', () => {
+    const harness = createHarness()
+    const result = harness.invoke<AppSettings>(
+      'settings:setLive2dModel',
+      '灵小狗',
+      '/live2d/灵小狗/XIAOPmaiddress.model3.json',
+    )
+
+    expect(result).toMatchObject({
+      live2dModelId: '灵小狗',
+      live2dModelFile: '/live2d/灵小狗/XIAOPmaiddress.model3.json',
+    })
+    expect(harness.getSettings()).toMatchObject(result)
+    expect(harness.broadcastSettingsChanged).toHaveBeenCalledTimes(1)
+  })
+
   it('preserves memory, MCP, ASR, and AI profile side effects', async () => {
     const harness = createHarness()
     harness.invoke('settings:setSecret', 'ai-main', 'profile-secret')

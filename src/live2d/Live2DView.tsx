@@ -584,5 +584,12 @@ export function Live2DView(props: Props) {
     }
   }, [opacity, modelLoaded])
 
-  return <div ref={containerRef} className="ndp-live2d-root" />
+  return (
+    <div
+      ref={containerRef}
+      className="ndp-live2d-root"
+      data-model-file={modelJsonUrl ?? defaultModelJsonUrl}
+      data-model-loaded={modelLoaded ? 'true' : 'false'}
+    />
+  )
 }

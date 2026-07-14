@@ -114,7 +114,7 @@ describe('settings tabs', () => {
       api,
       petScale: 1,
       petOpacity: 1,
-      live2dModelId: '',
+      live2dModelFile: '/live2d/Haru/Haru.model3.json',
       live2dMouseTrackingEnabled: true,
       live2dIdleSwayEnabled: true,
       availableModels: [],
@@ -125,10 +125,50 @@ describe('settings tabs', () => {
 
     expect(html).toContain('<label for="ndp-live2d-model">选择模型</label>')
     expect(html).toContain('id="ndp-live2d-model"')
+    expect(html).toContain('aria-label="重新扫描 Live2D 模型"')
     expect(html).toContain('<label for="ndp-live2d-scale">模型大小</label>')
     expect(html).toContain('id="ndp-live2d-scale"')
     expect(html).toContain('<label for="ndp-live2d-opacity">模型透明度</label>')
     expect(html).toContain('id="ndp-live2d-opacity"')
+  })
+
+  it('uses model file paths as unique Live2D option values', () => {
+    const html = renderToStaticMarkup(createElement(Live2DSettingsTab, {
+      api,
+      petScale: 1,
+      petOpacity: 1,
+      live2dModelFile: '/live2d/灵小狗/XIAOPmaiddress.model3.json',
+      live2dMouseTrackingEnabled: true,
+      live2dIdleSwayEnabled: true,
+      availableModels: [
+        {
+          id: '灵小狗',
+          name: '灵小狗',
+          path: '/live2d/灵小狗',
+          modelFile: '/live2d/灵小狗/XIAOPmaiddress.model3.json',
+          expressions: [],
+          motionGroups: [],
+          hasPhysics: true,
+          hasPose: false,
+        },
+        {
+          id: '艾玛',
+          name: '艾玛',
+          path: '/live2d/艾玛',
+          modelFile: '/live2d/艾玛/艾玛.model3.json',
+          expressions: [],
+          motionGroups: [],
+          hasPhysics: true,
+          hasPose: false,
+        },
+      ],
+      selectedModelInfo: null,
+      isLoadingModels: false,
+      refreshModels: async () => {},
+    }))
+
+    expect(html).toContain('value="/live2d/灵小狗/XIAOPmaiddress.model3.json" selected=""')
+    expect(html).toContain('value="/live2d/艾玛/艾玛.model3.json"')
   })
 
   it('associates bubble position, timing, and phrase controls with their labels', () => {

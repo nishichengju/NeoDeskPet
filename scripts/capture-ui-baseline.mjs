@@ -512,8 +512,10 @@ function installSettingsMock(page) {
         enumerateDevices: async () => [],
       },
     })
-    const settings = {
+    let settings = {
       activePersonaId: 'default',
+      live2dModelId: 'haru',
+      live2dModelFile: '/live2d/Haru/Haru.model3.json',
       aiProfiles: [
         {
           id: 'baseline-profile',
@@ -598,6 +600,16 @@ function installSettingsMock(page) {
       },
     }
     const off = () => undefined
+    let settingsChangedListener = null
+    let live2dScanCount = 0
+    let live2dSelection = null
+    Object.defineProperty(window, '__settingsLive2dBaseline', {
+      configurable: true,
+      value: {
+        get scanCount() { return live2dScanCount },
+        get selection() { return live2dSelection },
+      },
+    })
     let navigateListener = null
     Object.defineProperty(window, '__navigateSettings', {
       configurable: true,
@@ -606,7 +618,12 @@ function installSettingsMock(page) {
     const api = new Proxy(
       {
         getSettings: async () => settings,
-        onSettingsChanged: () => off,
+        onSettingsChanged: (listener) => {
+          settingsChangedListener = listener
+          return () => {
+            if (settingsChangedListener === listener) settingsChangedListener = null
+          }
+        },
         onSettingsNavigate: (listener) => {
           navigateListener = listener
           return () => {
@@ -614,7 +631,30 @@ function installSettingsMock(page) {
           }
         },
         consumeSettingsNavigation: async () => null,
-        scanModels: async () => [],
+        scanModels: async () => {
+          live2dScanCount += 1
+          await new Promise((resolve) => setTimeout(resolve, 80))
+          return [
+            {
+              id: 'haru',
+              name: 'Haru',
+              path: '/live2d/Haru',
+              modelFile: '/live2d/Haru/Haru.model3.json',
+            },
+            {
+              id: '灵小狗',
+              name: '灵小狗',
+              path: '/live2d/灵小狗',
+              modelFile: '/live2d/灵小狗/XIAOPmaiddress.model3.json',
+            },
+          ]
+        },
+        setLive2dModel: async (modelId, modelFile) => {
+          settings = { ...settings, live2dModelId: modelId, live2dModelFile: modelFile }
+          live2dSelection = { modelId, modelFile }
+          settingsChangedListener?.(settings)
+          return settings
+        },
         listPersonas: async () => [
           { id: 'default', name: '默认角色', updatedAt: Date.now() },
         ],
@@ -2023,6 +2063,30 @@ async function runUiBaseline(browser) {
         page.getByRole('slider', { name: '模型透明度', exact: true }),
       ]
       await Promise.all(live2dControls.map((control) => control.waitFor({ state: 'visible' })))
+      const live2dModelSelect = live2dControls[0]
+      await page.waitForFunction(() => {
+        const select = document.querySelector('#ndp-live2d-model')
+        return select instanceof HTMLSelectElement && select.options.length >= 2 && !select.disabled
+      })
+      const scanCountBeforeFocus = await page.evaluate(() => window.__settingsLive2dBaseline?.scanCount ?? -1)
+      await live2dModelSelect.focus()
+      await page.waitForTimeout(120)
+      const scanCountAfterFocus = await page.evaluate(() => window.__settingsLive2dBaseline?.scanCount ?? -1)
+      if (scanCountAfterFocus !== scanCountBeforeFocus) {
+        failures.push('Live2D model select triggered a rescan on focus')
+      }
+      const selectedModelFile = '/live2d/灵小狗/XIAOPmaiddress.model3.json'
+      await live2dModelSelect.selectOption(selectedModelFile)
+      await page.waitForFunction((modelFile) => (
+        window.__settingsLive2dBaseline?.selection?.modelFile === modelFile
+      ), selectedModelFile)
+      const live2dSelection = await page.evaluate(() => ({
+        selectedValue: document.querySelector('#ndp-live2d-model')?.value ?? '',
+        selection: window.__settingsLive2dBaseline?.selection ?? null,
+      }))
+      if (live2dSelection.selectedValue !== selectedModelFile || live2dSelection.selection?.modelId !== '灵小狗') {
+        failures.push(`Live2D model selection did not persist by model file: ${JSON.stringify(live2dSelection)}`)
+      }
       const live2dScreenshotPath = path.join(outputDir, `${baseline.name}-live2d-controls.png`)
       await page.screenshot({ path: live2dScreenshotPath })
 
@@ -2046,7 +2110,13 @@ async function runUiBaseline(browser) {
       const taskPanelScreenshotPath = path.join(outputDir, `${baseline.name}-task-panel-controls.png`)
       await page.screenshot({ path: taskPanelScreenshotPath })
       settingsAppearanceControlNames = {
-        live2d: { count: live2dControls.length, screenshot: path.relative(projectRoot, live2dScreenshotPath) },
+        live2d: {
+          count: live2dControls.length,
+          scanCountBeforeFocus,
+          scanCountAfterFocus,
+          selectedModelFile: live2dSelection.selectedValue,
+          screenshot: path.relative(projectRoot, live2dScreenshotPath),
+        },
         bubble: { count: bubbleControls.length, screenshot: path.relative(projectRoot, bubbleScreenshotPath) },
         taskPanel: { count: taskPanelControls.length, screenshot: path.relative(projectRoot, taskPanelScreenshotPath) },
       }

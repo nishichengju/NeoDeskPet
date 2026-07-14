@@ -426,6 +426,32 @@ try {
   const chat = await openWindow(app, pet, 'openChat', 'chat')
   const settings = await openWindow(app, chat, 'openSettings', 'settings', 'aiConnection')
   const memory = await openWindow(app, settings, 'openMemory', 'memory')
+  const live2dModelSwitch = await settings.evaluate(async () => {
+    const models = await window.neoDeskPet.scanModels()
+    const target = models.find((model) => model.modelFile.includes('/Hiyori/'))
+    if (!target) return { modelCount: models.length, target: null, updated: null }
+    const updated = await window.neoDeskPet.setLive2dModel(target.id, target.modelFile)
+    return {
+      modelCount: models.length,
+      target,
+      updated: {
+        id: updated.live2dModelId,
+        file: updated.live2dModelFile,
+      },
+    }
+  })
+  assert(live2dModelSwitch.modelCount > 1, 'Live2D model scan did not return multiple models')
+  assert(live2dModelSwitch.target, 'Hiyori Live2D model was not found in the packaged app')
+  assert(
+    live2dModelSwitch.updated?.id === live2dModelSwitch.target.id
+      && live2dModelSwitch.updated?.file === live2dModelSwitch.target.modelFile,
+    'Live2D model selection was not persisted',
+  )
+  await pet.waitForFunction((modelFile) => {
+    const root = document.querySelector('.ndp-live2d-root')
+    return root?.getAttribute('data-model-file') === modelFile
+      && root?.getAttribute('data-model-loaded') === 'true'
+  }, live2dModelSwitch.target.modelFile)
   let orb = app.windows().find((page) => page.url().endsWith('#/orb'))
   if (!orb) {
     const windowPromise = app.waitForEvent('window', { timeout: 30_000 })
@@ -1793,6 +1819,7 @@ try {
       onCreate: settingsNavigationOnCreate?.trim() ?? '',
       onReuse: settingsNavigationOnReuse?.trim() ?? '',
     },
+    live2dModelSwitch,
     chatPersistence: {
       sessionId: chatPersistenceBeforeRestart.sessionId,
       beforeRestart: chatPersistenceBeforeRestart.loaded,

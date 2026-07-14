@@ -1,6 +1,12 @@
 import type { AppSettings } from '../../electron/types'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getAvailableModels, parseModelMetadata, scanAvailableModels, type Live2DModelInfo } from '../live2d/live2dModels'
+import {
+  defaultModelJsonUrl,
+  getAvailableModels,
+  parseModelMetadata,
+  scanAvailableModels,
+  type Live2DModelInfo,
+} from '../live2d/live2dModels'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { getLiveRegionProps } from '../components/liveRegion'
 import { getApi } from '../neoDeskPetApi'
@@ -54,7 +60,7 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
   const [pendingAnchor, setPendingAnchor] = useState<{ anchor: string; nonce: number } | null>(null)
   const [saveState, setSaveState] = useState<SettingsSaveState>({ state: 'idle', message: '' })
   const [confirmation, setConfirmation] = useState<SettingsConfirmOptions | null>(null)
-  const [availableModels, setAvailableModels] = useState<Live2DModelInfo[]>([])
+  const [availableModels, setAvailableModels] = useState<Live2DModelInfo[]>(() => getAvailableModels())
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [selectedModelInfo, setSelectedModelInfo] = useState<Live2DModelInfo | null>(null)
   const lastModelScanAtRef = useRef(0)
@@ -68,6 +74,7 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
   const petScale = settings?.petScale ?? 1.0
   const petOpacity = settings?.petOpacity ?? 1.0
   const live2dModelId = settings?.live2dModelId ?? 'haru'
+  const live2dModelFile = settings?.live2dModelFile ?? defaultModelJsonUrl
   const live2dMouseTrackingEnabled = settings?.live2dMouseTrackingEnabled !== false
   const live2dIdleSwayEnabled = settings?.live2dIdleSwayEnabled !== false
   const aiSettings = settings?.ai
@@ -170,20 +177,27 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
   )
 
   useEffect(() => {
-    if (activeView === 'live2d') void refreshModels({ force: availableModels.length === 0 })
-  }, [activeView, availableModels.length, refreshModels])
+    if (activeView === 'live2d') void refreshModels()
+  }, [activeView, refreshModels])
 
   useEffect(() => {
-    const model = availableModels.find((item) => item.id === live2dModelId)
+    let cancelled = false
+    const model =
+      availableModels.find((item) => item.modelFile === live2dModelFile)
+      ?? availableModels.find((item) => item.id === live2dModelId)
     if (!model) {
       setSelectedModelInfo(null)
       return
     }
     setSelectedModelInfo(model)
     void parseModelMetadata(model.modelFile).then((metadata) => {
+      if (cancelled) return
       setSelectedModelInfo({ ...model, ...metadata })
     })
-  }, [availableModels, live2dModelId])
+    return () => {
+      cancelled = true
+    }
+  }, [availableModels, live2dModelFile, live2dModelId])
 
   useEffect(() => {
     setSearchIndex(0)
@@ -283,7 +297,7 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
           api={trackedApi}
           petScale={petScale}
           petOpacity={petOpacity}
-          live2dModelId={live2dModelId}
+          live2dModelFile={live2dModelFile}
           live2dMouseTrackingEnabled={live2dMouseTrackingEnabled}
           live2dIdleSwayEnabled={live2dIdleSwayEnabled}
           availableModels={availableModels}
