@@ -4,6 +4,7 @@ import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolReg
 import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
 import { useProgressiveMessageWindow } from '../hooks/useProgressiveMessageWindow'
+import { resolveLocalMediaDataUrl, resolveLocalMediaUrl } from '../services/localMediaCache'
 import { ImageViewer, type ImageViewerItem } from './chat/ImageViewer'
 import { ChatComposer, type PendingChatAttachment } from './chat/ChatComposer'
 import { ChatMessageBody } from './chat/ChatMessageBody'
@@ -182,14 +183,8 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
         if (/^data:image\//i.test(p) || /^https?:\/\//i.test(p)) {
           out.push({ type: 'image_url', image_url: { url: p } })
         } else {
-          try {
-            const res = await api.readChatAttachmentDataUrl(p)
-            if (res?.ok && typeof res.dataUrl === 'string' && res.dataUrl.trim()) {
-              out.push({ type: 'image_url', image_url: { url: res.dataUrl } })
-            }
-          } catch {
-            // The textual tool output still contains the path/result if the file is unreadable.
-          }
+          const dataUrl = await resolveLocalMediaDataUrl(api, p)
+          if (dataUrl) out.push({ type: 'image_url', image_url: { url: dataUrl } })
         }
         if (out.length >= limit) break
       }
@@ -3824,16 +3819,8 @@ const ChatMessageItem = memo(function ChatMessageItem(props: ChatMessageItemProp
       if (cleaned.length === 0) return
       const items = (await Promise.all(
         cleaned.map(async (raw) => {
-          if (/^(https?:|data:|blob:)/i.test(raw)) return { src: raw, title: raw }
-          if (api) {
-            try {
-              const res = await api.getChatAttachmentUrl(raw)
-              if (res?.ok && typeof res.url === 'string') return { src: res.url, title: raw }
-            } catch {
-              /* ignore */
-            }
-          }
-          return { src: toLocalMediaSrc(raw), title: raw }
+          const src = await resolveLocalMediaUrl(api, raw)
+          return { src: src || toLocalMediaSrc(raw), title: raw }
         }),
       )).filter((item) => Boolean(item.src))
       if (items.length === 0) return

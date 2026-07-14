@@ -1,4 +1,9 @@
 import type { NeoDeskPetApi } from '../neoDeskPetApi'
+import {
+  buildLocalMediaReference,
+  resolveLocalMediaDataUrl,
+  resolveLocalMediaUrl,
+} from '../services/localMediaCache'
 import { toLocalMediaSrc } from '../utils/chatMessages'
 
 export type OrbMediaApi = Pick<NeoDeskPetApi, 'readChatAttachmentDataUrl' | 'getChatAttachmentUrl'>
@@ -37,14 +42,7 @@ export async function resolveOrbImageSource(
   const imagePath = String(options.imagePath ?? '').trim()
   if (!api || !imagePath) return ''
 
-  try {
-    const result = await api.readChatAttachmentDataUrl(
-      options.resourceId ? { resourceId: options.resourceId, path: imagePath } : imagePath,
-    )
-    return result?.ok && typeof result.dataUrl === 'string' ? result.dataUrl : ''
-  } catch {
-    return ''
-  }
+  return resolveLocalMediaDataUrl(api, buildLocalMediaReference(imagePath, options.resourceId))
 }
 
 export type OrbVideoSourceOptions = {
@@ -66,12 +64,5 @@ export async function resolveOrbVideoSource(
   const videoPath = String(options.videoPath ?? '').trim()
   if (!api || !videoPath) return ''
 
-  try {
-    const result = await api.getChatAttachmentUrl(
-      options.resourceId ? { resourceId: options.resourceId, path: videoPath } : videoPath,
-    )
-    return result?.ok && typeof result.url === 'string' ? result.url : ''
-  } catch {
-    return ''
-  }
+  return resolveLocalMediaUrl(api, buildLocalMediaReference(videoPath, options.resourceId))
 }

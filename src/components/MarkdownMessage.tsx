@@ -3,6 +3,7 @@ import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { splitThinkSegments } from '../utils/splitThinkSegments'
 import { getApi } from '../neoDeskPetApi'
+import { peekLocalMediaUrl, resolveLocalMediaUrl } from '../services/localMediaCache'
 import {
   applyMarkdownLocalImagePathCompat,
   decodeLocalPathCompat,
@@ -10,8 +11,6 @@ import {
   markdownMediaUrlTransform,
   toLocalMediaSrc,
 } from '../utils/markdownMedia'
-
-const localAttachmentUrlCache = new Map<string, { url: string; expiresAt: number }>()
 
 function applyCjkMarkdownCompat(input: string): string {
   const text = String(input ?? '')
@@ -40,11 +39,8 @@ function MarkdownImage(props: MarkdownImageProps) {
     return isAbsoluteLocalPath(candidate) ? candidate : ''
   }, [localPath, raw])
   const cachedResolved = useMemo(() => {
-    if (!absoluteLocal) return ''
-    const cached = localAttachmentUrlCache.get(absoluteLocal)
-    if (!cached || cached.expiresAt <= Date.now() + 5000) return ''
-    return cached.url
-  }, [absoluteLocal])
+    return absoluteLocal ? peekLocalMediaUrl(api, absoluteLocal) : ''
+  }, [absoluteLocal, api])
   const localFallback = useMemo(() => (absoluteLocal ? '' : toLocalMediaSrc(raw)), [absoluteLocal, raw])
   const [resolvedSrc, setResolvedSrc] = useState<string>(() => String(cachedResolved || localFallback).trim())
 
@@ -59,20 +55,11 @@ function MarkdownImage(props: MarkdownImageProps) {
   useEffect(() => {
     let alive = true
     if (!api || !absoluteLocal || cachedResolved) return () => { alive = false }
-    api
-      .getChatAttachmentUrl(absoluteLocal)
-      .then((res) => {
+    void resolveLocalMediaUrl(api, absoluteLocal)
+      .then((next) => {
         if (!alive) return
-        if (res?.ok && typeof res.url === 'string' && res.url.trim()) {
-          const next = res.url.trim()
-          localAttachmentUrlCache.set(absoluteLocal, {
-            url: next,
-            expiresAt: typeof res.expiresAt === 'number' ? res.expiresAt : Date.now() + 60_000,
-          })
-          setResolvedSrc((prev) => (String(prev ?? '').trim() === next ? prev : next))
-        }
+        if (next) setResolvedSrc((prev) => (String(prev ?? '').trim() === next ? prev : next))
       })
-      .catch(() => undefined)
 
     return () => {
       alive = false

@@ -1151,3 +1151,27 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查截图：`artifacts/ui-baseline/chat-long-history-720x620-scale100-window.png`、`artifacts/ui-baseline/chat-long-history-720x620-scale100-expanded.png`、`artifacts/ui-baseline/orb-long-history-560x720-scale100-window.png` 与 `artifacts/ui-baseline/orb-long-history-560x720-scale100-expanded.png`。本批未截断会话存储、AI 上下文或任务/附件数据，也未修改编辑、删除、重发、右键菜单和会话计数语义；只限制初始消息 DOM，并允许用户显式向前扩展。Chat 去掉平滑自动滚动后，消息更新仍立即定位到底部，但不再维持可能与用户滚动冲突的长动画。当前方案不是可变高度虚拟列表：用户反复点击后仍可把全部历史挂载到 DOM，超大单条 Markdown/媒体消息的自身解析成本也没有降低；尚未覆盖数千条消息、操作系统级滚轮连发或加载旧消息同时收到新流式 delta 的真实交互。
+
+## P2-2：前端加载与运行性能（第五十五批）
+
+- 验证日期：2026-07-14
+- 优化范围：renderer 本地媒体 URL/data URL 共享缓存、并发去重、过期刷新与媒体源切换一致性
+
+| 检查 | 结果 |
+| --- | --- |
+| 共享媒体缓存测试 | 4 个用例通过；覆盖并发 URL/data URL 去重、同步缓存读取、5 秒过期保护窗刷新、直接来源绕过 IPC、失败后重试 |
+| 媒体组件聚焦回归 | Orb 媒体、Markdown、Chat 附件和工具卡既有 12 个用例通过；path/resourceId 委托、直接 URL、失败空源和安全外链无回归 |
+| Renderer bundle | 主 chunk 146.30 kB；Chat 125.81 kB、Orb 49.63 kB、Markdown 160.34 kB，共享媒体/渐进窗口小 chunk 3.35 kB |
+| `npm test` | 82 个测试文件、352 个用例通过 |
+| `node --check scripts/verify-ipc-security.mjs` | 通过 |
+| `node --check scripts/fixtures/ipc-smoke-mcp-server.mjs` | 通过 |
+| `node --check scripts/capture-ui-baseline.mjs` | 通过 |
+| `npx tsc --noEmit` | 通过 |
+| `npm run lint` | 通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过，共享媒体缓存、Chat/Orb/Markdown 动态 chunk、native 依赖、vector worker 与品牌元数据全部写入成功 |
+| `npm run ipc:smoke` | packaged Pet/Chat/Settings/Memory/Orb preload 与运行正常，五类窗口 `runtimeErrors` 全为空；聊天/任务/Memory/Agent/MCP/TTS/ASR、权限、持久化与重启路径全部通过 |
+| `npm run media:smoke` | 图片 data URL、选择文件复制、图片/视频/Task resourceId URL、Range 206、越界/伪造路径拒绝和删除后 404 通过 |
+| `npm run ui:baseline` | 24 个场景通过；既有媒体查看器、工具卡、Markdown 资源门禁和长历史窗口门禁继续通过；0 failure、0 console error、无横向或纵向溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+本批未修改主进程媒体注册表、token 签发、路径越界校验、伪造 source path 拒绝、Range 响应或删除语义；共享缓存位于每个 renderer 自身的 JS 上下文内，不跨 BrowserWindow 共享，也不会绕过首次 IPC 安全验证。URL 只在服务端过期时间距离当前超过 5 秒时缓存，失败与空结果不缓存；data URL 使用 60 秒短 TTL 和 32 项上限。当前尚未通过浏览器场景直接统计重复 IPC 次数，主要证据来自可控 API mock 的并发/过期测试与 packaged 媒体 smoke；若同一路径文件在 60 秒内被原地覆盖，已缓存 data URL 可能短暂显示旧内容。

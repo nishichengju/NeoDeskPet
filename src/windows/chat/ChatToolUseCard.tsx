@@ -1,6 +1,7 @@
 import type { TaskRecord, TaskStepRecord } from '../../../electron/types'
 import { LocalVideo, MmvectorImagePreview } from '../../components/MediaPreviews'
 import type { NeoDeskPetApi } from '../../neoDeskPetApi'
+import { resolveLocalMediaUrl } from '../../services/localMediaCache'
 import { filterVisibleToolRuns, isAgentShellToolName } from '../../utils/chatMessages'
 import { Fragment, useState } from 'react'
 import { isPreviewableToolImagePath, parseMmvectorResults, toToolMediaSrc } from './toolUseMedia'
@@ -20,17 +21,8 @@ export type ChatToolUseCardProps = {
 async function openMediaTarget(api: NeoDeskPetApi | null, target: string): Promise<void> {
   const raw = String(target ?? '').trim()
   if (!raw) return
-  if (/^(https?:|data:|blob:)/i.test(raw)) {
-    window.open(raw, '_blank')
-    return
-  }
-  if (!api) return
-  try {
-    const result = await api.getChatAttachmentUrl(raw)
-    if (result?.ok && typeof result.url === 'string') window.open(result.url, '_blank')
-  } catch {
-    // Media previews keep their own load failure state.
-  }
+  const url = await resolveLocalMediaUrl(api, raw)
+  if (url) window.open(url, '_blank')
 }
 
 export function ChatToolUseCard({

@@ -1,6 +1,7 @@
 import type { ChatMessageRecord } from '../../../electron/types'
 import { LocalVideo, MmvectorImagePreview } from '../../components/MediaPreviews'
 import { getApi } from '../../neoDeskPetApi'
+import { buildLocalMediaReference, resolveLocalMediaUrl } from '../../services/localMediaCache'
 import { normalizeMessageAttachments } from './messageAttachments'
 
 export type ChatMessageAttachmentsProps = {
@@ -27,17 +28,8 @@ export function ChatMessageAttachments({
   const openAttachment = async (pathOrUrl: string, resourceId?: string) => {
     const raw = String(pathOrUrl ?? '').trim()
     if (!raw) return
-    if (/^(https?:|data:|blob:)/i.test(raw)) {
-      window.open(raw, '_blank')
-      return
-    }
-    if (!api) return
-    try {
-      const result = await api.getChatAttachmentUrl(resourceId ? { resourceId, path: raw } : raw)
-      if (result?.ok && typeof result.url === 'string') window.open(result.url, '_blank')
-    } catch {
-      // The media preview already exposes its own load failure state.
-    }
+    const url = await resolveLocalMediaUrl(api, buildLocalMediaReference(raw, resourceId))
+    if (url) window.open(url, '_blank')
   }
 
   return (

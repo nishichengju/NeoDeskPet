@@ -2,6 +2,11 @@
 
 import { useState, useEffect } from 'react'
 import { getApi } from '../neoDeskPetApi'
+import {
+  buildLocalMediaReference,
+  resolveLocalMediaDataUrl,
+  resolveLocalMediaUrl,
+} from '../services/localMediaCache'
 import { toLocalMediaSrc } from '../utils/chatMessages'
 
 export function MmvectorImagePreview(props: {
@@ -11,56 +16,57 @@ export function MmvectorImagePreview(props: {
   alt: string
 }) {
   const { api, imagePath, resourceId, alt } = props
-  const [src, setSrc] = useState<string>('')
+  const fallback = toLocalMediaSrc(imagePath)
+  const sourceKey = JSON.stringify([imagePath, resourceId ?? ''])
+  const [resolved, setResolved] = useState(() => ({ key: sourceKey, src: fallback }))
+  const src = fallback || (resolved.key === sourceKey ? resolved.src : '')
 
   useEffect(() => {
     let alive = true
     const p = String(imagePath ?? '').trim()
-    if (!api || !p) return
-    if (/^(https?:|data:|blob:)/i.test(p)) {
-      setSrc(p)
+    if (fallback) {
+      setResolved({ key: sourceKey, src: fallback })
       return
     }
-    api
-      .readChatAttachmentDataUrl(resourceId ? { resourceId, path: p } : p)
-      .then((res) => {
+    if (!api || !p) return
+    void resolveLocalMediaDataUrl(api, buildLocalMediaReference(p, resourceId))
+      .then((nextSrc) => {
         if (!alive) return
-        if (res?.ok && typeof res.dataUrl === 'string') setSrc(res.dataUrl)
+        setResolved({ key: sourceKey, src: nextSrc })
       })
-      .catch(() => undefined)
     return () => {
       alive = false
     }
-  }, [api, imagePath, resourceId])
+  }, [api, fallback, imagePath, resourceId, sourceKey])
 
-  const finalSrc = src || toLocalMediaSrc(imagePath)
-  return finalSrc ? <img className="ndp-mmvector-image" src={finalSrc} alt={alt} loading="lazy" /> : null
+  return src ? <img className="ndp-mmvector-image" src={src} alt={alt} loading="lazy" /> : null
 }
 
 function useLocalMediaUrl(api: ReturnType<typeof getApi> | null, inputPath: string, resourceId?: string): string {
-  const [url, setUrl] = useState<string>('')
+  const fallback = toLocalMediaSrc(inputPath)
+  const sourceKey = JSON.stringify([inputPath, resourceId ?? ''])
+  const [resolved, setResolved] = useState(() => ({ key: sourceKey, src: fallback }))
+  const src = fallback || (resolved.key === sourceKey ? resolved.src : '')
 
   useEffect(() => {
     let alive = true
     const p = String(inputPath ?? '').trim()
-    if (!api || !p) return
-    if (/^(https?:|data:|blob:)/i.test(p)) {
-      setUrl(p)
+    if (fallback) {
+      setResolved({ key: sourceKey, src: fallback })
       return
     }
-    api
-      .getChatAttachmentUrl(resourceId ? { resourceId, path: p } : p)
-      .then((res) => {
+    if (!api || !p) return
+    void resolveLocalMediaUrl(api, buildLocalMediaReference(p, resourceId))
+      .then((nextSrc) => {
         if (!alive) return
-        if (res?.ok && typeof res.url === 'string') setUrl(res.url)
+        setResolved({ key: sourceKey, src: nextSrc })
       })
-      .catch(() => undefined)
     return () => {
       alive = false
     }
-  }, [api, inputPath, resourceId])
+  }, [api, fallback, inputPath, resourceId, sourceKey])
 
-  return url || toLocalMediaSrc(inputPath)
+  return src
 }
 
 export function LocalVideo(props: {

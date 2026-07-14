@@ -12,6 +12,7 @@ import type {
 } from '../../electron/types'
 import { getApi } from '../neoDeskPetApi'
 import { useProgressiveMessageWindow } from '../hooks/useProgressiveMessageWindow'
+import { buildLocalMediaReference, resolveLocalMediaUrl } from '../services/localMediaCache'
 import { ABORTED_ERROR, getAIService, type ChatMessage } from '../services/aiService'
 import {
   computeAppendDelta,
@@ -1667,14 +1668,7 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     async (pathOrUrl: string): Promise<string> => {
       const raw = String(pathOrUrl ?? '').trim()
       if (!raw) return ''
-      if (/^(https?:|data:|blob:)/i.test(raw)) return raw
-      try {
-        const res = await api?.getChatAttachmentUrl(raw)
-        if (res?.ok && typeof res.url === 'string') return res.url
-      } catch {
-        /* ignore */
-      }
-      return ''
+      return resolveLocalMediaUrl(api, raw)
     },
     [api],
   )
@@ -1732,19 +1726,8 @@ export function OrbApp(props: { api: ReturnType<typeof getApi> }) {
     async (pathOrUrl: string, resourceId?: string) => {
       const raw = String(pathOrUrl ?? '').trim()
       if (!raw) return
-      if (/^(https?:|data:|blob:)/i.test(raw)) {
-        window.open(raw, '_blank')
-        return
-      }
-      try {
-        const res = await api?.getChatAttachmentUrl(resourceId ? { resourceId, path: raw } : raw)
-        if (res?.ok && typeof res.url === 'string') {
-          window.open(res.url, '_blank')
-          return
-        }
-      } catch {
-        /* ignore */
-      }
+      const url = await resolveLocalMediaUrl(api, buildLocalMediaReference(raw, resourceId))
+      if (url) window.open(url, '_blank')
     },
     [api],
   )

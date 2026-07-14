@@ -1035,6 +1035,14 @@ AI 与能力
 - 新增 3 个窗口计算测试和 1 个 Orb 视图交互测试，覆盖最新 60 条、扩展到 120 条、短会话全量渲染、隐藏计数和加载委托。UI baseline 新增 Chat/Orb 各 180 条消息的长历史场景，总场景从 22 增至 24；两端均验证 `60 → 120` 条 DOM、剩余计数 `120 → 60`，加载前后锚点偏移均为 0.625px。
 - renderer 主 chunk 为 146.30 kB，Chat 为 126.44 kB，Orb 为 50.25 kB；`npm test` 共 81 个测试文件、348 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 24 个 UI baseline 场景均通过，基线为 0 failure、0 console error、无横向或纵向溢出。下一批继续收敛 Chat/Orb 重复的附件 URL 缓存和图片预览解析。
 
+第五十五批进展（2026-07-14）：
+
+- 新增 `src/services/localMediaCache.ts`，按 renderer 内的 API 实例隔离本地媒体缓存，统一规范化 path/resourceId 引用、直连 URL 绕过、并发 Promise 去重、URL 过期前 5 秒刷新、失败不缓存和容量受限的 LRU；URL 最多保留 256 项，data URL 最多 32 项且仅缓存 60 秒，避免大图 base64 长期占用内存。
+- Markdown 本地图片、Chat/Orb 视频预览、MMVector/Orb 图片 data URL、Chat/Orb 图片查看器、普通附件打开、工具卡媒体打开和 Chat 视觉上下文全部改用共享服务；renderer 源码中不再由各组件直接调用 `getChatAttachmentUrl`/`readChatAttachmentDataUrl`。安全校验仍由原 IPC 首次解析执行，缓存只复用同一 API 实例下已成功验证的同一引用。
+- `MediaPreviews` 同步采用 source key 绑定解析结果：输入 path/resourceId 变化时不会在新请求完成前继续显示旧媒体；Markdown 通过只读 `peek` 复用尚未进入 5 秒保护窗的 URL，不在 React render 阶段改写缓存。失败、空结果和即将过期 token 均不会被复用。
+- 新增 4 个共享缓存测试，覆盖相同引用并发去重、同步读取成功缓存、过期保护窗刷新、data URL 去重、直接来源不触发 IPC，以及临时失败后的再次重试；既有 Orb 媒体、Markdown、Chat 附件和工具卡测试继续通过。
+- renderer 主 chunk 保持 146.30 kB；Chat 从 126.44 kB 降至 125.81 kB，Orb 从 50.25 kB 降至 49.63 kB，Markdown 从 160.55 kB 降至 160.34 kB，共享小 chunk 增至 3.35 kB。`npm test` 共 82 个测试文件、352 个用例通过，TypeScript、lint、Windows unpacked 打包、三项脚本语法检查、IPC/媒体 smoke 和 24 个 UI baseline 场景均通过。下一批建立可重复的窗口启动/首帧耗时基线，补齐 P2-2 最后一项性能证据。
+
 ## 15. P2-3：无障碍与交互一致性
 
 ### 实施步骤
