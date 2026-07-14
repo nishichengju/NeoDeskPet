@@ -3,6 +3,7 @@
 import { getBuiltinToolDefinitions, isToolEnabled } from '../../electron/toolRegistry'
 import type { AppSettings, ChatAttachment, ChatMessageBlock, ChatMessageRecord, ChatSessionSummary, MemoryRetrieveResult, Persona, TaskCreateArgs, TaskRecord, VisualArtifactRef } from '../../electron/types'
 import { ContextUsageOrb } from '../components/ContextUsageOrb'
+import { getLiveRegionProps } from '../components/liveRegion'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useProgressiveMessageWindow } from '../hooks/useProgressiveMessageWindow'
 import { resolveLocalMediaDataUrl, resolveLocalMediaUrl } from '../services/localMediaCache'
@@ -3681,7 +3682,7 @@ export function ChatWindow(props: { api: ReturnType<typeof getApi> }) {
       </main>
 
       {error && (
-        <div className="ndp-chat-error">
+        <div className="ndp-chat-error" {...getLiveRegionProps('assertive')}>
           <span>{error}</span>
           <button type="button" onClick={() => setError(null)} aria-label="关闭错误提示" title="关闭">
             ×

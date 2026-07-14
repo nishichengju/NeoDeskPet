@@ -1,6 +1,7 @@
 import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from 'react'
 import type { ChatMessageRecord, ChatSessionSummary } from '../../electron/types'
 import { DeferredMarkdownMessage } from '../components/DeferredMarkdownMessage'
+import { getLiveRegionProps } from '../components/liveRegion'
 
 export type OrbPanelViewProps = {
   sessionName?: string
@@ -45,8 +46,8 @@ export function OrbPanelView(props: OrbPanelViewProps) {
       </div>
 
       <div className="ndp-orbpanel-body" ref={props.listRef} data-orb-nodrag="true">
-        {props.loading ? <div className="ndp-orbpanel-empty">加载中</div> : null}
-        {props.error ? <div className="ndp-orbpanel-empty ndp-orbpanel-empty-error">{props.error}</div> : null}
+        {props.loading ? <div className="ndp-orbpanel-empty" {...getLiveRegionProps('polite')}>加载中</div> : null}
+        {props.error ? <div className="ndp-orbpanel-empty ndp-orbpanel-empty-error" {...getLiveRegionProps('assertive')}>{props.error}</div> : null}
         {!props.loading && !props.error && props.messages.length === 0 ? (
           <div className="ndp-orbpanel-empty">还没有消息</div>
         ) : null}

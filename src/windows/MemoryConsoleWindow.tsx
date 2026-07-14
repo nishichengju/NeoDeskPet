@@ -12,6 +12,7 @@ import type {
   Persona,
   PersonaSummary,
 } from '../../electron/types'
+import { getLiveRegionProps } from '../components/liveRegion'
 import { useVisibleInterval } from '../hooks/useVisibleInterval'
 import { getApi } from '../neoDeskPetApi'
 import { getAIService, type ChatMessage } from '../services/aiService'
@@ -910,7 +911,7 @@ export function MemoryConsoleWindow(props: Props) {
         <div className="ndp-settings-content">
           <div className="ndp-settings-section">
             <h3>错误</h3>
-            <div>neoDeskPet API 不可用</div>
+            <div {...getLiveRegionProps('assertive')}>neoDeskPet API 不可用</div>
           </div>
         </div>
       </div>
@@ -1328,7 +1329,7 @@ export function MemoryConsoleWindow(props: Props) {
         {error && (
           <div className="ndp-settings-section">
             <h3>错误</h3>
-            <div style={{ whiteSpace: 'pre-wrap' }}>{error}</div>
+            <div style={{ whiteSpace: 'pre-wrap' }} {...getLiveRegionProps('assertive')}>{error}</div>
           </div>
         )}
 

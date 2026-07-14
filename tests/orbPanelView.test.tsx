@@ -64,6 +64,17 @@ describe('Orb panel view', () => {
     expect(html).toContain('打开完整聊天窗口')
   })
 
+  it('announces loading politely and errors assertively', () => {
+    const loadingHtml = renderToStaticMarkup(createElement(OrbPanelView, props({ loading: true })))
+    const errorHtml = renderToStaticMarkup(createElement(OrbPanelView, props({ error: '加载失败' })))
+
+    expect(loadingHtml).toContain('role="status"')
+    expect(loadingHtml).toContain('aria-live="polite"')
+    expect(errorHtml).toContain('role="alert"')
+    expect(errorHtml).toContain('aria-live="assertive"')
+    expect(errorHtml).toContain('aria-atomic="true"')
+  })
+
   it('renders user markdown, assistant content, and attachments in message order', () => {
     const messages = [message('user-1', 'user', '**hello**'), message('assistant-1', 'assistant', 'answer')]
     const html = renderToStaticMarkup(

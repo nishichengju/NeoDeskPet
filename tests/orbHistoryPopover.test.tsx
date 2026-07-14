@@ -77,7 +77,7 @@ describe('OrbHistoryPopover', () => {
     expect(html).toContain('>2<')
     expect(html).toContain('>空<')
     expect(html).toContain('aria-label="删除该会话"')
-    expect(renderToStaticMarkup(createElement(OrbHistoryPopover, {
+    const loadingHtml = renderToStaticMarkup(createElement(OrbHistoryPopover, {
       left: 0,
       top: 0,
       arrowX: 0,
@@ -86,7 +86,10 @@ describe('OrbHistoryPopover', () => {
       onSelect,
       onDelete,
       onOpenAll,
-    }))).toContain('加载中')
+    }))
+    expect(loadingHtml).toContain('加载中')
+    expect(loadingHtml).toContain('role="status"')
+    expect(loadingHtml).toContain('aria-live="polite"')
     expect(renderToStaticMarkup(createElement(OrbHistoryPopover, {
       left: 0,
       top: 0,

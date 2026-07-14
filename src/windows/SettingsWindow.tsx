@@ -2,6 +2,7 @@ import type { AppSettings } from '../../electron/types'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getAvailableModels, parseModelMetadata, scanAvailableModels, type Live2DModelInfo } from '../live2d/live2dModels'
 import { useDialogFocus } from '../hooks/useDialogFocus'
+import { getLiveRegionProps } from '../components/liveRegion'
 import { getApi } from '../neoDeskPetApi'
 import type { SettingsConfirmAction, SettingsConfirmOptions } from './settings/settingsConfirm'
 import {
@@ -334,7 +335,10 @@ export function SettingsWindow(props: { api: ReturnType<typeof getApi>; settings
         <div className="ndp-settings-title">
           <span className="ndp-settings-icon" aria-hidden="true">⚙</span>
           <span>设置</span>
-          <span className={`ndp-settings-save-state ${saveState.state}`} role="status" aria-live="polite">
+          <span
+            className={`ndp-settings-save-state ${saveState.state}`}
+            {...getLiveRegionProps(saveState.state === 'error' ? 'assertive' : 'polite')}
+          >
             {saveState.message}
           </span>
         </div>

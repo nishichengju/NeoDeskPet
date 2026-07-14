@@ -4,6 +4,7 @@ import {
   ORB_HISTORY_POPOVER_WIDTH,
   type OrbHistoryItem,
 } from './orbHistoryUtils'
+import { getLiveRegionProps } from '../components/liveRegion'
 
 export type OrbHistoryPopoverProps = {
   left: number
@@ -58,7 +59,7 @@ export function OrbHistoryPopover(props: OrbHistoryPopoverProps) {
           </div>
         ))
       ) : props.loading ? (
-        <div className="ndp-orbapp-popover-empty">加载中</div>
+        <div className="ndp-orbapp-popover-empty" {...getLiveRegionProps('polite')}>加载中</div>
       ) : (
         <div className="ndp-orbapp-popover-empty">暂无历史对话</div>
       )}

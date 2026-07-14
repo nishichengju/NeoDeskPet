@@ -1090,6 +1090,16 @@ async function runUiBaseline(browser) {
       await page.waitForFunction(() => document.querySelector('textarea[aria-label="消息输入"]')?.value === '')
       await page.locator('.ndp-msg-row').first().waitFor({ state: 'visible' })
       await page.getByRole('button', { name: '发送' }).waitFor({ state: 'visible' })
+      const chatError = page.locator('.ndp-chat-error')
+      await chatError.waitFor({ state: 'visible' })
+      const chatErrorA11y = await chatError.evaluate((element) => ({
+        role: element.getAttribute('role'),
+        live: element.getAttribute('aria-live'),
+        atomic: element.getAttribute('aria-atomic'),
+      }))
+      if (chatErrorA11y.role !== 'alert' || chatErrorA11y.live !== 'assertive' || chatErrorA11y.atomic !== 'true') {
+        failures.push('chat error is not an atomic assertive alert')
+      }
 
       const userMessageRow = page.locator('.ndp-msg-row-user').last()
       await userMessageRow.click({ button: 'right' })
@@ -1564,11 +1574,19 @@ async function runUiBaseline(browser) {
       }))
       settingsSearch.directNavigationLabel = directNavigationLabel?.trim() ?? ''
       settingsSearch.savingVisible = savingVisible
+      settingsSearch.liveRegion = await page.locator('.ndp-settings-save-state').evaluate((element) => ({
+        role: element.getAttribute('role'),
+        live: element.getAttribute('aria-live'),
+        atomic: element.getAttribute('aria-atomic'),
+      }))
       settingsSearch.screenshot = searchScreenshot
       if (settingsSearch.activeLabel !== 'API 连接') failures.push(`settings search opened ${settingsSearch.activeLabel || 'nothing'}`)
       if (!settingsSearch.baseUrlVisible) failures.push('settings search did not highlight API Base URL')
       if (!settingsSearch.savingVisible) failures.push('settings save state did not show saving')
       if (settingsSearch.saveState !== 'saved') failures.push(`settings save state ended as ${settingsSearch.saveState}`)
+      if (settingsSearch.liveRegion.role !== 'status' || settingsSearch.liveRegion.live !== 'polite' || settingsSearch.liveRegion.atomic !== 'true') {
+        failures.push('settings save state is not an atomic polite status')
+      }
       if (settingsSearch.contentScrollHeight > settingsSearch.contentClientHeight * 2) {
         failures.push(
           `API connection view exceeds two viewports: ${settingsSearch.contentScrollHeight}/${settingsSearch.contentClientHeight}`,

@@ -1275,3 +1275,24 @@
 | `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100.png` 与 `artifacts/ui-baseline/settings-reduced-motion-860x680-scale100.png`，标签按钮尺寸、换行、内容区宽度和 reduced-motion 最终画面无视觉回归。Chat 主窗口本轮审计未发现真正的 tab widget，因此没有为普通按钮或会话列表误加 tab 角色。当前 reduced-motion 采用应用级统一媒体查询，能覆盖 App、SpeechBubble 与 Orb 已加载样式；Live2D 模型自身的内部物理和眨眼由模型运行时控制，尚未跟随系统设置暂停。下一批继续统一 toast、错误提示和保存状态的 live-region 播报。
+
+## P2-3：无障碍与交互一致性（第六十批）
+
+- 验证日期：2026-07-14
+- 优化范围：Settings 保存反馈、Chat/Orb/Memory 错误与 Orb 加载状态的 live-region 优先级和原子播报
+
+| 检查 | 结果 |
+| --- | --- |
+| 共享语义 | 新增 `getLiveRegionProps`，普通异步更新统一为 atomic `status/polite`，需要立即处理的错误统一为 atomic `alert/assertive` |
+| 接入范围 | Settings 保存中/已保存保持 polite，保存失败动态升级 assertive；Chat 顶部错误条、Orb Panel 错误、Memory Console API/运行错误使用 assertive；Orb Panel 与历史弹层加载使用 polite |
+| 防重复 | Chat/Orb 消息正文中的 `[错误]` 不接 live-region，避免与独立错误条重复朗读；空状态也不作为动态通知 |
+| 聚焦测试 | `liveRegion`、`orbPanelView`、`orbHistoryPopover` 共 3 个文件、10 个用例通过 |
+| Renderer bundle | `liveRegion` 共享 chunk 0.16 kB；主 chunk 146.38 kB、Chat 126.49 kB、Settings 15.34 kB、Memory 31.02 kB、Orb 50.27 kB |
+| `npm test` | 85 个测试文件、359 个用例通过 |
+| TypeScript / lint / 三项脚本检查 | 全部通过，0 warning |
+| `npm run build:unpacked` | Windows unpacked 包通过 |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过，五类窗口 runtimeErrors 为空，安全、持久化与本地媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；Settings 保存状态实测为 `status/polite/atomic`，Chat 错误条实测为 `alert/assertive/atomic`；0 failure、0 console error、无溢出 |
+| `git diff --check` | 通过，仅有仓库既有 CRLF 转换提示 |
+
+本批只增加辅助技术语义，没有改变错误文案、视觉样式、自动消失时间、关闭按钮、保存并发序列或业务异常处理。静态测试覆盖 Orb 加载和错误两种优先级，浏览器基线覆盖真实 Chat 错误出现后的 alert 属性以及 Settings 保存中到已保存后的 status 属性。当前尚未统一 Memory Console 局部“已保存/保存失败”短提示和 Semantic Group 编辑器状态，也没有加入全局可视 toast 容器；下一批继续审计这两类局部反馈和表单错误关联。

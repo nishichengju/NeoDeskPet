@@ -1093,6 +1093,13 @@ AI 与能力
 - UI baseline 增至 25 个场景，新增 reduced-motion Settings 场景并读取 computed style；动画/过渡均不超过 1ms且不再重复。默认 Settings 场景实际验证角色子页 ArrowRight/Home/End 与工具中心 ArrowRight/循环，所有焦点和 `aria-selected` 断言为 true。
 - `npm test` 共 84 个测试文件、356 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。主 chunk 146.34 kB、Settings 15.28 kB、Persona 22.76 kB、Tools 19.81 kB、主 CSS 42.89 kB。下一批统一 toast、错误提示和保存状态的 live-region 播报。
 
+第六十批进展（2026-07-14）：
+
+- 新增 0.16 kB 的共享 live-region 属性映射：普通异步状态统一为 atomic `status/polite`，错误统一为 atomic `alert/assertive`。Settings 保存中/已保存保持温和播报，保存失败动态升级；Chat 顶部错误、Orb Panel 错误和 Memory Console 错误立即播报，Orb Panel/历史加载使用 polite。
+- 保留消息正文、空状态和既有视觉反馈的普通语义，避免同一 `[错误]` 同时由消息与错误条重复朗读；没有修改文案、自动消失、关闭操作、保存并发保护或异常流程。
+- UI baseline 在 Chat 真实错误出现后检查 `alert/assertive/atomic`，并检查 Settings 保存完成后的 `status/polite/atomic`；25 个场景全部 0 failure、0 console error、无溢出。3 个聚焦测试文件共 10 个用例通过。
+- `npm test` 共 85 个测试文件、359 个用例；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 和 UI baseline 全部通过。下一批继续处理 Memory Console 局部保存提示、Semantic Group 编辑反馈和表单错误关联。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：
