@@ -1544,3 +1544,23 @@
 | `npm run ui:baseline` | 25 个场景通过；Persona 六页按 role + name 定位 48 项，0 failure、0 console error、无溢出 |
 
 人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-persona-profile-controls.png`、`settings-default-860x680-scale100-persona-memory-controls.png`、`settings-default-860x680-scale100-persona-recall-controls.png`、`settings-default-860x680-scale100-persona-text-vector-controls.png`、`settings-default-860x680-scale100-persona-mm-vector-controls.png` 与 `settings-default-860x680-scale100-persona-manage-controls.png`，深层自定义 API 字段、密钥输入、复选框、数字输入和管理页并排筛选没有出现标签重叠、宽度变化或异常滚动。已覆盖的默认与条件 Settings 控件均完成命名，下一批用程序化扫描作为最终门禁，并开始对比度审计。
+
+## P2-3：无障碍与交互一致性（第七十三批，阶段收口）
+
+- 验证日期：2026-07-14
+- 优化范围：全 Settings 可见表单控件自动命名门禁、直接渲染文本对比度门禁，以及两处低对比度文字修正
+
+| 检查 | 结果 |
+| --- | --- |
+| Settings 控件自动门禁 | 覆盖 23 个默认与条件展开状态，扫描全部可见 `input`、`select`、`textarea`；共 322 项，缺名 0 项 |
+| 名称来源 | 支持 `aria-labelledby`、`aria-label`、关联 `label`、`title` 和按钮 `value`，未命名控件会直接使 UI baseline 失败 |
+| 文本对比度门禁 | 直接渲染文本共采样 1,937 项，最低对比度 5.08:1，低于 4.5:1 的违规数为 0 |
+| 颜色修正 | `.ndp-settings-nav-label` 从 4.06:1 提升，`.ndp-style-desc` 从 4.22:1 提升；两者均通过门禁 |
+| `npm test` | 85 个测试文件、369 个用例通过 |
+| `npx tsc --noEmit` / `npm run lint` | 通过，0 warning |
+| 三项脚本语法检查 | 通过 |
+| `npm run build:unpacked` | Windows unpacked 包通过；主 CSS 42.93 kB，Persona chunk 24.54 kB |
+| `npm run ipc:smoke` / `npm run media:smoke` | 通过；五类窗口 `runtimeErrors` 为空，权限、持久化、AI/MCP/记忆和本地媒体路径无回归 |
+| `npm run ui:baseline` | 25 个场景通过；0 failure、0 console error、无横向或纵向溢出，控件命名与文本对比度门禁均通过 |
+
+人工检查 `artifacts/ui-baseline/settings-default-860x680-scale100-bubble-controls.png`，导航标签和气泡样式说明提高亮度后仍保持清晰的信息层级，没有出现文字遮挡、布局变化或异常滚动。P2-3 的键盘操作、焦点管理、语义标签、reduced motion、live-region、错误关联、Settings 控件命名和文本对比度均已完成；强制修复路线图至此收口，P3 仅作为可选产品增强候选保留。

@@ -886,7 +886,7 @@ async function runWindowStartupBaseline(browser) {
 const baselines = [
   { name: 'pet-shell-300x500-scale100', route: 'pet', width: 300, height: 500, scale: 1 },
   { name: 'chat-default-720x620-scale100', route: 'chat', width: 720, height: 620, scale: 1, mockChat: true, compactChat: true },
-  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifySettingsChatUiControlNames: true, verifySettingsConditionalControlNames: true, verifySettingsPersonaControlNames: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
+  { name: 'settings-default-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, verifySettingsSearch: true, verifyMcpImport: true, verifySettingsResourceErrors: true, verifySettingsVoiceControlNames: true, verifySettingsAppearanceControlNames: true, verifySettingsAiControlNames: true, verifySettingsNovelAiControlNames: true, verifySettingsChatUiControlNames: true, verifySettingsConditionalControlNames: true, verifySettingsPersonaControlNames: true, verifySettingsControlNameGate: true, verifyAiModelErrors: true, verifySecretSaveError: true, verifyConfirmDialog: true, verifyAiSplit: true },
   { name: 'settings-reduced-motion-860x680-scale100', route: 'settings', width: 860, height: 680, scale: 1, mockSettings: true, reducedMotion: true, verifyReducedMotion: true },
   { name: 'memory-default-900x720-scale100', route: 'memory', width: 900, height: 720, scale: 1, mockMemory: true, verifyMemoryEdit: true },
   { name: 'orb-ball-80x80-scale100', route: 'orb', width: 80, height: 80, scale: 1, mockOrbState: 'ball' },
@@ -2370,6 +2370,197 @@ async function runUiBaseline(browser) {
       }
     }
 
+    let settingsControlNameGate = null
+    if (baseline.verifySettingsControlNameGate) {
+      const states = []
+      const auditCurrentState = async (name) => {
+        const result = await page.evaluate((stateName) => {
+          const normalize = (value) => String(value ?? '').replace(/\s+/g, ' ').trim()
+          const isVisible = (element) => {
+            const style = getComputedStyle(element)
+            const rect = element.getBoundingClientRect()
+            return style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && Number.parseFloat(style.opacity || '1') > 0
+              && rect.width > 0
+              && rect.height > 0
+          }
+          const getProgrammaticName = (element) => {
+            const labelledBy = normalize(element.getAttribute('aria-labelledby'))
+            if (labelledBy) {
+              const text = normalize(labelledBy
+                .split(/\s+/)
+                .map((id) => document.getElementById(id)?.textContent ?? '')
+                .join(' '))
+              if (text) return text
+            }
+            const ariaLabel = normalize(element.getAttribute('aria-label'))
+            if (ariaLabel) return ariaLabel
+            const labels = 'labels' in element && element.labels
+              ? Array.from(element.labels).map((label) => label.textContent ?? '').join(' ')
+              : ''
+            if (normalize(labels)) return normalize(labels)
+            const title = normalize(element.getAttribute('title'))
+            if (title) return title
+            if (element instanceof HTMLInputElement) {
+              if (element.type === 'image') return normalize(element.alt)
+              if (['button', 'submit', 'reset'].includes(element.type)) return normalize(element.value)
+            }
+            return ''
+          }
+          const parseColor = (value) => {
+            const match = String(value).match(/rgba?\(([^)]+)\)/i)
+            if (!match) return null
+            const parts = match[1].split(',').map((part) => Number.parseFloat(part.trim()))
+            if (parts.length < 3 || parts.slice(0, 3).some((part) => !Number.isFinite(part))) return null
+            return [parts[0], parts[1], parts[2], Number.isFinite(parts[3]) ? parts[3] : 1]
+          }
+          const blend = (foreground, background) => {
+            const alpha = foreground[3] + background[3] * (1 - foreground[3])
+            if (alpha <= 0) return [0, 0, 0, 0]
+            return [
+              (foreground[0] * foreground[3] + background[0] * background[3] * (1 - foreground[3])) / alpha,
+              (foreground[1] * foreground[3] + background[1] * background[3] * (1 - foreground[3])) / alpha,
+              (foreground[2] * foreground[3] + background[2] * background[3] * (1 - foreground[3])) / alpha,
+              alpha,
+            ]
+          }
+          const luminance = (color) => {
+            const channels = color.slice(0, 3).map((channel) => {
+              const value = channel / 255
+              return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+            })
+            return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+          }
+          const contrastRatio = (foreground, background) => {
+            const foregroundLuminance = luminance(foreground)
+            const backgroundLuminance = luminance(background)
+            const lighter = Math.max(foregroundLuminance, backgroundLuminance)
+            const darker = Math.min(foregroundLuminance, backgroundLuminance)
+            return (lighter + 0.05) / (darker + 0.05)
+          }
+          const getEffectiveBackground = (element) => {
+            const chain = []
+            for (let current = element; current instanceof Element; current = current.parentElement) chain.unshift(current)
+            let background = [30, 30, 45, 1]
+            for (const current of chain) {
+              const color = parseColor(getComputedStyle(current).backgroundColor)
+              if (color && color[3] > 0) background = blend(color, background)
+            }
+            return background
+          }
+          const controls = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'))
+            .filter((element) => isVisible(element))
+            .map((element) => ({
+              tag: element.tagName.toLowerCase(),
+              type: element instanceof HTMLInputElement ? element.type : undefined,
+              id: element.id || undefined,
+              name: getProgrammaticName(element),
+              placeholder: normalize(element.getAttribute('placeholder')) || undefined,
+            }))
+          const contrastResults = Array.from(document.querySelectorAll('body *'))
+            .filter((element) => {
+              if (!isVisible(element)) return false
+              if (element.closest('[disabled], [aria-disabled="true"]')) return false
+              return Array.from(element.childNodes).some((node) => node.nodeType === Node.TEXT_NODE && normalize(node.textContent))
+            })
+            .map((element) => {
+              const text = normalize(Array.from(element.childNodes)
+                .filter((node) => node.nodeType === Node.TEXT_NODE)
+                .map((node) => node.textContent ?? '')
+                .join(' '))
+              const style = getComputedStyle(element)
+              const foreground = parseColor(style.color)
+              const background = getEffectiveBackground(element)
+              if (!text || !foreground) return null
+              const renderedForeground = blend(foreground, background)
+              const ratio = contrastRatio(renderedForeground, background)
+              const fontSize = Number.parseFloat(style.fontSize)
+              const fontWeight = Number.parseInt(style.fontWeight, 10)
+              const threshold = fontSize >= 24 || (fontSize >= 18.66 && fontWeight >= 700) ? 3 : 4.5
+              return {
+                text: text.slice(0, 120),
+                ratio: Number(ratio.toFixed(2)),
+                threshold,
+                fontSize,
+                fontWeight: Number.isFinite(fontWeight) ? fontWeight : style.fontWeight,
+                className: normalize(element.className),
+                passes: ratio + 0.01 >= threshold,
+              }
+            })
+            .filter(Boolean)
+          const contrastViolations = contrastResults
+            .filter((result) => !result.passes)
+          return {
+            name: stateName,
+            count: controls.length,
+            missing: controls.filter((control) => !control.name),
+            contrastTextCount: contrastResults.length,
+            minimumContrastRatio: contrastResults.length > 0
+              ? Math.min(...contrastResults.map((result) => result.ratio))
+              : null,
+            contrastViolations,
+          }
+        }, name)
+        states.push(result)
+        if (result.missing.length > 0) {
+          failures.push(`settings control-name gate ${name}: ${JSON.stringify(result.missing)}`)
+        }
+        if (result.contrastViolations.length > 0) {
+          failures.push(`settings contrast gate ${name}: ${JSON.stringify(result.contrastViolations)}`)
+        }
+      }
+
+      for (const view of ['Live2D', '气泡', '任务面板', 'API 连接']) {
+        await page.getByRole('button', { name: view, exact: true }).click()
+        await auditCurrentState(view)
+      }
+
+      await page.getByRole('button', { name: '模型与生成', exact: true }).click()
+      await auditCurrentState('模型与生成')
+      await page.getByText('高级：上下文压缩', { exact: true }).click()
+      await auditCurrentState('模型与生成/高级上下文压缩')
+
+      for (const view of ['视觉', 'Agent']) {
+        await page.getByRole('button', { name: view, exact: true }).click()
+        await auditCurrentState(view)
+      }
+
+      await page.getByRole('button', { name: '工具中心', exact: true }).click()
+      await auditCurrentState('工具中心/内置工具')
+      await page.getByText('browser', { exact: true }).click()
+      await auditCurrentState('工具中心/内置工具/browser')
+      const toolsTablist = page.getByRole('tablist', { name: '工具中心设置' })
+      await toolsTablist.getByRole('tab', { name: 'MCP', exact: true }).click()
+      await auditCurrentState('工具中心/MCP')
+      await page.getByText('基线 MCP', { exact: true }).click()
+      await page.getByText('tools（1/1）', { exact: true }).click()
+      await auditCurrentState('工具中心/MCP/Server')
+
+      for (const view of ['生图', '设定库', '语音合成', '语音识别', '聊天界面']) {
+        await page.getByRole('button', { name: view, exact: true }).click()
+        await auditCurrentState(view)
+      }
+
+      await page.getByRole('button', { name: '角色与长期记忆', exact: true }).click()
+      const personaTablist = page.getByRole('tablist', { name: '角色与长期记忆设置' })
+      for (const tab of ['角色', '记忆', '召回', '文本向量', '多模态向量', '管理']) {
+        await personaTablist.getByRole('tab', { name: tab, exact: true }).click()
+        await auditCurrentState(`角色与长期记忆/${tab}`)
+      }
+
+      settingsControlNameGate = {
+        states,
+        totalControls: states.reduce((total, state) => total + state.count, 0),
+        missingCount: states.reduce((total, state) => total + state.missing.length, 0),
+        contrastTextCount: states.reduce((total, state) => total + state.contrastTextCount, 0),
+        minimumContrastRatio: Math.min(...states
+          .map((state) => state.minimumContrastRatio)
+          .filter(Number.isFinite)),
+        contrastViolationCount: states.reduce((total, state) => total + state.contrastViolations.length, 0),
+      }
+    }
+
     let settingsMcpImport = null
     if (baseline.verifyMcpImport) {
       await page.getByRole('button', { name: '工具中心', exact: true }).click()
@@ -2520,6 +2711,7 @@ async function runUiBaseline(browser) {
       settingsChatUiControlNames,
       settingsConditionalControlNames,
       settingsPersonaControlNames,
+      settingsControlNameGate,
       settingsMcpImport,
       settingsConfirmDialog,
       aiSplit,

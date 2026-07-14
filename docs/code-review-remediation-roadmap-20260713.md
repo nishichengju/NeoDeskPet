@@ -1178,6 +1178,13 @@ AI 与能力
 - `requestedSubTab` 初始化改为直接决定初始子页，避免设置导航请求到 Persona 子标签时先短暂显示“角色”页再切换；不改变现有保存、记忆查询或角色切换行为。
 - UI baseline 为 Persona 角色、记忆、召回、文本向量、多模态向量和管理页分别展开真实条件状态，按 role + accessible name 定位 3/16/10/9/5/5 项，共 48 项；25 个场景全部 0 failure、0 console error、无横向或纵向溢出，六张子页截图人工检查无布局回归。`settingsTabs` 增至 13 个用例，全量 85 个测试文件、369 个用例通过；TypeScript、lint、三项脚本检查、Windows unpacked 打包、IPC/媒体 smoke 全部通过。Persona chunk 为 24.54 kB；下一批建立全 Settings 可见表单控件自动门禁，确认默认与条件视图均无缺名控件，再进入对比度审计。
 
+第七十三批进展（2026-07-14）：
+
+- `capture-ui-baseline.mjs` 新增全 Settings 程序化无障碍门禁，覆盖 23 个默认与条件展开状态，扫描所有可见 `input`、`select` 和 `textarea`，并接受 `aria-labelledby`、`aria-label`、关联 `label`、`title` 或按钮值提供的名称。最终共检查 322 个控件，缺名数为 0，后续新增设置控件若未提供程序化名称会直接使基线失败。
+- 同一门禁新增直接渲染文本的 WCAG 对比度计算，共采样 1,937 项；首次审计发现设置导航标签与气泡样式说明分别只有 4.06:1 和 4.22:1，调整 `.ndp-settings-nav-label` 与 `.ndp-style-desc` 文本颜色后，最低对比度提升至 5.08:1，低于 4.5:1 的违规数为 0。气泡设置截图经人工检查，信息层级与布局保持正常。
+- 25 个 UI baseline 场景全部 0 failure、0 console error、无横向或纵向溢出；`npm test` 共 85 个测试文件、369 个用例通过，TypeScript、lint、三项脚本语法检查、Windows unpacked 打包、IPC/媒体 smoke 全部通过，主 CSS 为 42.93 kB。
+- P2-3 的语义控件、键盘与焦点、tabs、reduced motion、live-region、错误关联、Settings 控件命名和文本对比度均已完成，并由自动门禁持续保护。至此强制修复路线图全部收口；后续只剩 P3 产品增强候选，不属于缺陷修复的必做范围。
+
 ## 16. P3 产品增强候选
 
 以下功能不应抢在 P0/P1 前实施：
